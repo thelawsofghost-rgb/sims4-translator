@@ -1,0 +1,15 @@
+# Sims 4 动作/动画包汉化工具 — 配置
+# 复制为 config.yaml 并填写你的 Mods 路径
+
+# Sims 4 Mods 文件夹 (必填)
+# 示例: "C:/Users/你的用户名/Documents/Electronic Arts/The Sims 4/Mods"
+mods_path: ""
+
+# 输出目录 (扫描报告等)
+output_dir: "output"
+
+# 后端 (Phase 1 只用 readonly)
+backend: "readonly"
+
+# 增量扫描缓存 db 名
+cache_db: "mod_index_cache.db"
