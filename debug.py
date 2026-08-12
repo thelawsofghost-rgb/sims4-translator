@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""临时调试 v9: dump 完整索引区原始字节, 人工确认 entry 真实布局"""
+"""临时调试 v10: 定论 entry 大小 (用 header count + index 区全覆盖验证)"""
 import struct
 
 p = "C:/Users/thela/Documents/Electronic Arts/The Sims 4/Mods/2026.4.28/WWLaserAnimations.package"
@@ -10,31 +10,40 @@ with open(p, "rb") as f:
     f.seek(0)
     data = f.read()
 
-idx_off = struct.unpack_from("<I", data, 0x40)[0]
-idx_size = struct.unpack_from("<I", data, 0x2C)[0]
-print(f"idx_off=0x{idx_off:X} ({idx_off}), idx_size=0x{idx_size:X} ({idx_size})")
+# header 候选字段
+c24 = struct.unpack_from("<I", data, 0x24)[0]
+c2c = struct.unpack_from("<I", data, 0x2C)[0]
+c40 = struct.unpack_from("<I", data, 0x40)[0]
+c3c = struct.unpack_from("<I", data, 0x3C)[0]
+print(f"header: 0x24={c24}, 0x2C={c2c}(idx_size), 0x40={c40}(idx_off), 0x3C={c3c}")
 
-# dump 索引区前 128 字节原始
-print("\n=== 索引区前 160 字节原始 hex ===")
-seg = data[idx_off:idx_off+160]
-for i in range(0, min(len(seg), 160), 16):
-    chunk = seg[i:i+16]
-    hexs = " ".join(f"{b:02X}" for b in chunk)
-    asc = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
-    print(f"  +0x{i:03X}: {hexs:<48} {asc}")
+idx_off = c40
+idx_size = c2c
+print(f"idx_off=0x{idx_off:X}, idx_size=0x{idx_size:X}, index区end=偏移+4+{idx_size}")
 
-# 尝试不同 entry 大小解析, 看哪个 type 变化多样
-print("\n=== 尝试 entry 大小 = 24 / 28 / 32 ===")
+# 尝试: 索引起点 = idx_off+4 (跳过4字节padding), 从那里连续解析
+base = idx_off + 4
+remain = idx_off + idx_size - base
+print(f"data区(扣除4字节padding)可用字节: {remain}")
+
 for ENTRY in (24, 28, 32):
+    n = remain // ENTRY
+    leftover = remain % ENTRY
     types = set()
-    first_types = []
-    for i in range(20):
-        off = idx_off + i * ENTRY
-        if off + ENTRY > size:
-            break
-        t = struct.unpack_from("<I", data, off)[0]
+    ok_offsets = True
+    prev_end = 0
+    first = []
+    for i in range(n):
+        off = base + i * ENTRY
+        e = data[off:off+ENTRY]
+        t = struct.unpack_from("<I", e, 0)[0]
+        inst_hi = struct.unpack_from("<I", e, 8)[0]
+        o = struct.unpack_from("<I", e, 0x10)[0] & 0x7FFFFFFF
+        sz = struct.unpack_from("<I", e, 0x14)[0] & 0x7FFFFFFF
         types.add(t)
-        if i < 15:
-            first_types.append(f"0x{t:08X}")
-    print(f"entry={ENTRY}: 前15个 type = {first_types}")
-    print(f"      不同type数(20项内): {len(types)}")
+        if i < 6:
+            first.append(f"t=0x{t:08X} off=0x{o:X} sz={sz}")
+    # 连续性检查: 大部分 type 应 < 0x10000000 (有效ID) 且不重复过多
+    valid_ratio = sum(1 for i in range(n) if 0 < struct.unpack_from("<I", data, base+i*ENTRY)[0] < 0x10000000) / max(n,1)
+    print(f"\nentry={ENTRY}: n={n} (leftover={leftover}) 不同type={len(types)} 有效type比例={valid_ratio:.2f}")
+    print(f"  前6: {first}")
