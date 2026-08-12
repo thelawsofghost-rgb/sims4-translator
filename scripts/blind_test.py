@@ -44,18 +44,47 @@ def analyze(pkg: str):
         backend = get_backend("readonly").open(p)
         idx2 = backend.read_index()
         entries = idx2.entries
-        # 读候选 XML (模拟 Stage2)
+        # 读候选 XML (模拟 Stage2, 含 WW_ANIM_XML zlib 解压)
+        import zlib as _z
         xml_texts = []
         for e in entries:
-            if RESOURCE_TYPES.is_snippet(e.type_id) or RESOURCE_TYPES.is_tuning_xml(e.type_id):
+            if (RESOURCE_TYPES.is_snippet(e.type_id)
+                    or RESOURCE_TYPES.is_tuning_xml(e.type_id)
+                    or RESOURCE_TYPES.is_known_safely(e.type_id, "WW_ANIM_XML")):
                 data = backend.read_small_resource(e)
-                if data:
+                if not data:
+                    continue
+                if data[:2] in (b"\x78\x9c", b"\x78\xda", b"\x78\x01"):
+                    try:
+                        data = _z.decompress(data)
+                    except Exception:
+                        pass
+                try:
                     xml_texts.append(data.decode("utf-8", errors="ignore"))
+                except Exception:
+                    pass
         stbl_present = any(RESOURCE_TYPES.is_stbl(e.type_id) for e in entries)
         has_clip = any(RESOURCE_TYPES.is_clip(e.type_id) for e in entries)
+        clip_names = set()
+        for e in entries:
+            if RESOURCE_TYPES.is_clip(e.type_id):
+                cd = backend.read_small_resource(e)
+                if cd:
+                    import re as _re
+                    for enc in ("utf-8", "utf-16-le", "latin-1"):
+                        try:
+                            t = cd.decode(enc, errors="ignore")
+                        except Exception:
+                            continue
+                        for m in _re.finditer(r"[A-Za-z][A-Za-z0-9_\-:\s]{2,80}", t):
+                            cand = m.group().strip()
+                            if cand and _re.search(r"[A-Za-z]{3}", cand) \
+                               and sum(1 for ch in cand if ch.isalnum() or ch in "_:- ") / len(cand) > 0.7:
+                                clip_names.add(cand)
 
         cls = Classifier().classify_from_texts(
-            type_ids=type_ids, xml_texts=xml_texts, stbl_present=stbl_present)
+            type_ids=type_ids, xml_texts=xml_texts, stbl_present=stbl_present,
+            clip_names=clip_names)
 
         print(f"  分类: {cls.level}")
         print(f"    证据: {cls.evidence}")

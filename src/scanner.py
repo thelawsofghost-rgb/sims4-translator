@@ -17,6 +17,7 @@ Phase 1 严格只读:
 import csv
 import os
 import time
+import zlib
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -173,11 +174,14 @@ class Scanner:
 
                 # 读取小体积 XML 文本 (候选才有)
                 xml_texts = self._read_candidate_xmls(backend, idx.entries)
+                # 尽力提取 CLIP 名, 用于 CONFIRMED_WW 的 animation_clip_name 引用校验
+                clip_names = self._read_clip_names(backend, idx.entries)
 
                 cls = self.classifier.classify_from_texts(
                     type_ids=type_ids,
                     xml_texts=xml_texts,
                     stbl_present=stbl_present,
+                    clip_names=clip_names,
                 )
 
                 # 提取可见文本
@@ -244,15 +248,50 @@ class Scanner:
     def _read_candidate_xmls(self, backend, entries, max_xml=512 * 1024) -> List[str]:
         texts = []
         for e in entries:
-            # 只读已验证的 XML-ish 类型的小资源
-            if RESOURCE_TYPES.is_snippet(e.type_id) or RESOURCE_TYPES.is_tuning_xml(e.type_id):
+            # 只读已验证的 XML-ish 类型的小资源: Snippet / Tuning XML / WW_ANIM_XML
+            if (RESOURCE_TYPES.is_snippet(e.type_id)
+                    or RESOURCE_TYPES.is_tuning_xml(e.type_id)
+                    or RESOURCE_TYPES.is_known_safely(e.type_id, "WW_ANIM_XML")):
                 data = backend.read_small_resource(e, max_bytes=max_xml)
-                if data:
+                if not data:
+                    continue
+                # WW_ANIM_XML 是 zlib 压缩 (头 0x78); 解压后再解码
+                if data[:2] in (b"\x78\x9c", b"\x78\xda", b"\x78\x01"):
                     try:
-                        texts.append(data.decode("utf-8", errors="ignore"))
+                        data = zlib.decompress(data)
                     except Exception:
                         pass
+                try:
+                    texts.append(data.decode("utf-8", errors="ignore"))
+                except Exception:
+                    pass
         return texts
+
+    def _read_clip_names(self, backend, entries, max_bytes=1024 * 1024) -> set:
+        """尽力从 CLIP 资源中提取 ClipName (可能读取失败/不可靠)。
+        仅用于 CONFIRMED_WW 的 animation_clip_name 引用校验; 提取不到时不降级判定。"""
+        import re as _re
+        names = set()
+        for e in entries:
+            if not RESOURCE_TYPES.is_clip(e.type_id):
+                continue
+            data = backend.read_small_resource(e, max_bytes=max_bytes)
+            if not data:
+                continue
+            # FLB/CLIP 常含可读名 (可能 UTF-8 或 UTF-16). 提取长度>=3 的单词串, 尽量过滤
+            for enc in ("utf-8", "utf-16-le", "latin-1"):
+                try:
+                    txt = data.decode(enc, errors="ignore")
+                except Exception:
+                    continue
+                # 收集含字母的连续串 (含标点/下划线), 长度 >= 3
+                for m in _re.finditer(r"[A-Za-z][A-Za-z0-9_\-:\s]{2,80}", txt):
+                    cand = m.group().strip()
+                    # 过滤纯二进制噪声: 出现 >25% 非常见字符则跳过
+                    if cand and _re.search(r"[A-Za-z]{3}", cand) \
+                       and sum(1 for ch in cand if ch.isalnum() or ch in "_:- ") / len(cand) > 0.7:
+                        names.add(cand)
+        return names
 
     def _count_class(self, level: str):
         self.stats[level] = self.stats.get(level, 0) + 1

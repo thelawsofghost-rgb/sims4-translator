@@ -73,6 +73,11 @@ WW_STRUCT_FIELDS = [
     WW_ANIM_TAGS,
 ]
 
+# 从 WW XML 提取 animation_clip_name="..." 的值 (引用校验用)
+_CLIP_REF_RE = re.compile(r'<T\s+n="animation_clip_name"[^>]*>\s*(.*?)\s*</T>', re.S)
+# 脱衣舞变体: dancer_animation_clip_name
+_DANCER_CLIP_REF_RE = re.compile(r'<T\s+n="dancer_animation_clip_name"[^>]*>\s*(.*?)\s*</T>', re.S)
+
 
 def _has_clip(type_ids: set[int]) -> bool:
     """CLIP 类型是否已核实且存在。未核实则视为不可靠 → False (安全偏漏)。"""
@@ -92,7 +97,9 @@ def _has_world_xml_signal(type_ids: set[int], debug_to=None) -> bool:
     注意: 即使有这些 XML 类型, 仍需解析内容确认 WW 字段。此函数仅做类型级初筛。"""
     # 类型级: 看是否有已核实的 XML-ish 类型
     for tid in type_ids:
-        if RESOURCE_TYPES.is_snippet(tid) or RESOURCE_TYPES.is_tuning_xml(tid):
+        if (RESOURCE_TYPES.is_snippet(tid)
+                or RESOURCE_TYPES.is_tuning_xml(tid)
+                or RESOURCE_TYPES.is_known_safely(tid, "WW_ANIM_XML")):
             return True
     # Binary XML 身份未核实, 不作为强信号
     return False
@@ -109,6 +116,7 @@ class Classifier:
         type_ids: set[int],
         xml_texts: List[str],
         stbl_present: bool,
+        clip_names: Optional[set] = None,
     ) -> Classification:
         """
         主分类入口。
@@ -117,6 +125,7 @@ class Classifier:
             type_ids: 该 package 的所有资源类型集合
             xml_texts: 提取到的 XML/Snippet 文本内容 (用于确认 WW 字段)
             stbl_present: 是否存在 STBL
+            clip_names: 从 CLIP 资源尽力提取的 ClipName 集合 (可为 None/空)
 
         Returns:
             Classification
@@ -138,6 +147,27 @@ class Classifier:
                 if f in txt and f not in ww_struct_found:
                     ww_struct_found.append(f)
 
+        # 提取 XML 中的 animation_clip_name 值 (引用校验用, 含脱衣舞变体 dancer_animation_clip_name)
+        xml_clip_refs = set()
+        if clip_names is not None:
+            for txt in xml_texts:
+                for m in _CLIP_REF_RE.finditer(txt):
+                    val = m.group(1).strip()
+                    if val:
+                        xml_clip_refs.add(val)
+                for m in _DANCER_CLIP_REF_RE.finditer(txt):
+                    val = m.group(1).strip()
+                    if val:
+                        xml_clip_refs.add(val)
+
+        # 校验: XML 引用的 animation_clip_name 是否至少一个能匹配包内 CLIP 名
+        clip_ref_verified = False
+        if clip_names and xml_clip_refs:
+            for ref in xml_clip_refs:
+                if any(ref in cn or cn in ref for cn in clip_names):
+                    clip_ref_verified = True
+                    break
+
         # ---- Pose Pack 信号 (简化): 有 snippet + clip + stbl, 无 WW 字段 ----
         has_snippet_xml = _has_world_xml_signal(type_ids)
 
@@ -146,6 +176,13 @@ class Classifier:
         if ww_present and len(ww_struct_found) >= 1 and has_clip:
             cls.level = ConfLevel.CONFIRMED_WW
             cls.evidence = [WW_ANIM_DISPLAY_RAW, WW_ANIM_DISPLAY_OLD, *ww_struct_found, "CLIP"]
+            # 若成功提取到 CLIP 名且 XML 引用可匹配, 记录为强佐证; 否则不影响 (尽量验证)
+            if clip_ref_verified:
+                cls.evidence.append("clip_ref_verified")
+            if clip_names and not clip_ref_verified:
+                # 提取到 CLIP 名但 XML 引用无法匹配 → 仍 CONFIRMED (WW XML 结构已足够强),
+                # 但记录警告, 供人工复查 False Positive
+                cls.evidence.append("clip_ref_WARN_no_match")
             cls.reason = "WW Animation XML (显示名) + WW 结构字段 + CLIP"
             return cls
 

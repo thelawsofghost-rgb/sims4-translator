@@ -60,9 +60,13 @@ _RESOURCE_TYPES: Dict[int, ResourceType] = {
         notes="动画属性 RCOL, 与 CLIP 一对一配对 (225~272 字节小资源)。辅助信号。",
     ),
     0x7DF2169C: ResourceType(
-        0x7DF2169C, "WW_ANIM_XML", verified=False,
-        source="实测 WWLaserAnimations.package (2026-08-12)",
-        notes="疑似 WW 动画定义资源 (含 animation_raw_display_name 等), 待核实内容。",
+        0x7DF2169C, "WW_ANIM_XML", verified=True,
+        source="实测 WW_0nizu_Animations.package (2026-08-12)",
+        notes=("zlib 压缩 (头 0x78) 的 WW 动画 XML。两种变体: "
+               "① WickedWhimsAnimationPackage (animation_raw_display_name / animation_clip_name / "
+               "animation_actors_list / animation_category / animation_tags / animation_locations / "
+               "animation_author); ② StripClubDanceAnimationPackage (raw_display_name / "
+               "dancer_animation_clip_name / dance_type / dancer_gender)。须先 zlib 解压再解析。"),
     ),
     # ---- 文本 ----
     0x220557DA: ResourceType(
@@ -146,11 +150,12 @@ class _ResourceTypeRegistry:
         return self.is_known_safely(type_id, "TUNING_XML")
 
     def is_animation_xml(self, type_id: int) -> bool:
-        """WW 动画 XML 可能以 Snippet 或 Tuning XML 或 Binary XML 形式存在。
+        """WW 动画 XML 可能以 Snippet / Tuning XML / Binary XML / WW_ANIM_XML 形式存在。
         仅当这些类型已核实才判定, 否则视为不可靠(不参与判定)。"""
         return (self.is_snippet(type_id)
                 or self.is_tuning_xml(type_id)
-                or self.is_known_safely(type_id, "BINARY_XML"))
+                or self.is_known_safely(type_id, "BINARY_XML")
+                or self.is_known_safely(type_id, "WW_ANIM_XML"))
 
 
 # 全局单例
