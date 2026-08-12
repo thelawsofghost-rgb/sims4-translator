@@ -36,29 +36,52 @@ class ReferenceIndexReader:
 
     def parse(self):
         with open(self.path, "rb") as f:
-            header = f.read(32)
+            header = f.read(0x44)
+            if len(header) < 0x44:
+                return None, "too-short"
             if header[0:4] != self.DBPF_MAGIC:
                 return None, "magic"
             major = struct.unpack("<I", header[4:8])[0]
             if major not in (2, 3, 4):
                 return None, f"major={major}"
-            count = struct.unpack("<I", header[16:20])[0]
-            idx_off = struct.unpack("<I", header[20:24])[0]
-            # 独立判定 offset (不沿用 FastIndexReader 的 rel 逻辑, 用文件大小->offset)
+            count = struct.unpack("<I", header[0x24:0x28])[0]
+            idx_size = struct.unpack("<I", header[0x2C:0x30])[0]
+            idx_off = struct.unpack("<I", header[0x40:0x44])[0]
+            # 独立判定 offset (不沿用 FastIndexReader 的 rel 逻辑)
             f.seek(0, 2)
             fsize = f.tell()
-            # 若绝对偏移合理用绝对, 否则尝试相对
             off = idx_off
-            if off + count * 20 > fsize:
-                off = fsize - idx_off
-            f.seek(off)
-            raw = f.read(count * 20)
-            entries = []
-            for i in range(count):
-                e = raw[i*20:(i+1)*20]
-                t, g, hi, lo, o = struct.unpack("<IIIII", e[:20])
-                entries.append((t, g, (hi << 32) | lo, o & 0x7FFFFFFF))
-            return {"major": major, "count": count, "entries": entries}, None
+            # 若绝对偏移不合理, 尝试相对文件末尾
+            if off + idx_size > fsize:
+                off = fsize - idx_off if 0 <= fsize - idx_off < fsize else off
+            # 独立实现: 索引区可能带 4 字节 padding, 尝试从 off 和 off+4 对齐, 选更合理
+            PAD = 4
+            ENTRY = 32
+            best = None
+            for start in (off, off + PAD):
+                try:
+                    raw = b""
+                    f.seek(start)
+                    raw = f.read(count * ENTRY)
+                except Exception:
+                    continue
+                if len(raw) < count * ENTRY:
+                    continue
+                entries = []
+                ok = True
+                for i in range(count):
+                    e = raw[i*ENTRY:(i+1)*ENTRY]
+                    t, g, hi, lo, o, s = struct.unpack("<IIIIII", e[:24])
+                    if t == 0:
+                        ok = False
+                        break
+                    entries.append((t, g, (hi << 32) | lo))
+                if ok and entries:
+                    best = entries
+                    break
+            if best is None:
+                return None, f"layout-count={count}"
+            return {"major": major, "count": len(best), "entries": best}, None
 
 
 def compare_one(path):
