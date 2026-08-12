@@ -264,6 +264,14 @@ class Scanner:
                    for t in type_ids)
 
     def _read_candidate_xmls(self, backend, entries, max_xml=512 * 1024) -> List[str]:
+        """读取候选 XML 文本, 供分类器使用。
+
+        【重要】UTF-8/UTF-16 解码成功 ≠ XML 合法。
+        只有被真正 XML parser (xml.etree) 成功解析成元素树的资源才被返回;
+        解析失败 (= 二进制乱码 / 非 XML 内容) 的资源一律丢弃, 不得参与分类。
+        这防止二进制垃圾被当作文本喂给分类器造成误判。
+        """
+        import xml.etree.ElementTree as _ET
         texts = []
         for e in entries:
             # 只读已验证的 XML-ish 类型的小资源: Snippet / Tuning XML / WW_ANIM_XML
@@ -279,10 +287,18 @@ class Scanner:
                         data = zlib.decompress(data)
                     except Exception:
                         pass
-                try:
-                    texts.append(data.decode("utf-8", errors="ignore"))
-                except Exception:
-                    pass
+                # 尝试编码并校验为真实 XML; 任一失败则丢弃
+                for enc in ("utf-8", "utf-16-le"):
+                    try:
+                        raw = data.decode(enc)
+                    except Exception:
+                        continue
+                    try:
+                        _ET.fromstring(raw)
+                    except Exception:
+                        continue  # 解码了但不是合法 XML → 丢弃, 不参与分类
+                    texts.append(raw)
+                    break
         return texts
 
     def _read_clip_names(self, backend, entries, max_bytes=1024 * 1024) -> set:
