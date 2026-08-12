@@ -40,48 +40,64 @@ def extract_stbl_strings(stbl_bytes: bytes) -> List[Tuple[int, str]]:
     """
     从 STBL 二进制中提取 (string_id, text) 列表。
     仅用于显示文本提取; 绝不修改 STBL。
-    STBL 布局 (Sims 4):
-      magic 'STBL' (4)
-      version (4)
-      reserved (4)
-      string count (4)
-      then entries: 每项 hash(8) offset(4) 指向 string
+
+    实测 (2026-08-12, WWLaserAnimations.package):
+      - 资源体整体为 zlib 压缩 (头 0x78 0x9C)
+      - 解压后: 'STBL' magic + 版本 + 记录区
+      - 记录区含多条可读文本 (动画动作名), 文本以单字节 ASCII / UTF-8 存储
+      - 不同类型 STBL 文本编码可能为 UTF-16LE 或单字节 ASCII
+
+    稳健策略: 优先尝试解析为 zlib 并提取可读字符串; 无法解压时
+    回退到在原始字节中扫描可读文本 (兼容未压缩与 UTF-16LE 形态)。
     """
-    if not stbl_bytes or len(stbl_bytes) < 16:
+    import re as _re
+    import zlib as _zlib
+    import struct as _struct
+
+    def _scan(data: bytes) -> List[Tuple[int, str]]:
+        out = []
+        # 单字节可读串 (ASCII/UTF-8)
+        for m in _re.finditer(rb"[ -~]{4,}", data):
+            s = m.group().decode("ascii", errors="ignore")
+            if s and not _looks_like_binary_garbage(s):
+                out.append((0, s))
+        # UTF-16LE 可读串
+        try:
+            txt = data.decode("utf-16-le", errors="ignore")
+        except Exception:
+            txt = ""
+        for m in _re.finditer(r"[ -~]{4,}", txt):
+            s = m.group()
+            if s and not _looks_like_binary_garbage(s):
+                out.append((0, s))
+        return out
+
+    if not stbl_bytes:
         return []
     try:
-        import struct
-        if stbl_bytes[0:4] != b"STBL":
-            return []
-        version = struct.unpack("<I", stbl_bytes[4:8])[0]
-        if version not in (1, 2, 3, 4, 5):
-            return []
-        count = struct.unpack("<I", stbl_bytes[12:16])[0]
-        out = []
-        # 每项 12 字节在 offset 16 开始
-        # item: hash(8) offset(4)
-        pos = 16
-        for i in range(count):
-            if pos + 12 > len(stbl_bytes):
-                break
-            s_hash = struct.unpack("<Q", stbl_bytes[pos:pos+8])[0]
-            s_off = struct.unpack("<I", stbl_bytes[pos+8:pos+12])[0]
-            pos += 12
-            # string 在 s_off 处, 以 \0 或 \x00 结束
-            if s_off >= len(stbl_bytes):
-                continue
-            end = stbl_bytes.find(b"\x00", s_off)
-            if end == -1:
-                end = len(stbl_bytes)
+        data = stbl_bytes
+        # 尝试 zlib 解压 (zlib 头为 78 9c/da/01 等; 用 startswith 更稳)
+        if data[:2] == b"\x78\x9c" or data[:2] == b"\x78\xda" or data[:2] == b"\x78\x01":
             try:
-                text = stbl_bytes[s_off:end].decode("utf-16-le", errors="ignore")
+                data = _zlib.decompress(data)
             except Exception:
-                text = stbl_bytes[s_off:end].decode("utf-8", errors="ignore")
-            if text:
-                out.append((s_hash, text))
-        return out
+                pass
+        # 去掉 STBL 头, 只处理正文
+        if data[:4] == b"STBL":
+            body = data[4:]
+        else:
+            body = data
+        return _scan(body)
     except Exception:
         return []
+
+
+def _looks_like_binary_garbage(s: str) -> bool:
+    """过滤明显是二进制噪声的 '可读' 片段 (过多控制符/异常字符)。"""
+    if not s:
+        return True
+    bad = sum(1 for ch in s if (ord(ch) < 0x20 and ch not in "\t\n") or ord(ch) == 0x7F)
+    return bad / max(1, len(s)) > 0.2
 
 
 def is_chinese(text: str) -> bool:
