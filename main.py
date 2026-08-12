@@ -15,9 +15,11 @@ import sys
 import time
 from pathlib import Path
 
-# 允许从任何目录运行
-ROOT = Path(__file__).resolve().parent.parent
+# 项目根 = main.py 所在目录; src 在其下
+ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
+# 确保从项目根运行
+os.chdir(ROOT)
 
 from scanner import Scanner
 from config import load_config
