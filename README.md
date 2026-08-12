@@ -113,6 +113,29 @@ python scripts/verify_index.py "C:/.../Mods"   # 批量
 - 不解析 CLIP 动画内容 (只判断存在性)
 - 不计算全文件 hash
 
+## CONFIRMED_POSE / CONFIRMED_WW 语义 (重要)
+
+`CONFIRMED_POSE` 与 `CONFIRMED_WW` 是【内容包含】判定, **不是【类型排他】判定**。
+
+- **CONFIRMED_POSE** = 该 package 内部确认存在**有效 Pose Player Pose Pack 内容**
+  (即解析出的 XML 树中含 `c="PosePackInstance"` / `m="poseplayer"` / `s4s_mod_type=POSE_PACK`
+  / `pose_list` / 有效 `pose_name`/`pose_display_name` entries)。
+  它**不代表**“整个 package 只能是 Pose Mod”——一个包可同时含功能/互动内容与 Pose Pack。
+- **CONFIRMED_WW** = 该 package 确认包含 WickedWhims 动画内容, 同样不排他。
+
+**Phase 2 翻译必须遵守**:
+1. 只沿已验证的 `PosePackInstance` → `pose_list` → `pose_display_name`/`pose_name` 引用关系
+   精确翻译 Pose Player 的玩家可见文字。
+2. 不能因为 package 被标为 `CONFIRMED_POSE` 就翻译整个 STBL——必须逐条追溯引用关系。
+3. `CONFIRMED_WW` / `CONFIRMED_POSE` 只决定“可翻译候选的范围锚点”, 不决定“翻译全部”。
+
+## XML 解析校验 (主流程强制)
+
+`scanner._read_candidate_xmls` 读取候选 XML 时, **解码成功 ≠ XML 合法**。
+只有被真正 XML parser (`xml.etree`) 成功解析成元素树的资源才参与分类;
+二进制乱码 / 残缺 / 纯文本非 XML 一律丢弃, 绝不喂给分类器。
+(该行为经 5 用例逻辑测试验证)
+
 ## 核心原则
 
 ```
