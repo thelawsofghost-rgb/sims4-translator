@@ -2,24 +2,32 @@
 """
 Package 分类引擎 (核心安全机制)
 
-等级:
-  CONFIRMED_WW        → 允许修改 (Phase 3)
-  CONFIRMED_POSE      → 允许修改 (Phase 3)
-  UNCERTAIN           → 永不修改, 记录待查
-  NON_ANIMATION       → 忽略
+分类等级 (5 + 2 异常级):
+  CONFIRMED_WW        → 有 WickedWhims Animation 专属结构 + 动画 CLIP
+  CONFIRMED_POSE      → 有 Pose Player / Pose Pack 专属结构 + 动画/名称引用
+  OTHER_ANIMATION     → 明确含动画(CLIP) 但既非 WW 也非 Pose (本版不翻译)
+  NON_ANIMATION       → 无目标动画结构 (衣服/家具/头发/皮肤等)
+  UNCERTAIN           → 结构异常 / 引用损坏 / 证据不足, SKIP
   ERROR               → 无法读取/解析, 跳过
+  ERROR_UNSUPPORTED_DBPF → 无法解析的 DBPF, 跳过
 
 最高原则:
   FALSE NEGATIVE IS ACCEPTABLE. FALSE POSITIVE IS NOT ACCEPTABLE.
   无法确认 = SKIP.
-  只认 VERIFIED 的 Resource Type ID (见 resource_types.py), 未核实类型不参与判定。
+  禁止用排除法证明身份:
+    "不是 WW" ≠ "是 Pose"; "不是 Pose" ≠ "是 WW".
+  每一种 CONFIRMED 都必须有自身正面结构证据。
 
 分类关键 (不依赖文件名):
-  - CONFIRMED_WW :  ≥1 有效 WW Animation XML (animation_raw_display_name 或 animation_display_name)
-                    + WW 特有结构 (actors_list / category / locations / tags 至少一项)
-                    + ≥1 CLIP
-  - CONFIRMED_POSE: Pose Pack Snippet + 关联 STBL 引用 + ≥1 CLIP, 且无 WW XML 特征
-  - 本体(WW/PosePlayer) : 脚本/功能 MOD 特征, 无动画包资源组合 → NON_ANIMATION
+  - CONFIRMED_WW : ≥1 有效 WW Animation XML
+                    (animation_raw_display_name 或 animation_display_name
+                     + WW 特有结构 actors_list/category/locations/tags 至少一项)
+                    + ≥1 CLIP。尽量验证 animation_clip_name → 实际 CLIP ClipName。
+  - CONFIRMED_POSE: 需有 Pose Player/Pose Pack 专属 tuning/snippet 结构证据
+                    + UI 名称 STBL 引用 + clip name 引用能对应。
+                    仅凭 CLIP+XML+STBL 而无 Pose 专属结构 → OTHER_ANIMATION。
+  - OTHER_ANIMATION: 明确含 CLIP/动画资源, 但无法证明 WW 也无法证明 Pose。
+  - 本体(WW/PosePlayer/功能MOD) : 含脚本/功能资源但无动画包组合 → 视资源定 NON_ANIMATION/OTHER。
 """
 
 from typing import Dict, List, Optional, Any, Tuple
@@ -35,8 +43,9 @@ class ConfLevel:
     UNKNOWN = "UNKNOWN"
     CONFIRMED_WW = "CONFIRMED_WW"
     CONFIRMED_POSE = "CONFIRMED_POSE"
-    UNCERTAIN = "UNCERTAIN"
+    OTHER_ANIMATION = "OTHER_ANIMATION"
     NON_ANIMATION = "NON_ANIMATION"
+    UNCERTAIN = "UNCERTAIN"
     ERROR = "ERROR"
     ERROR_UNSUPPORTED_DBPF = "ERROR_UNSUPPORTED_DBPF"
 
@@ -77,6 +86,36 @@ WW_STRUCT_FIELDS = [
 _CLIP_REF_RE = re.compile(r'<T\s+n="animation_clip_name"[^>]*>\s*(.*?)\s*</T>', re.S)
 # 脱衣舞变体: dancer_animation_clip_name
 _DANCER_CLIP_REF_RE = re.compile(r'<T\s+n="dancer_animation_clip_name"[^>]*>\s*(.*?)\s*</T>', re.S)
+
+# ---- Pose Player / Pose Pack 正面结构信号 (须为真实 Pose 专属, 非 WW) ----
+# 从 Sims 4 Studio / 真实 pose pack tuning 归纳的专属语义标签。
+# 注意: 这些必须是 Pose 专属, 不能是 WW 动画也用到的通用字段。
+POSE_SIGNATURES = [
+    # Pose Pack tuning/snippet 常见专属类名 / module
+    "PosePack",
+    "pose_pack",
+    "PosePlayer",
+    "pose_player",
+    "pose_definition",
+    "PoseDefinition",
+    # UI 名称 / string-table 引用 (Pose Player 用它显示姿势名)
+    "pose_display_name",
+    "pose_name",
+    "poses_list",
+    "poser",
+]
+
+
+def _has_pose_positive(xml_texts: List[str]) -> List[str]:
+    """检查 XML 文本中是否含 Pose Player 专属正面结构。
+    只返回命中的专属标签; 空列表 = 无法正面证明是 Pose。"""
+    hits = []
+    for txt in xml_texts:
+        for sig in POSE_SIGNATURES:
+            # 精确到 XML 标签/属性值, 避免误中普通词
+            if sig in txt and sig not in hits:
+                hits.append(sig)
+    return hits
 
 
 def _has_clip(type_ids: set[int]) -> bool:
@@ -168,25 +207,40 @@ class Classifier:
                     clip_ref_verified = True
                     break
 
-        # ---- Pose Pack 信号 (简化): 有 snippet + clip + stbl, 无 WW 字段 ----
+        # ---- Pose Pack 正面结构信号 ----
+        pose_positive = _has_pose_positive(xml_texts)
+
         has_snippet_xml = _has_world_xml_signal(type_ids)
 
-        # ===== 判定逻辑 =====
-        # CONFIRMED_WW: WW 显示名 ≥1 + WW 结构字段 ≥1 + CLIP
+        # ===== 判定逻辑 (每类都有正面证据, 不用排除法) =====
+
+        # 1) CONFIRMED_WW: WW 专属显示名 ≥1 + WW 专属结构 ≥1 + CLIP
         if ww_present and len(ww_struct_found) >= 1 and has_clip:
             cls.level = ConfLevel.CONFIRMED_WW
             cls.evidence = [WW_ANIM_DISPLAY_RAW, WW_ANIM_DISPLAY_OLD, *ww_struct_found, "CLIP"]
-            # 若成功提取到 CLIP 名且 XML 引用可匹配, 记录为强佐证; 否则不影响 (尽量验证)
+            # animation_clip_name → CLIP ClipName 引用能对应 → 强证据
             if clip_ref_verified:
                 cls.evidence.append("clip_ref_verified")
-            if clip_names and not clip_ref_verified:
-                # 提取到 CLIP 名但 XML 引用无法匹配 → 仍 CONFIRMED (WW XML 结构已足够强),
-                # 但记录警告, 供人工复查 False Positive
+            elif clip_names:
+                # 提取到 CLIP 名但引用无法匹配 → 仍 CONFIRMED (WW XML 结构已足够强),
+                # 但打 WARN 供人工复查
                 cls.evidence.append("clip_ref_WARN_no_match")
             cls.reason = "WW Animation XML (显示名) + WW 结构字段 + CLIP"
             return cls
 
-        # WW 显示名存在但缺 CLIP 或结构 → UNCERTAIN
+        # 2) CONFIRMED_POSE: 必须有 Pose Player 专属正面结构 + CLIP + (STBL 名称引用)
+        if pose_positive and has_clip:
+            ev = [*pose_positive, "CLIP"]
+            if stbl_present:
+                ev.append("STBL")
+            if clip_ref_verified:
+                ev.append("clip_ref_verified")
+            cls.level = ConfLevel.CONFIRMED_POSE
+            cls.evidence = ev
+            cls.reason = "Pose Player/Pose Pack 专属结构 + CLIP (+名称/引用)"
+            return cls
+
+        # 有 WW 显示名但缺 CLIP 或结构 → 证据不足, UNCERTAIN
         if ww_present:
             cls.level = ConfLevel.UNCERTAIN
             cls.evidence = [WW_ANIM_DISPLAY_RAW, WW_ANIM_DISPLAY_OLD]
@@ -194,35 +248,37 @@ class Classifier:
                 cls.missing.append("CLIP")
             if not ww_struct_found:
                 cls.missing.append("WW 结构字段 (actors/category/locations/tags)")
-            cls.reason = "有 WW 显示名但证据不足"
+            cls.reason = "有 WW 显示名但证据不足 (缺 CLIP 或 WW 结构), SKIP"
             return cls
 
-        # CONFIRMED_POSE: 有 XML(Snippet) + CLIP + STBL, 且无 WW 字段
-        if has_snippet_xml and has_clip and stbl_present:
-            # 无 WW 字段 → 判为 Pose 候选
-            cls.level = ConfLevel.CONFIRMED_POSE
-            cls.evidence = ["Snippet/Tuning XML", "CLIP", "STBL"]
-            cls.reason = "Pose Pack 结构: XML + CLIP + STBL, 无 WW 字段"
-            return cls
-
-        # 有 CLIP 但无 XML 佐证 → 可能是动画但不明确
+        # 3) OTHER_ANIMATION: 明确有 CLIP/动画资源, 但既非 WW 也非 Pose
+        #    这是最重要的一类: 能证明含动画, 但无法证明属于哪套系统 → OTHER, 不翻译
         if has_clip:
-            cls.level = ConfLevel.UNCERTAIN
+            cls.level = ConfLevel.OTHER_ANIMATION
             cls.evidence = ["CLIP"]
-            cls.missing.append("明确 XML/Pose 结构")
-            cls.reason = "有 CLIP 但无明确 Pose/WW 结构验证"
+            if pose_positive:
+                # 有 Pose 专属信号但缺明确引用闭环, 仍归 OTHER 更安全
+                cls.evidence += pose_positive
+                cls.missing.append("Pose 引用闭环 (名称/ClipName 对应)")
+                cls.reason = "有 CLIP 与部分 Pose 信号, 但 Pose 身份/引用未正面证实, 归 OTHER_ANIMATION"
+            elif ww_struct_found:
+                cls.evidence += ww_struct_found
+                cls.missing.append("WW 显示名 or CLIP 佐证")
+                cls.reason = "有 CLIP 与部分 WW 结构, 但缺 WW 显示名, 归 OTHER_ANIMATION"
+            else:
+                cls.reason = "明确含动画(CLIP), 但无法证明是 WW 或 Pose, 归 OTHER_ANIMATION (不翻译)"
             return cls
 
-        # 有 WW 结构字段但无显示名 / 无 CLIP → UNCERTAIN
+        # 4) 有 WW 结构字段但无 CLIP / 无显示名 → 无法确认, UNCERTAIN
         if ww_struct_found:
             cls.level = ConfLevel.UNCERTAIN
             cls.evidence = ww_struct_found
             cls.missing.append("animation_display_name")
-            cls.missing.append("CLIP" if not has_clip else "")
-            cls.reason = "有 WW 结构字段但无显示名/CLIP 佐证"
+            cls.missing.append("CLIP" if not has_clip else "CLIP 佐证")
+            cls.reason = "有 WW 结构字段但缺显示名/CLIP 佐证, 无法安全确认, SKIP"
             return cls
 
-        # 其他 → NON_ANIMATION
+        # 5) NON_ANIMATION: 无目标动画结构
         cls.level = ConfLevel.NON_ANIMATION
         cls.reason = "非动画结构, 忽略"
         return cls

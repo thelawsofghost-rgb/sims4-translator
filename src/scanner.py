@@ -52,6 +52,7 @@ class Scanner:
             "disk_size_gb": 0.0,
             ConfLevel.CONFIRMED_WW: 0,
             ConfLevel.CONFIRMED_POSE: 0,
+            ConfLevel.OTHER_ANIMATION: 0,
             ConfLevel.UNCERTAIN: 0,
             ConfLevel.NON_ANIMATION: 0,
             ConfLevel.ERROR: 0,
@@ -425,6 +426,7 @@ class Scanner:
             "",
             f"{ConfLevel.CONFIRMED_WW}: {s.get(ConfLevel.CONFIRMED_WW, 0)}",
             f"{ConfLevel.CONFIRMED_POSE}: {s.get(ConfLevel.CONFIRMED_POSE, 0)}",
+            f"{ConfLevel.OTHER_ANIMATION}: {s.get(ConfLevel.OTHER_ANIMATION, 0)}",
             f"{ConfLevel.UNCERTAIN}: {s.get(ConfLevel.UNCERTAIN, 0)}",
             f"{ConfLevel.NON_ANIMATION}: {s.get(ConfLevel.NON_ANIMATION, 0)}",
             f"{ConfLevel.ERROR}: {s.get(ConfLevel.ERROR, 0)}",
@@ -452,7 +454,8 @@ class Scanner:
         ev_lines.append(list_verified_ids())
         ev_lines.append("")
         for row in self.scan_rows:
-            if row["confidence_level"] in (ConfLevel.CONFIRMED_WW, ConfLevel.CONFIRMED_POSE, ConfLevel.UNCERTAIN):
+            if row["confidence_level"] in (ConfLevel.CONFIRMED_WW, ConfLevel.CONFIRMED_POSE,
+                                            ConfLevel.OTHER_ANIMATION, ConfLevel.UNCERTAIN):
                 ev_lines.append(f"[{row['confidence_level']}] {row['package_path']}")
                 ev_lines.append(f"  依据: {row.get('classification_reason','')}")
                 ev_lines.append(f"  CLIP: {row.get('clip_present')} WWXML: {row.get('ww_xml_present')} Pose: {row.get('pose_snippet_present')} STBL: {row.get('stbl_present')}")

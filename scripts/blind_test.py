@@ -65,6 +65,12 @@ def analyze(pkg: str):
                     pass
         stbl_present = any(RESOURCE_TYPES.is_stbl(e.type_id) for e in entries)
         has_clip = any(RESOURCE_TYPES.is_clip(e.type_id) for e in entries)
+
+        # 调试打印: 候选 XML 原文 (截断), 用于人工确认 Pose/WW 专属结构
+        if "--xml" in sys.argv:
+            for i, txt in enumerate(xml_texts):
+                head = txt[:600].replace("\n", " ")
+                print(f"  [XML {i}] {head}")
         clip_names = set()
         for e in entries:
             if RESOURCE_TYPES.is_clip(e.type_id):
