@@ -17,6 +17,15 @@ for r in rows:
         if n >= 12:
             break
 
+print("\n--- 前 12 条 PLACEHOLDER_NO_DISPLAY (display=0x0 作者未设名, 非失败) ---")
+n = 0
+for r in rows:
+    if r["status"] == "PLACEHOLDER_NO_DISPLAY":
+        print(f"  disp={r['display_ref']!r} | {r['reason']} | pkg={r['package_path'].split(chr(92))[-1][:45]}")
+        n += 1
+        if n >= 12:
+            break
+
 print("\n--- 前 12 条 REF_FAIL ---")
 n = 0
 for r in rows:

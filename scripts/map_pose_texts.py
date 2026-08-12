@@ -39,16 +39,15 @@ from dbpf_fast import safe_parse
 STBL_TID = 0x220557DA
 MAGIC = b"STBL"
 
-# 已知 Locale 码 (Sims 4) —— 供人工核对; 不用于判定
-LOCALE_KNOWN = {
-    0x0006: "de-DE (German)",
-    0x0009: "en-US (English)", 0x0409: "en-US (English)",
-    0x000A: "es-ES (Spanish)", 0x000C: "fr-FR (French)",
-    0x0010: "it-IT (Italian)", 0x0011: "ja-JP (Japanese)",
-    0x0012: "ko-KR (Korean)", 0x0016: "pt-BR (Portuguese-Brazil)",
-    0x001D: "sv-SE (Swedish)", 0x0404: "zh-TW (Traditional Chinese)",
-    0x0804: "zh-CN (Simplified Chinese)", 0x0004: "zh-CN (Simplified Chinese)",
+# STBL locale 编码 = 64-bit instance_id 的【最高字节】 (bits 56-63)。
+# 实测证 (t0nischwartz 包): 同一字符串块存在 0x00/01/02/03/.../0x0B 各 locale 变体,
+# 仅最高字节不同, 其余 56 位字符串块 hash 相同。
+#
+# ⚠️ 语言名映射表: 库内无权威来源, 【不编造】。仅登记已确证项, 其余标 UNKNOWN。
+LOCALE_BYTE_KNOWN = {
+    # 未确证, 全部留空; 宁可 locales=UNKNOWN 也不放错语言名
 }
+PLACEHOLDER_KEY = 0x00000000  # 作者未给该姿势设置显示名 (空占位, 非引用失败)
 
 
 def _is_xml_candidate(tid: int) -> bool:
@@ -165,11 +164,20 @@ def parse_display_hash(disp: str):
 
 
 def locale_of_stbl(inst_id: int):
-    """从 STBL instance_id 高位提取 Locale 码 (Sims 4 惯例)。"""
+    """从 STBL instance_id 的最高字节 (bits 56-63) 提取 Locale 码。
+
+    实测证 (t0nischwartz 包 0x004EACCF17C8B091 .. 0x0B4EACCF17C8B091):
+      locale 字节 = 最高字节 (0x00,0x01,...,0x0B); 其余 56 位是共享的字符串块 hash。
+    之前 (inst>>48)&0xFFFF 取错位 (抓到最高2字节 → locale_0x00C5/0x004E 假值) 已修正。
+    语言名映射若无权威来源则不臆测 → locale_known=False。
+    """
     if inst_id is None:
-        return 0, "unknown"
-    code = (inst_id >> 48) & 0xFFFF
-    return code, LOCALE_KNOWN.get(code, f"locale_0x{code:04X}")
+        return None, "unknown", False
+    byte = (inst_id >> 56) & 0xFF
+    name = LOCALE_BYTE_KNOWN.get(byte)
+    if name is None:
+        return byte, f"locale_byte_0x{byte:02X}", False
+    return byte, name, True
 
 
 def main():
@@ -200,7 +208,7 @@ def main():
     agg = {
         "pose_entries": 0,
         "mapped_ok": 0, "chinese": 0, "english": 0, "empty": 0,
-        "ref_fail": 0, "uncertain": 0,
+        "placeholder": 0, "ref_fail": 0, "uncertain": 0,
     }
     rows = []
     per_pkg_rows = []
@@ -242,12 +250,12 @@ def main():
                     parsed = parse_stbl(data) if data else None
                     if parsed is not None:
                         stbl_map.update(parsed)
-                        code, name = locale_of_stbl(e.instance_id)
-                        locales.add(f"{name}(0x{code:04X})")
+                        byte, name, known = locale_of_stbl(e.instance_id)
+                        locales.add(f"{name}(byte0x{byte:02X})" if byte is not None else name)
             backend.close()
 
             # 3) 逐 pose entry 映射
-            pkg_plots = {"mapped_ok":0,"chinese":0,"english":0,"empty":0,"ref_fail":0,"uncertain":0}
+            pkg_plots = {"mapped_ok":0,"chinese":0,"english":0,"empty":0,"placeholder":0,"ref_fail":0,"uncertain":0}
             pkg_pose_entries = len(poses)
             agg["pose_entries"] += pkg_pose_entries
 
@@ -262,9 +270,16 @@ def main():
                     "locale": ";".join(sorted(locales)) if locales else "",
                 }
                 if not disp:
-                    row.update({"status": "EMPTY", "reason": "pose_display_name 为空"}); agg["empty"]+=1; pkg_plots["empty"]+=1
+                    row.update({"status": "EMPTY", "reason": "pose_display_name 为空"})
+                    agg["empty"] += 1; pkg_plots["empty"] += 1
                 elif ph is None:
-                    row.update({"status": "REF_FAIL", "reason": f"display_ref 非 hash 无法解析: {disp!r}"}); agg["ref_fail"]+=1; pkg_plots["ref_fail"]+=1
+                    row.update({"status": "REF_FAIL", "reason": f"display_ref 非 hash 无法解析: {disp!r}"})
+                    agg["ref_fail"] += 1; pkg_plots["ref_fail"] += 1
+                elif ph == PLACEHOLDER_KEY:
+                    # 作者显式填 0x0 (未设置显示名): 不是引用失败, 也不是待翻文本
+                    row.update({"status": "PLACEHOLDER_NO_DISPLAY",
+                                "reason": "display_ref=0x0 作者未设置该姿势的显示名 (非待翻文本)"})
+                    agg["placeholder"] += 1; pkg_plots["placeholder"] += 1
                 else:
                     hits = [t for h, t in stbl_map.items() if h == ph]
                     if len(hits) == 1:
@@ -275,7 +290,8 @@ def main():
                         if _is_chinese(txt): agg["chinese"] += 1; pkg_plots["chinese"] += 1
                         else: agg["english"] += 1; pkg_plots["english"] += 1
                     elif len(hits) == 0:
-                        row.update({"status": "REF_FAIL", "reason": f"STBL key 0x{ph:08X} 未找到"}); agg["ref_fail"]+=1; pkg_plots["ref_fail"]+=1
+                        row.update({"status": "REF_FAIL", "reason": f"STBL key 0x{ph:08X} 未找到"})
+                        agg["ref_fail"] += 1; pkg_plots["ref_fail"] += 1
                     else:
                         row.update({"status": "MAPPING_UNCERTAIN",
                                     "reason": f"一个 key 0x{ph:08X} 对应 {len(hits)} 个文本: {hits!r}",
@@ -288,12 +304,13 @@ def main():
                 "reason": "", "pose_entries": pkg_pose_entries,
                 "mapped_ok": pkg_plots["mapped_ok"], "chinese": pkg_plots["chinese"],
                 "english": pkg_plots["english"], "empty": pkg_plots["empty"],
+                "placeholder": pkg_plots["placeholder"],
                 "ref_fail": pkg_plots["ref_fail"], "uncertain": pkg_plots["uncertain"],
             })
         except Exception as ex:
             per_pkg_rows.append({"package_path": str(p), "status": "ERROR", "reason": f"异常:{ex}",
                                  "pose_entries": 0, "mapped_ok": 0, "chinese": 0, "english": 0,
-                                 "empty": 0, "ref_fail": 0, "uncertain": 0})
+                                 "empty": 0, "placeholder": 0, "ref_fail": 0, "uncertain": 0})
             agg["uncertain"] += 1
         if i % 150 == 0 or i == total:
             print(f"  进度 {i}/{total} ...")
@@ -305,7 +322,8 @@ def main():
     print(f"成功映射到显示文本: {agg['mapped_ok']}")
     print(f"  原本中文: {agg['chinese']}")
     print(f"  英文: {agg['english']}")
-    print(f"空名称: {agg['empty']}")
+    print(f"空名称: {agg['empty']} (纯空字符串)")
+    print(f"PLACEHOLDER_NO_DISPLAY (display=0x0 作者未设名): {agg['placeholder']}")
     print(f"引用失败: {agg['ref_fail']}")
     print(f"MAPPING_UNCERTAIN: {agg['uncertain']}")
 
@@ -322,7 +340,7 @@ def main():
 
     # 每个 package 汇总 CSV
     pcols = ["package_path", "status", "reason", "pose_entries", "mapped_ok",
-             "chinese", "english", "empty", "ref_fail", "uncertain"]
+             "chinese", "english", "empty", "placeholder", "ref_fail", "uncertain"]
     ppath = out_dir / "pose_text_mapping_per_package.csv"
     with open(ppath, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=pcols)
@@ -340,7 +358,8 @@ def main():
         f.write(f"成功映射到显示文本: {agg['mapped_ok']}\n")
         f.write(f"  原本中文: {agg['chinese']}\n")
         f.write(f"  英文: {agg['english']}\n")
-        f.write(f"空名称: {agg['empty']}\n")
+        f.write(f"空名称(纯空): {agg['empty']}\n")
+        f.write(f"PLACEHOLDER_NO_DISPLAY (display=0x0 作者未设名): {agg['placeholder']}\n")
         f.write(f"引用失败: {agg['ref_fail']}\n")
         f.write(f"MAPPING_UNCERTAIN: {agg['uncertain']}\n\n")
         f.write("* pose_name 不默认视为玩家可见文本; 仅沿 pose_display_name → STBL 引用翻译\n")
