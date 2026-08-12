@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from dbpf_fast import safe_parse
 from backend import get_backend
-from resource_types import is_snippet, is_tuning_xml, WW_ANIM_XML
+from resource_types import RESOURCE_TYPES
 
 # 直接吃映射 CSV 里所有 REF_FAIL 记录 (不靠文件名猜, 用真实路径)
 mapping_csv = Path(sys.argv[1] if len(sys.argv) > 1 else "D:/projects/sims4_trans/output/pose_text_mapping.csv")
@@ -55,7 +55,9 @@ for r in rows:
     # (2) 定位 pose 引用出现在哪个 XML / 哪个 pose entry
     xml_hits = []
     for e in idx.entries:
-        if not (is_snippet(e.type_id) or is_tuning_xml(e.type_id) or e.type_id == WW_ANIM_XML):
+        if not (RESOURCE_TYPES.is_snippet(e.type_id)
+                or RESOURCE_TYPES.is_tuning_xml(e.type_id)
+                or RESOURCE_TYPES.is_known_safely(e.type_id, "WW_ANIM_XML")):
             continue
         try:
             d = backend.read_small_resource(e, max_bytes=2 * 1024 * 1024)
