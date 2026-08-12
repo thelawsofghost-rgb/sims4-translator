@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""临时调试 v6: 钉死 Sims4 索引 entry 的真实 32 字节布局"""
+"""临时调试 v7: 确认 Sims4 entry=32字节 布局 + 定位 header 索引字段"""
 import struct
 
 p = "C:/Users/thela/Documents/Electronic Arts/The Sims 4/Mods/2026.4.28/WWLaserAnimations.package"
@@ -10,29 +10,47 @@ with open(p, "rb") as f:
     f.seek(0)
     data = f.read()
 
-# 分析文件末尾一个完整 entry 的每个字节位置
-# 取末尾一个 entry (从 -32 开始)
 print("文件大小:", size)
-print("\n末尾 entry 原始 32 字节:")
-tail = data[-32:]
-for i in range(0, 32, 4):
-    chunk = tail[i:i+4]
-    val = struct.unpack("<I", chunk)[0]
-    print(f"  0x{i:02X}: {chunk.hex()}  => uint32 = 0x{val:08X}")
 
-# 尝试: 这可能是 24字节 entry (Sims4 常见) 而不是 32
-print("\n假设 entry=24字节, 从末尾解析几个:")
-# 找末尾索引起始: 先假设索引区紧邻文件末尾, 尝试 24 和 32
-for ENTRY in (24, 32, 16):
-    print(f"\n--- 尝试 entry={ENTRY} ---")
-    count_in_tail = 12  # 试12个
-    for i in range(0, min(count_in_tail*ENTRY, 192), ENTRY):
-        e = data[-(i+ENTRY):-(i) if i>0 else None]
-        if len(e) < ENTRY:
-            break
-        # type 在前4字节
-        t = struct.unpack_from("<I", e, 0)[0]
-        # 判断是否像有效 type id (Sims4 类型常 < 0x10000000)
-        if t < 0x10000000 and t != 0:
-            g = struct.unpack_from("<I", e, 4)[0]
-            print(f"  type=0x{t:08X} group=0x{g:08X}")
+# ===== header 完整解析 (0x00-0x40) =====
+print("\n=== Header 字段 (每4字节) ===")
+for off in range(0, 0x40, 4):
+    v = struct.unpack_from("<I", data, off)[0]
+    print(f"  0x{off:03X}: 0x{v:08X}")
+
+# ===== 尝试从文件末尾解析索引区 =====
+# entry=32, offset@0x10(带压缩高位), size@0x14(带压缩高位)
+# 逐个往前解析, 直到 offset 不再平滑, 记录资源类型多样性
+print("\n=== 从文件末尾往前解析 (32字节entry) ===")
+ENTRY = 32
+results = []
+pos = size - ENTRY
+# 索引起点未知, 向上多取一些(比如200个)看连续性
+MAX = 200
+found_stbl = 0
+types = set()
+prev_off = None
+for i in range(MAX):
+    off = pos - i * ENTRY
+    if off < 0:
+        break
+    e = data[off:off+ENTRY]
+    if len(e) < ENTRY:
+        break
+    t = struct.unpack_from("<I", e, 0)[0]
+    g = struct.unpack_from("<I", e, 4)[0]
+    hi = struct.unpack_from("<I", e, 8)[0]
+    lo = struct.unpack_from("<I", e, 0x0C)[0]
+    o = struct.unpack_from("<I", e, 0x10)[0] & 0x7FFFFFFF
+    sz = struct.unpack_from("<I", e, 0x14)[0]
+    # 记录
+    types.add(t)
+    results.append((t, g, (hi<<32)|lo, o, sz))
+    if t == 0x220557DA:
+        found_stbl += 1
+    if i < 12:
+        print(f"  [{i}] type=0x{t:08X} off=0x{o:X} sz_raw=0x{sz:08X}")
+
+print(f"\n解析 {len(results)} 个索引项, 不同 type 数: {len(types)}")
+print("出现的 type 列表:", [f"0x{t:08X}" for t in sorted(types)])
+print("其中 STBL(0x220557DA) 数量:", found_stbl)
