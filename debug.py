@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""临时调试 v8: 验证 Sims4 header 索引字段 (0x2C=size, 0x40=offset)"""
+"""临时调试 v9: dump 完整索引区原始字节, 人工确认 entry 真实布局"""
 import struct
 
 p = "C:/Users/thela/Documents/Electronic Arts/The Sims 4/Mods/2026.4.28/WWLaserAnimations.package"
@@ -10,31 +10,31 @@ with open(p, "rb") as f:
     f.seek(0)
     data = f.read()
 
-print("文件大小:", size)
-
-# 假设: header 里索引字段在 0x2C (index size) 和 0x40 (index offset)
-idx_size = struct.unpack_from("<I", data, 0x2C)[0]
 idx_off = struct.unpack_from("<I", data, 0x40)[0]
-print(f"假设: idx_size@0x2C=0x{idx_size:X} ({idx_size}), idx_off@0x40=0x{idx_off:X} ({idx_off})")
-print(f"验证: idx_off + idx_size = {idx_off + idx_size} vs 文件大小 {size}")
-print(f"  → 索引区起始到文件末尾: {'吻合!' if idx_off + idx_size == size else '不吻合'}")
+idx_size = struct.unpack_from("<I", data, 0x2C)[0]
+print(f"idx_off=0x{idx_off:X} ({idx_off}), idx_size=0x{idx_size:X} ({idx_size})")
 
-if idx_off + idx_size == size:
-    count = idx_size // 32
-    print(f"\n索引项数(count estimate): {idx_size}/32 = {count}")
-    print("\n=== 从 idx_off 开始解析全部索引 ===")
+# dump 索引区前 128 字节原始
+print("\n=== 索引区前 160 字节原始 hex ===")
+seg = data[idx_off:idx_off+160]
+for i in range(0, min(len(seg), 160), 16):
+    chunk = seg[i:i+16]
+    hexs = " ".join(f"{b:02X}" for b in chunk)
+    asc = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+    print(f"  +0x{i:03X}: {hexs:<48} {asc}")
+
+# 尝试不同 entry 大小解析, 看哪个 type 变化多样
+print("\n=== 尝试 entry 大小 = 24 / 28 / 32 ===")
+for ENTRY in (24, 28, 32):
     types = set()
-    n = 0
-    for i in range(count * 2):  # 多看一些
-        off = idx_off + i * 32
-        if off + 32 > size:
+    first_types = []
+    for i in range(20):
+        off = idx_off + i * ENTRY
+        if off + ENTRY > size:
             break
-        e = data[off:off+32]
-        t = struct.unpack_from("<I", e, 0)[0]
-        o = struct.unpack_from("<I", e, 0x10)[0] & 0x7FFFFFFF
-        sz = struct.unpack_from("<I", e, 0x14)[0] & 0x7FFFFFFF
+        t = struct.unpack_from("<I", data, off)[0]
         types.add(t)
-        n += 1
-        if i < 45:
-            print(f"  [{i}] type=0x{t:08X} off=0x{o:X} size={sz}")
-    print(f"\n共解析 {n} 项, 不同 type: {len(types)}")
+        if i < 15:
+            first_types.append(f"0x{t:08X}")
+    print(f"entry={ENTRY}: 前15个 type = {first_types}")
+    print(f"      不同type数(20项内): {len(types)}")
