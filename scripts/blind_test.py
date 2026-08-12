@@ -21,6 +21,7 @@ from backend import get_backend
 from classifier import Classifier, ConfLevel
 from resource_types import RESOURCE_TYPES
 from text_extractor import extract_ww_display_texts, extract_stbl_strings
+from classifier import POSE_SIGNATURES as _POSE_SIG
 
 
 def analyze(pkg: str):
@@ -97,6 +98,22 @@ def analyze(pkg: str):
         if cls.missing:
             print(f"    缺:   {cls.missing}")
         print(f"    理由: {cls.reason}")
+
+        # Pose 命中诊断: 若被判 Pose, 打印命中的签名 + 上下文, 排查误判根源
+        if cls.level == "CONFIRMED_POSE" or ("--xml" in sys.argv and any(
+                s in txt for txt in xml_texts for s in _POSE_SIG)):
+            hit_sigs = sorted({s for txt in xml_texts for s in _POSE_SIG if s in txt})
+            if hit_sigs:
+                print(f"    POSE 命中签名: {hit_sigs}")
+                if "--xml" in sys.argv:
+                    import re as _r
+                    for txt in xml_texts:
+                        for s in hit_sigs:
+                            for m in _r.finditer(_r.escape(s), txt):
+                                st = max(0, m.start() - 60)
+                                ctx = txt[st:m.end() + 60].replace("\n", " ")
+                                print(f"      [{s}] ...{ctx}...")
+                                break
 
         # 提取实际可见文本 (WW XML 显示名)
         visible = []
