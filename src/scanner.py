@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Any
 
 from backend import get_backend
 from cache import ScanCache
-from classifier import Classifier, ConfLevel, Classification
+from classifier import Classifier, ConfLevel, Classification, POSE_SIGNATURES
 from dbpf_fast import safe_parse, UnsupportedDBPFError
 from text_extractor import (
     extract_ww_display_texts,
@@ -225,6 +225,12 @@ class Scanner:
                 # 统计
                 self._count_class(cls.level)
                 if cls.level in (ConfLevel.CONFIRMED_WW, ConfLevel.CONFIRMED_POSE):
+                    # Pose 命中诊断: 记录每个 CONFIRMED_POSE 包命中的签名, 供查误判根源
+                    if cls.level == ConfLevel.CONFIRMED_POSE:
+                        pose_hits = [e for e in cls.evidence if e in POSE_SIGNATURES]
+                        self.stats["pose_evidence_rows"] = self.stats.get("pose_evidence_rows", []) + [(str(p), pose_hits)]
+                        for h in pose_hits:
+                            self.stats["pose_sig_" + h] = self.stats.get("pose_sig_" + h, 0) + 1
                     self.stats["visible_text"] += (eng + chn + unc)
                     self.stats["english"] += eng
                     self.stats["chinese"] += chn
@@ -459,6 +465,9 @@ class Scanner:
             f"clip_ref_NOT_AVAILABLE: {s.get('crt_clip_ref_NOT_AVAILABLE', 0)}",
             f"clip_ref match rate: {self._clip_ref_rate(s):.1%}",
             "",
+            "CONFIRMED_POSE 命中签名诊断 (哪些关键词在触发 Pose):",
+            *[f"  {sig}: {s.get('pose_sig_' + sig, 0)}" for sig in POSE_SIGNATURES],
+            "",
             "翻译层 (Phase 1 仅扫描, 不翻译):",
             f"发现玩家可见文本: {s.get('visible_text', 0)}",
             f"英文: {s.get('english', 0)}",
@@ -483,6 +492,16 @@ class Scanner:
             f.write("供人工复查 (不降级分类)。\n\n")
             for wf in warn_files:
                 f.write(wf + "\n")
+
+        # pose 命中诊断 CSV: 每个 CONFIRMED_POSE 包 + 命中的签名
+        pose_diag_path = self.output_dir / "pose_diagnosis.csv"
+        pose_rows = s.get("pose_evidence_rows", []) or []
+        import csv as _csv
+        with open(pose_diag_path, "w", newline="", encoding="utf-8-sig") as f:
+            w = _csv.writer(f)
+            w.writerow(["package_path", "pose_signatures_hit"])
+            for pf, hits in pose_rows:
+                w.writerow([pf, ";".join(hits)])
 
         # 更详细: 分类依据抽样 (写入 evidence 报告)
         ev_path = self.output_dir / "classification_evidence.txt"

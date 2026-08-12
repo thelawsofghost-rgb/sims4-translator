@@ -91,18 +91,17 @@ _DANCER_CLIP_REF_RE = re.compile(r'<T\s+n="dancer_animation_clip_name"[^>]*>\s*(
 # 从 Sims 4 Studio / 真实 pose pack tuning 归纳的专属语义标签。
 # 注意: 这些必须是 Pose 专属, 不能是 WW 动画也用到的通用字段。
 POSE_SIGNATURES = [
-    # Pose Pack tuning/snippet 常见专属类名 / module
-    "PosePack",
-    "pose_pack",
-    "PosePlayer",
-    "pose_player",
-    "pose_definition",
-    "PoseDefinition",
-    # UI 名称 / string-table 引用 (Pose Player 用它显示姿势名)
-    "pose_display_name",
-    "pose_name",
-    "poses_list",
-    "poser",
+    # 仅保留在真实 Pose Pack XML 中验证过的、Structure/类名级专属标记。
+    # 宁可漏 (宁漏勿错): 只认明确的 Pose Player 结构证据。
+    # 真包 [F] Emotion React: c="PosePackInstance" m="poseplayer"
+    #                       <T n="s4s_mod_type">POSE_PACK</T> <L n="pose_list">
+    #                       pose_name / pose_display_name
+    "PosePackInstance",   # 实例类名 (c= 属性值)
+    "poseplayer",         # Pose Player 模块名 (m= 属性值)
+    "POSE_PACK",          # S4S mod_type 标记 (<T n="s4s_mod_type">)
+    "pose_list",          # 姿势列表容器 (<L n="pose_list">)
+    "pose_display_name",  # 姿势 UI 显示名引用 (真包中存在)
+    "pose_name",          # 姿势名引用 (真包中存在)
 ]
 
 
