@@ -57,6 +57,11 @@ class Scanner:
             ConfLevel.NON_ANIMATION: 0,
             ConfLevel.ERROR: 0,
             ConfLevel.ERROR_UNSUPPORTED_DBPF: 0,
+            # clip_ref 三态统计 (WW/Pose 佐证, 不降级)
+            "crt_clip_ref_MATCH": 0,
+            "crt_clip_ref_WARN_no_match": 0,
+            "crt_clip_ref_NOT_AVAILABLE": 0,
+            "crt_warn_files": [],
             "modified": 0,
             "visible_text": 0,
             "english": 0,
@@ -224,6 +229,12 @@ class Scanner:
                     self.stats["english"] += eng
                     self.stats["chinese"] += chn
                     self.stats["uncertain_text"] += unc
+                    # clip_ref 三态统计 (只作佐证, 不降级)
+                    for tag in ("clip_ref_MATCH", "clip_ref_WARN_no_match", "clip_ref_NOT_AVAILABLE"):
+                        if tag in cls.evidence:
+                            self.stats["crt_" + tag] = self.stats.get("crt_" + tag, 0) + 1
+                            if tag == "clip_ref_WARN_no_match":
+                                self.stats["crt_warn_files"] = self.stats.get("crt_warn_files", []) + [str(p)]
 
                 self._cache_classified_full(p, st, cls, type_ids, has_clip, stbl_present,
                                             eng, chn, unc, visible)
@@ -415,6 +426,16 @@ class Scanner:
             for row in self.scan_rows:
                 w.writerow({k: row.get(k, "") for k in fieldnames})
 
+    def _clip_ref_rate(self, s) -> float:
+        """clip_ref match rate = MATCH / (MATCH + WARN_no_match).
+        NOT_AVAILABLE 不计入 (无法验证)。"""
+        m = s.get("crt_clip_ref_MATCH", 0)
+        w = s.get("crt_clip_ref_WARN_no_match", 0)
+        denom = m + w
+        if denom == 0:
+            return 0.0
+        return m / denom
+
     def _write_summary(self):
         s = self.stats
         path = self.output_dir / "summary.txt"
@@ -432,6 +453,12 @@ class Scanner:
             f"{ConfLevel.ERROR}: {s.get(ConfLevel.ERROR, 0)}",
             f"{ConfLevel.ERROR_UNSUPPORTED_DBPF}: {s.get(ConfLevel.ERROR_UNSUPPORTED_DBPF, 0)}",
             "",
+            "clip_ref (animation_clip_name ↔ ClipName 佐证, 不降级 CONFIRMED):",
+            f"clip_ref_MATCH: {s.get('crt_clip_ref_MATCH', 0)}",
+            f"clip_ref_WARN_no_match: {s.get('crt_clip_ref_WARN_no_match', 0)}",
+            f"clip_ref_NOT_AVAILABLE: {s.get('crt_clip_ref_NOT_AVAILABLE', 0)}",
+            f"clip_ref match rate: {self._clip_ref_rate(s):.1%}",
+            "",
             "翻译层 (Phase 1 仅扫描, 不翻译):",
             f"发现玩家可见文本: {s.get('visible_text', 0)}",
             f"英文: {s.get('english', 0)}",
@@ -446,6 +473,16 @@ class Scanner:
         ]
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
+
+        # clip_ref_WARN_no_match 文件清单 (供人工复查 False Positive)
+        warn_path = self.output_dir / "clip_ref_WARN_no_match.txt"
+        warn_files = s.get("crt_warn_files", []) or []
+        with open(warn_path, "w", encoding="utf-8") as f:
+            f.write(f"clip_ref_WARN_no_match 文件数: {len(warn_files)}\n")
+            f.write("这些包已 CONFIRMED, 但 animation_clip_name 引用未匹配到包内 CLIP 名,\n")
+            f.write("供人工复查 (不降级分类)。\n\n")
+            for wf in warn_files:
+                f.write(wf + "\n")
 
         # 更详细: 分类依据抽样 (写入 evidence 报告)
         ev_path = self.output_dir / "classification_evidence.txt"

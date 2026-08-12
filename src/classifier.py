@@ -199,13 +199,29 @@ class Classifier:
                     if val:
                         xml_clip_refs.add(val)
 
-        # 校验: XML 引用的 animation_clip_name 是否至少一个能匹配包内 CLIP 名
-        clip_ref_verified = False
-        if clip_names and xml_clip_refs:
-            for ref in xml_clip_refs:
-                if any(ref in cn or cn in ref for cn in clip_names):
-                    clip_ref_verified = True
-                    break
+        # 引用校验状态 (三态, 供统计 clip_ref_MATCH / WARN_no_match / NOT_AVAILABLE):
+        #   "MATCH"          : XML 引用的 clip 名能匹配到包内 CLIP ClipName
+        #   "WARN_no_match"  : 提取到 CLIP 名, 但 XML 引用无一匹配 (供人工复查)
+        #   "NOT_AVAILABLE"  : 无法验证 (XML 无 clip 引用, 或 CLIP 名提取失败为空)
+        # 三态都只作佐证统计, 绝不降级 CONFIRMED_WW/POSE (非硬门槛)。
+        clip_ref_state = "NOT_AVAILABLE"
+        if xml_clip_refs:
+            if clip_names:
+                matched = False
+                for ref in xml_clip_refs:
+                    if any(ref in cn or cn in ref for cn in clip_names):
+                        matched = True
+                        break
+                clip_ref_state = "MATCH" if matched else "WARN_no_match"
+            else:
+                # XML 有引用但提取不到任何 CLIP 名 → 无法验证
+                clip_ref_state = "NOT_AVAILABLE"
+
+        _CLIP_STATE_TO_EVIDENCE = {
+            "MATCH": "clip_ref_MATCH",
+            "WARN_no_match": "clip_ref_WARN_no_match",
+            "NOT_AVAILABLE": "clip_ref_NOT_AVAILABLE",
+        }
 
         # ---- Pose Pack 正面结构信号 ----
         pose_positive = _has_pose_positive(xml_texts)
@@ -218,13 +234,8 @@ class Classifier:
         if ww_present and len(ww_struct_found) >= 1 and has_clip:
             cls.level = ConfLevel.CONFIRMED_WW
             cls.evidence = [WW_ANIM_DISPLAY_RAW, WW_ANIM_DISPLAY_OLD, *ww_struct_found, "CLIP"]
-            # animation_clip_name → CLIP ClipName 引用能对应 → 强证据
-            if clip_ref_verified:
-                cls.evidence.append("clip_ref_verified")
-            elif clip_names:
-                # 提取到 CLIP 名但引用无法匹配 → 仍 CONFIRMED (WW XML 结构已足够强),
-                # 但打 WARN 供人工复查
-                cls.evidence.append("clip_ref_WARN_no_match")
+            # animation_clip_name → CLIP ClipName 引用状态 (只作佐证统计, 不降级)
+            cls.evidence.append(_CLIP_STATE_TO_EVIDENCE[clip_ref_state])
             cls.reason = "WW Animation XML (显示名) + WW 结构字段 + CLIP"
             return cls
 
@@ -233,8 +244,7 @@ class Classifier:
             ev = [*pose_positive, "CLIP"]
             if stbl_present:
                 ev.append("STBL")
-            if clip_ref_verified:
-                ev.append("clip_ref_verified")
+            ev.append(_CLIP_STATE_TO_EVIDENCE[clip_ref_state])
             cls.level = ConfLevel.CONFIRMED_POSE
             cls.evidence = ev
             cls.reason = "Pose Player/Pose Pack 专属结构 + CLIP (+名称/引用)"
