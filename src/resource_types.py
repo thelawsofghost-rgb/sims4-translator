@@ -39,12 +39,30 @@ class ResourceType:
 # 当前所有值标注状态。只有 verified=True 的才允许进入判定。
 # ============================================================
 
+# 实测确认 (2026-08-12, WWLaserAnimations.package, 41 entries):
+#   0x6B20C4F3  x8  = CLIP        (动画剪辑本体, 每个后面配一个 0xBC4A5044)
+#   0xBC4A5044  x8  = RCOL/动画属性 (与 CLIP 配对的小资源 225~272 字节)
+#   0x220557DA  x23 = STBL        (本地化显示文本)
+#   0x7DF2169C  x1  = 待定 (疑似动画定义 XML/WW 结构化资源)
+#   0x0166038C  x1  = 待定 (248 字节)
+
 _RESOURCE_TYPES: Dict[int, ResourceType] = {
     # ---- 动画相关 ----
-    0x0354E541: ResourceType(
-        0x0354E541, "CLIP", verified=False,
-        source="", notes="Sims4 动画剪辑 (Pose/Animation 本体)。"
-                "注意: s4pi-Sims3 用 0x6B20C4F3, Sims4 应为 0x0354E541, 待核实。",
+    0x6B20C4F3: ResourceType(
+        0x6B20C4F3, "CLIP", verified=True,
+        source="实测 WWLaserAnimations.package (2026-08-12)",
+        notes="Sims4 动画剪辑 (Pose/Animation 本体)。每个 CLIP 后配一个 0xBC4A5044。\n"
+                "⚠️ 旧注释误标 0x0354E541 为 CLIP, 实测为 0x6B20C4F3。",
+    ),
+    0xBC4A5044: ResourceType(
+        0xBC4A5044, "ANIM_RCOL", verified=True,
+        source="实测 WWLaserAnimations.package (2026-08-12)",
+        notes="动画属性 RCOL, 与 CLIP 一对一配对 (225~272 字节小资源)。辅助信号。",
+    ),
+    0x7DF2169C: ResourceType(
+        0x7DF2169C, "WW_ANIM_XML", verified=False,
+        source="实测 WWLaserAnimations.package (2026-08-12)",
+        notes="疑似 WW 动画定义资源 (含 animation_raw_display_name 等), 待核实内容。",
     ),
     # ---- 文本 ----
     0x220557DA: ResourceType(
