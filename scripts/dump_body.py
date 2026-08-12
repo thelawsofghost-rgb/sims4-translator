@@ -43,3 +43,6 @@ for e in idx.entries:
     if seen >= 12:
         print("\n... (截断, 只看前 12 个) ...")
         break
+import struct
+if want == 0x220557DA or __name__ == "__main__" and "STBL" in sys.argv:
+    pass
