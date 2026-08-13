@@ -59,7 +59,8 @@ if "--sample" in ARGS:
         print("--sample 后面缺少数字", file=sys.stderr); sys.exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from phase2a_catalog import norm_text, source_hash, _split_semantic_tokens, _is_id_token
+from phase2a_catalog import (norm_text, source_hash, detect_language,
+                             _split_semantic_tokens, _is_id_token)
 
 # ---------------- 7 条人工审批 (用户硬编码, 禁止改写) ----------------
 APPROVED = {
@@ -114,6 +115,144 @@ def protected_spans(text: str) -> str:
         seg = m.group(0)
         spans.append(f"{seg}@{m.start()}-{m.end()}")
     return "; ".join(spans)
+
+
+# ---------------- 姿势领域术语表 (硬编码, 高优先; 不进模型) ----------------
+# 只固定高频且已确认的领域歧义词。数值/编号/版本/*anim 由程序保留重建,
+# 此处是涉及"方向/位置/情绪/人物"等语义的固定译法。
+_GLOSSARY = {
+    "right": "右", "left": "左", "middle": "中",
+    "positive": "积极", "negative": "消极", "neutral": "中性",
+    "concern": "担忧", "doubtful": "疑惑", "smirk": "坏笑",
+    "sim": "模拟市民", "idle": "待机",
+    "all in one": "整合版",
+}
+# 大写首字母的展示名形式也映射 (Right/Left/Positive...)
+_GLOSSARY = {**{k.lower(): v for k, v in _GLOSSARY.items()},
+             **_GLOSSARY}
+
+
+# ---------------- 精确切分 + 重建 (格式/编号/版本由程序保留, 模型只翻语义 phrase) ----------------
+# 断点 = 受保护 token (编号/版本/*anim/纯数字) 或 独立分隔符 (斜杠/括号/逗号/空白包裹的连字符)
+_PROTECTED = re.compile(r"\d[\w]*(?:-\d[\w]*)*|\*anim\w*|[\u0400-\u04ffA-Za-z]\d[\w]*|\b(?:V|v)\d+(?:\.\d+)?\b|[\d.]+")
+# 分隔符: / \ , ; ( ) [ ] * , 以及前后带空白的连字符 (不计 angry-sad 内部连字符)
+_SEPARATOR = re.compile(r"\\|/|[,;()\[\]*]|\s+-\s+|\s+-$|^-\s+")
+
+
+def split_semantic_spans(text: str):
+    """phrase-level 切分。返回 (segs, sem_phrases)。
+
+    segs 每项: {t, kind('sem'|'prot')}; 连续的语义多词连成**一个** phrase (sem),
+    只在 受保护 token / 独立分隔符 处切断。glossary 命中保留在重建层整词/整 phrase 替换。
+    """
+    t = norm_text(text)
+    segs = []
+    i = 0
+    n = len(t)
+    sem_buf = []
+
+    def flush_sem():
+        if sem_buf:
+            segs.append({"t": "".join(sem_buf), "kind": "sem"})
+            sem_buf.clear()
+
+    while i < n:
+        # 受保护 token 优先 (是硬断点); 必须 以数字/*/大写字母数字混合 开头才安全, 避免误吃自然词
+        pm = _PROTECTED.match(t, i)
+        if pm:
+            start = pm.group(0)
+            prev_ch = t[i - 1] if i > 0 else " "
+            next_ch = t[pm.end()] if pm.end() < n else " "
+            # 词中间不切 (如 "Simple" 里不切数字; "V2" 版本号要切)
+            is_break = (start[0].isdigit() or start[0] == "*") \
+                or (start[0].isupper() and re.search(r"\d", start))
+            # 版本号 V2/v1.3 也要断
+            if re.fullmatch(r"[Vv]\d+(?:\.\d+)?", start):
+                is_break = True
+            if is_break:
+                flush_sem()
+                segs.append({"t": start, "kind": "prot"})
+                i = pm.end()
+                continue
+        # 孤立大写单字母 = 性别/姿势索引 (F/A/B/M/А) -> prot 保留
+        # 仅当前后都不是字母数字时 (真正独立 token), 否则是自然词内部 (如 RIGHT 里的 T)
+        prev_is_alnum = (i > 0 and t[i - 1].isalnum())
+        next_is_alnum = (i + 1 < n and t[i + 1].isalnum())
+        if t[i].isupper() and not prev_is_alnum and not next_is_alnum:
+            flush_sem()
+            segs.append({"t": t[i], "kind": "prot"})
+            i += 1
+            continue
+        sep = _SEPARATOR.match(t, i)
+        if sep:
+            flush_sem()
+            segs.append({"t": sep.group(0), "kind": "prot"})
+            i = sep.end()
+            continue
+        sem_buf.append(t[i]); i += 1
+    flush_sem()
+
+    # 给 sem phrase 编号 key
+    idx = 0
+    for s in segs:
+        if s["kind"] == "sem":
+            s["key"] = str(idx); idx += 1
+    sem_phrases = [s for s in segs if s["kind"] == "sem"]
+    return segs, sem_phrases
+
+
+def rebuild(segs: list, resolved: dict):
+    """按原模板重建: prot 段原样, sem phrase 替换为 resolved[key]。
+
+    resolved: {key: 译文}。缺译文则保留该 phrase 原文。
+    """
+    out = []
+    for s in segs:
+        if s["kind"] == "sem":
+            out.append(resolved.get(s.get("key"), s["t"]))
+        else:
+            out.append(s["t"])
+    return "".join(out)
+
+
+def glossary_resolve(segs: list):
+    """整词/整 phrase 精确匹配术语表 (禁止 substring)。命中即翻译, 不进模型。
+
+    返回 (resolved, pending): resolved 直接可用; pending 为未命中需交模型的 sem phrase。
+    """
+    resolved = {}
+    pending = []
+    for s in segs:
+        if s["kind"] != "sem":
+            continue
+        low = s["t"].strip().lower()
+        # 完整 phrase 命中
+        if low in _GLOSSARY:
+            resolved[s["key"]] = _GLOSSARY[low]
+            continue
+        # 整词命中 (词边界, 不会伤及 Simple/Simmer/Simkatu)
+        match_word = None
+        if re.fullmatch(r"[A-Za-z]+", s["t"].strip()):
+            w = s["t"].strip().lower()
+            if w in _GLOSSARY and re.fullmatch(r"[A-Za-z]{2,}", w):
+                match_word = _GLOSSARY[w]
+        if match_word:
+            resolved[s["key"]] = match_word
+            continue
+        pending.append(s)
+    return resolved, pending
+    """对 sem 段, 若命中术语表则直接翻译 (不进模型); 返回 (resolved, 未命中sem段列表)。"""
+    resolved = {}
+    pending = []
+    for s in segs:
+        if s["kind"] != "sem":
+            continue
+        gloss = _GLOSSARY.get(s["t"].lower())
+        if gloss:
+            resolved[s["key"]] = gloss
+        else:
+            pending.append(s)
+    return resolved, pending
 
 
 # ---------------- 翻译引擎 (可插拔) ----------------
@@ -220,14 +359,20 @@ class OllamaTranslator(Translator):
 
     def _call_openai(self, items):
         """优先 OpenAI-compatible /v1/chat/completions, 失败/404 回退原生 /api/chat。"""
-        lines = "\n".join(f"{i}. {t}" for i, (_, t) in enumerate(items))
+        # 每 item 一个 block; 用编号前缀区分, 便于按序回填
+        blocks = []
+        for i, (k, t) in enumerate(items):
+            blocks.append(f"[{i}]\n{t}")
+        lines = "\n\n".join(blocks)
         prompt = (
-            "你是模拟人生4动作包汉化专家。把下面的英文/多语动作姿态名翻译为简体中文。\n"
+            "你是模拟人生4动作包汉化专家。下面每一段是一个待翻译块, 结构为:\n"
+            "[编号]\nTarget 行: 需要翻译的语义片段\nContext 行(可选): 仅供参考\n"
             "规则:\n"
-            "1. 译文简洁自然, 符合模组姿态命名习惯。\n"
-            "2. 保留原文中的数字、字母编号、版本号(V1/V2/v.2)、*anim 等技术标记, 不翻译、不改写。\n"
-            "3. 每个编号行只输出一条译文, 用同样的编号序号开头, 一条一行, 不要额外说明。\n"
-            "原文:\n" + lines
+            "1. 只翻译每个 [编号] 块里 Target: 之后的内容为简体中文\n"
+            "2. Context: 只是参考, 不要翻译、不要输出、不要改写它\n"
+            "3. 保留 Target 中的数字、字母编号、版本号(V1/v2)、*anim 等技术标记不变\n"
+            "4. 逐块输出, 每块一行译文, 用同样编号开头 (如 [0] 译文), 一条一行, 不要额外说明\n"
+            + lines
         )
         payload = {
             "model": self.model,
@@ -259,9 +404,13 @@ class OllamaTranslator(Translator):
         keys, zhs = [], []
         for k, text in items:
             prompt = (
-                "把这条模拟人生4动作姿态名翻译为简体中文。只输出译文, 不要解释。\n"
-                "保留数字、字母编号、版本号、*anim 等技术标记不变。\n"
-                f"原文: {text}"
+                "你是模拟人生4动作包汉化专家。下面是待翻译内容:\n"
+                "Target 行: 需要翻译的语义片段 (可能含 Context 行, 仅供参考)。\n"
+                "规则:\n"
+                "1. 只翻译 Target: 之后的内容为简体中文, 只输出这一条译文, 不要解释。\n"
+                "2. Context: 只是参考, 不要翻译、不要输出、不要改写它。\n"
+                "3. 保留 Target 中的数字、字母编号、版本号、*anim 等技术标记不变。\n"
+                f"{text}"
             )
             payload = {
                 "model": self.model,
@@ -292,15 +441,26 @@ class OllamaTranslator(Translator):
 
     @staticmethod
     def _parse_numbered(content, items):
+        """解析模型输出: 每行 '[n] 译文' 或 'n. 译文' 或 '- 译文', 按 n 映射到对应 item。"""
         out = {}
+        pat_idx = re.compile(r"^\s*\[(\d+)\]\s*(.*)$")
         num_pat = re.compile(r"^\s*(?:\d+[.):]|[-*])\s*(.*)$")
+        auto = 0
         for ln in content.splitlines():
             ln = ln.strip()
             if not ln:
                 continue
+            m = pat_idx.match(ln)
+            if m and m.group(2).strip():
+                out[int(m.group(1))] = m.group(2).strip()
+                continue
             m = num_pat.match(ln)
-            if m:
-                out[len(out)] = m.group(1).strip()
+            if m and m.group(1).strip():
+                # 无显式编号时按出现顺序
+                while auto in out:
+                    auto += 1
+                out[auto] = m.group(1).strip()
+                auto += 1
         return [k for k, _ in items], [out.get(i, "") for i in range(len(items))]
 
 
@@ -318,10 +478,69 @@ def load_todo():
     return rows
 
 
+def load_contexts(out_dir):
+    """从 translation_contexts.csv 按 translation_id 聚合上下文 (package + neighbor)。
+    返回 {translation_id: [ctx_str, ...]}。文件缺失则返回空 (context 仅辅助, 不写回)。
+    """
+    p = out_dir / "translation_contexts.csv"
+    agg = {}
+    if not p.exists():
+        return agg
+    with open(p, encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            tid = r.get("translation_id")
+            if not tid:
+                continue
+            pkg = (r.get("package_path") or "").strip()
+            nbr = (r.get("neighbor_display_texts") or "").strip()
+            parts = []
+            if pkg:
+                parts.append(f"package={pkg}")
+            if nbr:
+                parts.append(f"neighbors={nbr}")
+            if parts:
+                agg.setdefault(tid, []).append("; ".join(parts))
+    return agg
+
+
+def sanity_check_lang(todo):
+    """对 todo 每条: 用最新 detect_language 重测, 与 todo.detected_language 对比。
+
+    一致 -> 通过; 不一致 -> 标 LANGUAGE_MISMATCH (不覆盖 todo 值, 仅报警)。
+    返回 mismatch 列表 [(translation_id, source_text, todo_lang, re_lang)]。
+    """
+    mismatch = []
+    for r in todo:
+        text = norm_text(r.get("source_text"))
+        todo_lang = (r.get("detected_language") or "").strip()
+        cls = r.get("decision")
+        reason = r.get("reason") or ""
+        try:
+            re_lang = detect_language(text, cls, reason)
+        except Exception:
+            re_lang = ""
+        if re_lang and re_lang != todo_lang and todo_lang not in ("", "zxx"):
+            mismatch.append((r.get("translation_id"), text, todo_lang, re_lang))
+    return mismatch
+
+
 def main():
     assert TODO.exists(), f"未找到 {TODO}"
     todo = load_todo()
     print(f"[输入] todo 行数 = {len(todo)}")
+
+    # 语言检测 sanity check (只报不一致, 不覆盖 todo 值)
+    mism = sanity_check_lang(todo)
+    if mism:
+        print(f"[LANGUAGE_MISMATCH] {len(mism)} 条 todo.detected_language 与重测不一致 (未覆盖):")
+        for tid, txt, tl, rl in mism[:20]:
+            print(f"    {tid}  {txt!r}  todo={tl}  re={rl}")
+        print("    建议重跑最新 Phase 2A 重新生成 todo; 本脚本不会静默改写输入。")
+
+    # 上下文 (仅辅助理解, 不参与写回定位)
+    ctx_map = load_contexts(out_dir)
+    nbr_ok = sum(1 for r in todo if r.get("translation_id") in ctx_map)
+    print(f"[上下文] translation_contexts.csv 关联 TODO {nbr_ok}/{len(todo)} 行 (仅辅助, 不写回)")
 
     # 逐行翻译层决策
     decided = []
@@ -351,42 +570,37 @@ def main():
 
     sample_pick = None
     if SAMPLE:
-        # 分层: FULL / PARTIAL 各自按固定种子抽, 尽量跨不同 source; 并强制纳入非英语 + *anim/编号样例
+        # 分层 + 强制覆盖: 术语表现(方向/情绪/人物), *anim/编号, 非英语, 纯语义, 歧义短句
         import random
         random.seed(20260813)
         need = need_translate[:]
-        full = [d for d in need if d[1] == "FULL_TRANSLATE"]
-        part = [d for d in need if d[1] == "PARTIAL_TRANSLATE"]
-        # 非英语候选 (detected_language 非 en/zxx)
+        def has_gloss(s):
+            low = norm_text(s).lower()
+            return any(k in low for k in _GLOSSARY if len(k) > 1)
+        def is_short(s):
+            return len(norm_text(s).split()) <= 4
         nonen = [d for d in need if d[0].get("detected_language") not in ("en", "zxx")]
-        # 优先保证覆盖: 非英语, PARTIAL 含 *anim/编号, 普通英文语义; 但总数必须 == SAMPLE
+        gloss = [d for d in need if has_gloss(d[0].get("source_text", "") or "")]
+        proto = [d for d in need if re.search(r"\*anim|\d", d[0].get("source_text", "") or "")]
+        short = [d for d in need if is_short(d[0].get("source_text", "") or "")]
         forced = []
-        for d in nonen:
-            if len(forced) >= SAMPLE:
-                break
-            if d not in forced:
-                forced.append(d)
-        proto = [d for d in part if re.search(r"\*anim|\d", d[0].get("source_text", "") or "")]
-        for d in proto:
-            if len(forced) >= SAMPLE:
-                break
-            if d not in forced:
-                forced.append(d)
-        # full 普通语义 (保证至少 1 条, 若空间允许)
-        for d in full:
-            if len(forced) >= SAMPLE:
-                break
-            if d not in forced:
-                forced.append(d)
+        def put(ds):
+            for d in ds:
+                if len(forced) >= SAMPLE:
+                    return
+                if d not in forced:
+                    forced.append(d)
+        put(nonen); put(gloss); put(proto); put(short)
         pool = [d for d in need if d not in forced]
         random.shuffle(pool)
         pick = forced + pool[: max(0, SAMPLE - len(forced))]
         sample_pick = set(id(d) for d in pick)
         need_translate = [d for d in need if id(d) in sample_pick]
+        _n_proto = sum(1 for d in need_translate if re.search(r"[*]anim|\d", d[0].get("source_text", "") or ""))
         print(f"[抽样] 抽查 {len(need_translate)} 行 "
-              f"(FULL={len([d for d in need_translate if d[1]=='FULL_TRANSLATE'])}, "
-              f"PARTIAL={len([d for d in need_translate if d[1]=='PARTIAL_TRANSLATE'])}, "
-              f"非英语={len([d for d in need_translate if d[0].get('detected_language') not in ('en','zxx')])})")
+              f"(术语表={len([d for d in need_translate if has_gloss(d[0].get('source_text','') or '')])}, "
+              f"非英语={len([d for d in need_translate if d[0].get('detected_language') not in ('en','zxx')])}, "
+              f"编号/*anim={_n_proto})")
 
     # 翻译引擎: 默认本机 Ollama
     if NO_LLM or (SAMPLE is None and len(need_translate) == 0):
@@ -395,12 +609,42 @@ def main():
         eng = OllamaTranslator()
         print(f"[引擎] {type(eng).__name__} @ {eng.base_url}/v1/chat/completions (model={eng.model})")
 
-    zh_map = {}
-    if need_translate:
-        items = [(d[0]["translation_id"], d[0]["source_text"]) for d in need_translate]
-        print(f"[翻译] 调用引擎 {type(eng).__name__}, 共 {len(items)} 条 ...")
-        zh_map = eng.translate_batch(items)
+    # ---- phrase-level 翻译准备: 每行切 phrase -> glossary 直译 -> 剩余交模型(带 context) -> rebuild ----
+    jobs = {}
+    for d in need_translate:
+        r = d[0]
+        tid = r.get("translation_id")
+        ctx = ctx_map.get(tid, [])
+        segs, sem = split_semantic_spans(r.get("source_text"))
+        gloss, pending = glossary_resolve(segs)
+        # 过滤纯空白 phrase (切分残留), 不交模型
+        pending = [p for p in pending if p["t"].strip()]
+        ctx_str = " | ".join(ctx[:3]) if ctx else ""
+        for p in pending:
+            p["ctx"] = ctx_str
+        jobs[tid] = {"segs": segs, "gloss": gloss, "pending": pending}
+
+    # 构建一条待翻译 = 单个 pending phrase + 其 context (便于逐 phrase 映射回填)
+    phrase_items = []          # (composite_key, block_text)
+    phrase_map = {}            # composite_key -> (tid, orig_key)
+    for tid, j in jobs.items():
+        for p in j["pending"]:
+            ck = f"{tid}:::{p['key']}"
+            block = f"Target: {p['t'].strip()}"
+            if p.get("ctx"):
+                block += f"\nContext: {p['ctx']}"
+            phrase_items.append((ck, block))
+            phrase_map[ck] = (tid, p["key"])
+
+    phrase_res = {}
+    if phrase_items and SAMPLE:
+        print(f"[翻译] 调用引擎 {type(eng).__name__}, 共 {len(phrase_items)} 个 phrase ...")
+        raw = eng.translate_batch(phrase_items)
         print("[翻译] 完成。")
+        for ck, out_txt in raw.items():
+            if ck in phrase_map:
+                tid, orig_key = phrase_map[ck]
+                phrase_res.setdefault(tid, {})[orig_key] = str(out_txt).strip()
 
     # 组装 done; 含 protected_spans (PARTIAL 时列出需原样保留的 token 在原文本中的区间)
     done_cols = ["translation_id", "source_text", "decision", "translate_mode",
@@ -413,10 +657,20 @@ def main():
         elif mode == "KEEP":
             translation = ""
             status = "DONE_SKIP"
-        else:
-            translation = zh_map.get(r.get("translation_id"), "") if SAMPLE else ""
-            if translation and not translation.startswith("[ERR"):
+        elif r.get("translation_id") in jobs and SAMPLE:
+            j = jobs[r.get("translation_id")]
+            resolved = dict(j["gloss"])
+            resolved.update(phrase_res.get(r.get("translation_id"), {}))
+            translation = rebuild(j["segs"], resolved)
+            if any(v.startswith("[ERR") for v in resolved.values()):
+                status = "PENDING"
+            elif translation.strip():
                 status = "DONE"
+            else:
+                status = "PENDING"
+        else:
+            translation = ""
+            status = "PENDING"
         psp = protected_spans(text) if mode == "PARTIAL_TRANSLATE" else ""
         done_rows.append({
             "translation_id": r.get("translation_id"),
