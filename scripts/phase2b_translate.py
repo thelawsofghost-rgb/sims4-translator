@@ -77,16 +77,41 @@ APPROVED_TEXT = set(APPROVED.keys())
 # 技术标记词: 在剥离 ID token 后, 若剩余"语义"仅是这些标签词本身 -> 无可描述内容 -> KEEP。
 # 有界小集合: anim/animation 等是模组技术标签, 不是姿势描述。
 _TECH_TAG = {"anim", "animation", "anims"}
+# 内部占位/技术标识 (开发用, 非给玩家看的描述): 无空格的 camelCase 或含下划线的标识符 -> KEEP
+_CAMEL_ID = re.compile(r"^[a-z][A-Za-z0-9]*(?:[A-Z][a-z0-9]+)+$")
+_UNDERSCORE_ID = re.compile(r"^[a-zA-Z0-9_]+_[a-zA-Z0-9_]+$")
+
+def _is_technical_identifier(text: str) -> bool:
+    """是否为开发用技术标识符 (非玩家可见描述): 如 placeholderIntro / my_var / pkg_001。
+    仅当 无空格 且 (camelCase 或含下划线 或 特定占位前缀) 才判为技术串。
+    避免误伤 walk5/right-click 这类真实姿势命名。"""
+    t = text.strip()
+    if not t or " " in t:
+        return False
+    if _UNDERSCORE_ID.match(t):
+        return True
+    if _CAMEL_ID.match(t):
+        return True
+    # 常见占位/内部标识前缀 (开发用)
+    pl = t.lower()
+    for pre in ("placeholder", "pkg_", "var_", "id_", "anim_", "intro", "outro", "todo", "deprecated"):
+        if pl.startswith(pre):
+            return True
+    return False
+
 
 def translate_mode_for(text: str):
     """翻译层三档决策 (确定性, 不需要 LLM)。
 
     返回 (mode, 需翻译的语义片段列表, 全部 token)。
-    KEEP  = 无可翻译语义 (剥离 ID/技术标记 token 后为空)
+    KEEP  = 无可翻译语义 (剥离 ID/技术标记 token 后为空) 或 纯技术标识符
     PARTIAL = 既有需保留的 ID/编号, 又有真实语义片段
     FULL    = 全语义
     """
     t = norm_text(text)
+    # 纯技术/占位标识符 -> KEEP, 不进模型
+    if _is_technical_identifier(t):
+        return "KEEP", [], [t]
     sem, ids = _split_semantic_tokens(t)
     # 孤立小写单字母 (a/i/o 等冠词/代词) 视为语义词, 非编号索引
     # (真实姿势索引/性别标记如 A/B/F/M 通常为大写)
@@ -134,8 +159,39 @@ _WORD_GLOSS = {k: v for k, v in _GLOSSARY.items() if " " not in k}
 
 
 # ---------------- 精确切分 + 重建 (格式/编号/版本由程序保留, 模型只翻语义 phrase) ----------------
-# 断点 = 受保护 token (编号/版本/*anim/纯数字) 或 独立分隔符 (斜杠/括号/逗号/空白包裹的连字符)
+# 断点 = 受保护 token (编号/版本/*anim/纯数字/性别代号) 或 独立分隔符 (斜杠/括号/逗号/空白包裹的连字符)
+# 注意: f2/m2/f1 等性别/索引代号、6.2/v.2 等含点版本, 必须整体当 prot, 不给模型改的机会
 _PROTECTED = re.compile(r"\d[\w]*(?:-\d[\w]*)*|\*anim\w*|[\u0400-\u04ffA-Za-z]\d[\w]*|\b(?:V|v)\d+(?:\.\d+)?\b|[\d.]+")
+# 单字母性别/索引代号 + 数字, 整体作为 prot (f2/m2/f1/M2); 仅当独立 token, 避免误吃 walk5/paper2
+def _is_gender_code(t, i):
+    """t[i] 处是否是一个独立小写/单字母+数字的代号 (如 f2/m2/f1/M2)。
+    不匹配 walk5/paper2 这类自然词, 也不匹配 ALL IN ONE 里的多字母词。"""
+    if i >= len(t) - 1:
+        return None
+    c = t[i]
+    if not c.isalpha() or not t[i + 1].isdigit():
+        return None
+    prev_ok = (i == 0 or not t[i - 1].isalnum())   # 前一个不是字母数字 → 独立起点
+    if not prev_ok:
+        return None
+    # 向后吞下数字/点/短横 (f2, f2.1, M2, 1A 则不含字母在前)
+    j = i + 1
+    while j < len(t) and (t[j].isdigit() or t[j] in ".-"):
+        # . 后必须跟数字才继续 (防止 f2. 吃掉结尾点)
+        if t[j] == "." and (j + 1 >= len(t) or not t[j + 1].isdigit()):
+            break
+        if t[j] == "-" and (j + 1 >= len(t) or not t[j + 1].isdigit()):
+            break
+        j += 1
+    tok = t[i:j]
+    # 必须含数字, 且整串即单字母/短字母+数字号 (排除 walk5: walk 是多字母自然词)
+    if any(ch.isdigit() for ch in tok) and len(tok) <= 4 and sum(1 for ch in tok if ch.isalpha()) <= 1:
+        return tok
+    return None
+
+
+# 版本号含点: v.2 / 6.2 / v.1 整体 prot (正则在 _PROTECTED 之外再补: 字母+v.+数字, 数字.数字)
+_VERSION_DOT = re.compile(r"(?:[Vv]\s*[.]\s*\d+(?:[.]\d+)*|\d+[.]\d+)")
 # 分隔符: / \ , ; ( ) [ ] * , 以及前后带空白的连字符 (不计 angry-sad 内部连字符)
 _SEPARATOR = re.compile(r"\\|/|[,;:()\[\]*]|\s+-\s+|\s+-$|^-\s+")
 
@@ -158,6 +214,25 @@ def split_semantic_spans(text: str):
             sem_buf.clear()
 
     while i < n:
+        # 1) 版本号含点 (v.2 / 6.2 / v.1) 整体 prot, 不给模型改 . 的机会
+        vm = _VERSION_DOT.match(t, i)
+        if vm:
+            tok = vm.group(0)
+            # 仅当独立边界, 避免误吃 "6.2" 之类的自然小数在词中
+            prev_ok = (i == 0 or not t[i - 1].isalnum())
+            nxt_ok = (vm.end() == n or not t[vm.end()].isalnum())
+            if prev_ok and nxt_ok:
+                flush_sem()
+                segs.append({"t": tok, "kind": "prot"})
+                i = vm.end()
+                continue
+        # 2) 单字母性别/索引代号 (f2/m2/f1) 整体 prot
+        code = _is_gender_code(t, i)
+        if code:
+            flush_sem()
+            segs.append({"t": code, "kind": "prot"})
+            i += len(code)
+            continue
         # 受保护 token 优先 (是硬断点); 必须 以数字/*/大写字母数字混合 开头才安全, 避免误吃自然词
         pm = _PROTECTED.match(t, i)
         if pm:
@@ -214,6 +289,28 @@ def rebuild(segs: list, resolved: dict):
         else:
             out.append(s["t"])
     return "".join(out)
+
+
+def restore_protected(segs: list, translation: str):
+    """防御性兜底: 强制恢复受保护 token。
+
+    理论上 prot 段从不过模型、rebuild 已原样带回; 但为保不变量
+    (模型没有任何机会/任何边界情况改掉保护 token), 这里再扫一遍 final 串:
+    对每个 prot 段, 若其原样未出现在译文中, 则追加/补回, 保证格式/编号/版本不被吞。
+    """
+    if not translation:
+        return translation
+    for s in segs:
+        if s["kind"] != "prot":
+            continue
+        tok = s["t"]
+        if not tok.strip():
+            continue
+        if tok in translation:
+            continue
+        # 未在译文中原样出现 (被模型吞/改) -> 补回 (主要防止纯技术 token 丢失)
+        translation += tok
+    return translation
 
 
 def glossary_resolve(segs: list):
@@ -735,6 +832,7 @@ def main():
             resolved = dict(j["gloss"])
             resolved.update(phrase_res.get(r.get("translation_id"), {}))
             translation = rebuild(j["segs"], resolved)
+            translation = restore_protected(j["segs"], translation)
             if any(v.startswith("[ERR") for v in resolved.values()):
                 status = "PENDING"
             elif translation.strip():

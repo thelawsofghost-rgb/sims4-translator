@@ -61,19 +61,29 @@ def residual_english(zh: str) -> list:
     return bad
 
 
-def missing_protected(text: str, translation: str, psp: str, mode: str) -> list:
-    """PARTIAL 行: 校验 protected_spans 声明的 token 是否都出现在译文中。"""
+def missing_protected(text: str, translation: str, psp: str, mode: str):
+    """PARTIAL 行: 校验 protected_spans 声明的 token 是否都出现在译文中。
+
+    返回 (error_tokens, case_tokens):
+      - error_tokens: 语义被改/整体缺失 (f2->女2 / 直接不见) -> ERROR
+      - case_tokens : 仅大小写差异 (f2->F2) -> REVIEW/CASE_VARIATION
+    """
     if mode != "PARTIAL_TRANSLATE" or not psp:
-        return []
-    miss = []
+        return [], []
+    err, case = [], []
     for span in [s for s in psp.split(";") if s.strip()]:
         tok = span.split("@")[0].strip()
         # 纯标点/空白不参与校验 (如 "." 来自编号格式)
         if not tok or not re.search(r"[A-Za-z0-9]", tok):
             continue
-        if tok not in translation:
-            miss.append(tok)
-    return miss
+        if tok in translation:
+            continue
+        if tok.lower() in translation.lower():
+            # 仅大小写不同 (f2 -> F2): 降级 REVIEW
+            case.append(tok)
+        else:
+            err.append(tok)
+    return err, case
 
 
 def numbers_changed(source: str, translation: str) -> list:
@@ -125,10 +135,12 @@ def classify(row: dict) -> (str, str):
     if gloss_left:
         notes.append("残留glossary英文词:" + ",".join(gloss_left))
 
-    # 4) protected token 丢失 (PARTIAL)
-    miss = missing_protected(src, zh, psp, mode)
+    # 4) protected token 丢失 (PARTIAL) / 仅大小写差异 -> REVIEW
+    miss, case = missing_protected(src, zh, psp, mode)
     if miss:
         return "ERROR", "受保护token丢失:" + ",".join(miss)
+    if case:
+        return "REVIEW", "受保护token大小写变体:" + ",".join(case)
 
     # 5) 编号丢失/改变
     nc = numbers_changed(src, zh)
