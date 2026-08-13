@@ -608,7 +608,7 @@ class OllamaTranslator(Translator):
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.2,
-            "max_tokens": 4096,
+            "max_tokens": 8192,
         }
         url = f"{self.base_url}/v1/chat/completions"
         try:
@@ -617,13 +617,38 @@ class OllamaTranslator(Translator):
             if r.status_code == 404:  # 老版本 Ollama 无 /v1, 回退原生
                 return self._call_native(items)
             r.raise_for_status()
-            content = r.json()["choices"][0]["message"]["content"]
+            msg = r.json()["choices"][0]["message"]
+            content = self._msg_zh(msg)   # content 空时从 reasoning 提取 (reasoning 模型)
             return self._parse_numbered(content, items)
         except Exception as e:  # noqa
             try:
                 return self._call_native(items)
             except Exception as e2:  # noqa
                 return [k for k, _ in items], [f"[ERR openai:{e!r} native:{e2!r}]" for _ in items]
+
+    @staticmethod
+    def _msg_zh(msg):
+        """从 Ollama 返回的 message 提取译文。
+
+        优先 content; 若 content 为空 (reasoning 模型把输出放 reasoning),
+        fallback 到 reasoning 的末尾提取最终译文。
+        """
+        content = (msg or {}).get("content") or ""
+        if content.strip():
+            return content
+        reasoning = (msg or {}).get("reasoning") or ""
+        if not reasoning.strip():
+            return ""
+        # reasoning 模型: 思维链末尾通常藏着最终译文。取非空尾行, 去掉常见思考引导前缀。
+        lines = [ln.strip() for ln in reasoning.splitlines() if ln.strip()]
+        tail = lines[-1] if lines else ""
+        for pre in ("译文:", "翻译:", "所以", "因此", "最终译文:", "答案是"):
+            if tail.startswith(pre):
+                tail = tail[len(pre):].strip()
+                break
+        # 末尾常带无关的总结/引号, 再精炼一次
+        tail = tail.strip("\"'「」‘’").strip()
+        return tail
 
     def _call_native(self, items):
         """Ollama 原生 /api/chat, 逐条 (可靠优先)。返回 (keys, zh)。"""
@@ -644,27 +669,28 @@ class OllamaTranslator(Translator):
                 "model": self.model,
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False,
-                "options": {"temperature": 0.2, "num_predict": 128},
+                "options": {"temperature": 0.2, "num_predict": 512},
             }
             r = self._httpx.post(url, json=payload, timeout=180)
             r.raise_for_status()
             keys.append(k)
+            msg = {}
             try:
                 j = r.json()
-                content = (j.get("message") or {}).get("content", "")
+                msg = j.get("message") or {}
             except Exception:
                 # 可能是 SSE 流式: 逐行取 data: 里的 final message
-                content = ""
                 for ln in r.text.splitlines():
-                    if ln.startswith("data:"):
+                    if ln.startswith("data:") and ln.strip() != "data: [DONE]":
                         import json as _j
                         seg = ln[5:].strip()
-                        if seg and seg != "[DONE]":
+                        if seg:
                             try:
-                                content = (_j.loads(seg).get("message") or {}).get("content", content)
+                                msg = (_j.loads(seg).get("message") or {})
                             except Exception:
                                 pass
-            zhs.append((content or "").strip())
+            zh = self._msg_zh(msg)   # content 空时从 reasoning 提取
+            zhs.append(zh)
         return keys, zhs
 
     @staticmethod
