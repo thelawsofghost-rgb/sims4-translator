@@ -206,6 +206,11 @@ def test_cache_resume():
     print("\n== 6. cache hit/miss + resume ==")
     d = OUT / "cache_test"
     d.mkdir(parents=True, exist_ok=True)
+    # 隔离: 清掉可能残留的 cache, 保证"首次全 miss"断言成立
+    for ext in ("translation_cache.db",):
+        fp = d / ext
+        if fp.exists():
+            fp.unlink()
     _make_todo(d / "translations_todo.csv")
 
     # 第1次: 首次 -> 全 miss (需调模型)
@@ -233,6 +238,10 @@ def test_100phrase_simulation():
     print("\n== 7. 100 phrase 模拟 (miss->hit->97/3) ==")
     d = OUT / "sim100"
     d.mkdir(parents=True, exist_ok=True)
+    # 隔离: 清掉残留 cache, 保证首次全 miss
+    fp = d / "translation_cache.db"
+    if fp.exists():
+        fp.unlink()
     # 直接造 100 个 translation_id + source
     cols = ["translation_id", "source_text", "decision", "reason",
             "detected_language", "translation", "status", "source_hash"]

@@ -993,18 +993,18 @@ def main():
                 if translation is None:
                     translation = ""
                     status = "PENDING"
-        psp = protected_spans(text) if mode == "PARTIAL_TRANSLATE" else ""
-        done_rows.append({
-            "translation_id": r.get("translation_id"),
-            "source_text": text,
-            "decision": "TRANSLATE" if text in APPROVED_TEXT else r.get("decision"),
-            "translate_mode": "APPROVED" if mode == "APPROVED" else mode,
-            "detected_language": lang,
-            "protected_spans": psp,
-            "translation": translation,
-            "status": status,
-            "source_hash": r.get("source_hash"),
-        })
+            psp = protected_spans(text) if mode == "PARTIAL_TRANSLATE" else ""
+            done_rows.append({
+                "translation_id": r.get("translation_id"),
+                "source_text": text,
+                "decision": "TRANSLATE" if text in APPROVED_TEXT else r.get("decision"),
+                "translate_mode": "APPROVED" if mode == "APPROVED" else mode,
+                "detected_language": lang,
+                "protected_spans": psp,
+                "translation": translation,
+                "status": status,
+                "source_hash": r.get("source_hash"),
+            })
         with open(DONE, "w", encoding="utf-8-sig", newline="") as f:
             w = csv.DictWriter(f, fieldnames=done_cols)
             w.writeheader(); w.writerows(done_rows)
