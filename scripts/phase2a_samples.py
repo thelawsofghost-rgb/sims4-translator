@@ -86,7 +86,7 @@ _TAG_MF = re.compile(r"^[mf]$", re.I)
 # ---- 技术内部标识 -> TECHNICAL_LABEL (默认不译) ----
 # 特征: a2o_ / 大量下划线 / START|STOP / loopN / _seated_x / 蛇纹命名
 _TECH_LABEL = re.compile(
-    r"^(?=.*[A-Za-z])(?=.*\d).*\(?:^|_)(?:a2o_|loop\d|start|stop|seated|standing|lying)(?:_|$)",
+    r"^(?=.*[A-Za-z])(?=.*\d).*(?:^|_)(?:a2o_|loop\d|start|stop|seated|standing|lying)(?:_|$)",
     re.I)
 _TECH_HEAVY_UNDERSCORE = (
     lambda t: t.count("_") >= 2 and bool(re.search(r"\d", t))
