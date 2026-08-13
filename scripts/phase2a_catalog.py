@@ -206,9 +206,18 @@ if __name__ == "__main__":
         print(f"[fx] 非严格模式: 计数与生产预期可能不同 (TRANSLATE+REVIEW={n_todo_expected})")
 
     # translation_id 唯一性
-    dups = {k: v for k, v in id_seen.items() if v > 1}
+    # 若重复, 打印冲突的来源文本 (raw repr 暴露空白/大小写差异) 以便定位
+    id_text_map = {}
+    for cr in cat_rows:
+        id_text_map.setdefault(cr["translation_id"], []).append(cr["source_text"])
+    dups = {k: v for k, v in id_text_map.items() if len(v) > 1}
     if dups:
-        print(f"\n[!!] translation_id 重复 {len(dups)} 组: {list(dups.items())[:10]}。停止。")
+        print(f"\n[!!] translation_id 重复 {len(dups)} 组。冲突文本如下 (repr 暴露空白/大小写差异):")
+        for k, v in list(dups.items())[:40]:
+            print(f"  {k}  x{len(v)}:")
+            for t in v:
+                print(f"      repr={t!r}  len={len(t)}")
+        print("停止。")
         sys.exit(2)
 
     # KEEP 完整性: translation 必须为空
