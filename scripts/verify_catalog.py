@@ -36,6 +36,7 @@ LANG_CASES = [
     ("Revisando","es", "NON_ENGLISH_SEMANTIC","REVIEW"),
     ("Asomado", "es",  "NON_ENGLISH_SEMANTIC","REVIEW"),
     ("Mirando", "es",  "NON_ENGLISH_SEMANTIC","REVIEW"),
+    ("Asustado","es",  "NON_ENGLISH_SEMANTIC","REVIEW"),
     ("All in One","en","ENGLISH_SEMANTIC",    "TRANSLATE"),
 ]
 for text, wl, wr, wd in LANG_CASES:

@@ -66,6 +66,7 @@ def is_cyrillic(s): return any('\u0400' <= c <= '\u04ff' for c in s)
 
 _LEX_ES = {"el","la","los","las","y","un","una","con","para","por","del","que","de","se",
            "hombre","mujer","mujeres","señor","señora","revisando","asomado","mirando",
+           "asustado","asustada","asustados","asustadas",
            "sentado","sentada","pie","manos","cabeza","brazos","piernas","beso","bailando"}
 _LEX_FR = {"le","la","les","et","un","une","des","du","de","en","pour","avec","femme","homme",
            "garçon","fille","baiser","danse"}
