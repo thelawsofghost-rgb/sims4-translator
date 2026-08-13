@@ -33,20 +33,7 @@ import sys, csv, re
 from pathlib import Path
 from collections import Counter, defaultdict
 
-out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "D:/projects/sims4_trans/output")
-cand_csv = out_dir / "pose_translation_candidates.csv"
-
-rows = []
-with open(cand_csv, encoding="utf-8-sig") as f:
-    for r in csv.DictReader(f):
-        rows.append(r)
-print(f"候选总数: {len(rows)}")
-# ---- 诊断: 候选表上下文列覆盖 ----
-for col in ["sample_pose_pack", "sample_stbl_instance", "sample_neighbor_poses", "sample_locale"]:
-    n = sum(1 for r in rows if (r.get(col) or "").strip())
-    print(f"[诊断] 候选表 {col:24} 非空 = {n}/{len(rows)}")
-
-# ---------------- 轻量分类 ----------------
+# ---- 分类器 + 语言检测/detect 由 import 暴露; 候选装载与抽样仅在直接运行时执行 ----# ---------------- 轻量分类 ----------------
 def is_cjk(s):  return any('\u4e00' <= c <= '\u9fff' for c in s)
 def is_kr(s):   return any('\uac00' <= c <= '\ud7af' or '\u3130' <= c <= '\u318f' for c in s)
 def is_jp(s):   return any('\u3040' <= c <= '\u30ff' for c in s)
@@ -525,134 +512,149 @@ def classify_with_context(s: str, neigh: str = "") -> tuple:
     return ("REVIEW", "SEMANTIC_UNCERTAIN")
 
 
-for r in rows:
-    r["_cls"] = classify(r["source_text"])
-    r["_decision"], r["_reason"] = classify_with_context(
-        r["source_text"], r.get("sample_neighbor_display_texts") or "")
-    r["_ref"] = int(r.get("ref_count") or 0)
 
-cls_dist = Counter(r["_cls"] for r in rows)
-print("\n类型分布 (3567 候选):")
-for k, v in cls_dist.most_common():
-    print(f"  {k:18} = {v}")
-print("\ndecision 分布:")
-for k, v in Counter(r["_decision"] for r in rows).most_common():
-    print(f"  {k:12} = {v}")
+if __name__ == "__main__":
+    out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "D:/projects/sims4_trans/output")
+    cand_csv = out_dir / "pose_translation_candidates.csv"
 
-# ---------------- 分层抽样 100 条 (跨 package 随机, 可复现) ----------------
-# 2026-08-13 重写: 上一版严重聚集于少数 package (PROPER_NAME 全来自 Gounafiers,
-# SEMANTIC_WITH_NUM 27 条来自 2 个 SamsSims 包), 不能当类别准确率。
-# 新策略: 固定 seed; 同一 package 每类别最多 1~2 条; 优先覆盖尽可能多 package/作者。
-import random
-random.seed(20260813)
+    rows = []
+    with open(cand_csv, encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            rows.append(r)
+    print(f"候选总数: {len(rows)}")
+    # ---- 诊断: 候选表上下文列覆盖 ----
+    for col in ["sample_pose_pack", "sample_stbl_instance", "sample_neighbor_poses", "sample_locale"]:
+        n = sum(1 for r in rows if (r.get(col) or "").strip())
+        print(f"[诊断] 候选表 {col:24} 非空 = {n}/{len(rows)}")
 
-samples = []
-seen_text = set()          # 全局去重 source_text
-pkg_used = {}              # pkg -> {label -> count}  每类别每包限额
-
-# 每 package 每类别最大抽取数 (重点类别放宽到 2, 其余 1)
-PER_PKG_CAP = {
-    "专名/作者": 2, "语义不确定": 2, "带数字语义名": 2,
-    "普通短句": 1, "长姿势名": 1, "Left/Right/方向": 1,
-    "非语义标签": 1, "技术内部标识": 1, "成人/姿势术语": 1, "其他/补充": 1,
-}
-
-
-def _pkg_of(r):
-    return str(r.get("sample_package") or "").strip()
-
-
-def pick(pred, n, label):
-    """跨 package 分层随机抽 n 条 (固定 seed)。硬上限 100; 同一包同一 label 最多 PER_PKG_CAP。"""
-    pool = []
     for r in rows:
-        if r["source_text"] in seen_text:
-            continue
-        if not pred(r):
-            continue
-        pkg = _pkg_of(r)
-        if pkg_used.setdefault(pkg, {}).get(label, 0) >= PER_PKG_CAP.get(label, 1):
-            continue
-        pool.append(r)
-    random.shuffle(pool)
-    got = 0
-    for r in pool:
-        if len(samples) >= 100:      # 全局硬上限
-            break
-        if got >= n:
-            break
-        if r["source_text"] in seen_text:
-            continue
-        pkg = _pkg_of(r)
-        if pkg_used[pkg].get(label, 0) >= PER_PKG_CAP.get(label, 1):
-            continue
-        samples.append((label, r))
-        seen_text.add(r["source_text"])
-        pkg_used[pkg][label] = pkg_used[pkg].get(label, 0) + 1
-        got += 1
-    if got < n:
-        print(f"  [提示] {label}: 跨包配额/总上限下仅抽到 {got}/{n}")
-    return got
+        r["_cls"] = classify(r["source_text"])
+        r["_decision"], r["_reason"] = classify_with_context(
+            r["source_text"], r.get("sample_neighbor_display_texts") or "")
+        r["_ref"] = int(r.get("ref_count") or 0)
+
+    cls_dist = Counter(r["_cls"] for r in rows)
+    print("\n类型分布 (3567 候选):")
+    for k, v in cls_dist.most_common():
+        print(f"  {k:18} = {v}")
+    print("\ndecision 分布:")
+    for k, v in Counter(r["_decision"] for r in rows).most_common():
+        print(f"  {k:12} = {v}")
+
+    # ---------------- 分层抽样 100 条 (跨 package 随机, 可复现) ----------------
+    # 2026-08-13 重写: 上一版严重聚集于少数 package (PROPER_NAME 全来自 Gounafiers,
+    # SEMANTIC_WITH_NUM 27 条来自 2 个 SamsSims 包), 不能当类别准确率。
+    # 新策略: 固定 seed; 同一 package 每类别最多 1~2 条; 优先覆盖尽可能多 package/作者。
+    import random
+    random.seed(20260813)
+
+    samples = []
+    seen_text = set()          # 全局去重 source_text
+    pkg_used = {}              # pkg -> {label -> count}  每类别每包限额
+
+    # 每 package 每类别最大抽取数 (重点类别放宽到 2, 其余 1)
+    PER_PKG_CAP = {
+        "专名/作者": 2, "语义不确定": 2, "带数字语义名": 2,
+        "普通短句": 1, "长姿势名": 1, "Left/Right/方向": 1,
+        "非语义标签": 1, "技术内部标识": 1, "成人/姿势术语": 1, "其他/补充": 1,
+    }
 
 
-print("\n抽样 (跨 package 分层随机, seed=20260813, 全局上限 100):")
+    def _pkg_of(r):
+        return str(r.get("sample_package") or "").strip()
 
-# ---- 主评审三袋: 30/40/30 = 100, 优先抽满 ----
-# 4) 专名 —— 重点, 跨包 30 条 (尽量 30 个不同 package)
-pick(lambda r: r["_cls"] == "PROPER_NAME", 30, "专名/作者")
-# 5) 带数字语义名 —— 重点, 跨包 30 条
-pick(lambda r: r["_cls"] == "SEMANTIC_WITH_NUM", 30, "带数字语义名")
-# 6) 语义不确定 —— 重点, 跨包 40 条
-pick(lambda r: r["_cls"] == "SEMANTIC_UNCERTAIN", 40, "语义不确定")
 
-# ---- 次要复核小袋: 只占剩余额度, 不超 100 ----
-# 7) 非语义标签 (少量抽查)
-pick(lambda r: r["_cls"] == "NON_SEMANTIC_TAG", 8, "非语义标签")
-# 8) 技术内部标识 (少量抽查)
-pick(lambda r: r["_cls"] == "TECHNICAL_LABEL", 6, "技术内部标识")
-# 1) 普通短句
-short_sem = [r for r in rows if r["_cls"] == "ENGLISH_SEMANTIC" and len(r["source_text"]) <= 24]
-pick(lambda r: r in short_sem, 6, "普通短句")
-# 2) 长姿势名
-long_sem = [r for r in rows if r["_cls"] == "ENGLISH_SEMANTIC" and len(r["source_text"]) > 40]
-pick(lambda r: r in long_sem, 3, "长姿势名")
-# 3) Left/Right/方向
-pick(lambda r: r["source_text"].strip().lower() in {"left","right","top","bottom","front","back"}, 2, "Left/Right/方向")
-# 9) 成人/姿势术语
-adult_kw = re.compile(r"(sex|kiss|fuck|fuckin|blow|oral|thrust|penetrat|nude|strip|bdsm|mastur|orgasm|cum|erect|arous|bondage|vibrat|fellat|cunniling|anal|breast|ass\b|booty|pussy|dick|whore|lust|seduct|flirt|tease|massage|sass)", re.I)
-pick(lambda r: bool(adult_kw.search(r["source_text"])), 3, "成人/姿势术语")
-# 10) 其他 (若仍未满 100 则跨包补足)
-pick(lambda r: True, 100 - len(samples), "其他/补充")
+    def pick(pred, n, label):
+        """跨 package 分层随机抽 n 条 (固定 seed)。硬上限 100; 同一包同一 label 最多 PER_PKG_CAP。"""
+        pool = []
+        for r in rows:
+            if r["source_text"] in seen_text:
+                continue
+            if not pred(r):
+                continue
+            pkg = _pkg_of(r)
+            if pkg_used.setdefault(pkg, {}).get(label, 0) >= PER_PKG_CAP.get(label, 1):
+                continue
+            pool.append(r)
+        random.shuffle(pool)
+        got = 0
+        for r in pool:
+            if len(samples) >= 100:      # 全局硬上限
+                break
+            if got >= n:
+                break
+            if r["source_text"] in seen_text:
+                continue
+            pkg = _pkg_of(r)
+            if pkg_used[pkg].get(label, 0) >= PER_PKG_CAP.get(label, 1):
+                continue
+            samples.append((label, r))
+            seen_text.add(r["source_text"])
+            pkg_used[pkg][label] = pkg_used[pkg].get(label, 0) + 1
+            got += 1
+        if got < n:
+            print(f"  [提示] {label}: 跨包配额/总上限下仅抽到 {got}/{n}")
+        return got
 
-# ---------------- 输出 ----------------
-print(f"\n抽样总数: {len(samples)} / 100")
-out_cols = ["sample_group", "text_class", "source_text", "ref_count", "unique_keys",
-            "sample_package", "sample_pose_pack", "sample_stbl_instance", "sample_locale",
-            "neighbor_poses", "neighbor_display_texts", "decision", "reason"]
-sample_out = out_dir / "translation_samples_100.csv"
-with open(sample_out, "w", newline="", encoding="utf-8-sig") as f:
-    w = csv.DictWriter(f, fieldnames=out_cols)
-    w.writeheader()
-    for grp, r in samples:
-        w.writerow({
-            "sample_group": grp,
-            "text_class": r["_cls"],
-            "source_text": r["source_text"],
-            "ref_count": r.get("ref_count", ""),
-            "unique_keys": r.get("unique_keys", ""),
-            "sample_package": r.get("sample_package", ""),
-            "sample_pose_pack": r.get("sample_pose_pack", ""),
-            "sample_stbl_instance": r.get("sample_stbl_instance", ""),
-            "sample_locale": r.get("sample_locale", ""),
-            "neighbor_poses": r.get("sample_neighbor_poses", ""),
-            "neighbor_display_texts": r.get("sample_neighbor_display_texts", ""),
-            "decision": r.get("_decision", ""),
-            "reason": r.get("_reason", ""),
-        })
-print(f"已写出: {sample_out}")
-print("\n按样本组统计:")
-for grp, cnt in Counter(g for g, _ in samples).most_common():
-    print(f"  {grp:16} = {cnt}")
-print("\ndecision 分布 (抽样内):")
-for k, v in Counter(r.get("_decision", "") for _, r in samples).most_common():
-    print(f"  {k:12} = {v}")
+
+    print("\n抽样 (跨 package 分层随机, seed=20260813, 全局上限 100):")
+
+    # ---- 主评审三袋: 30/40/30 = 100, 优先抽满 ----
+    # 4) 专名 —— 重点, 跨包 30 条 (尽量 30 个不同 package)
+    pick(lambda r: r["_cls"] == "PROPER_NAME", 30, "专名/作者")
+    # 5) 带数字语义名 —— 重点, 跨包 30 条
+    pick(lambda r: r["_cls"] == "SEMANTIC_WITH_NUM", 30, "带数字语义名")
+    # 6) 语义不确定 —— 重点, 跨包 40 条
+    pick(lambda r: r["_cls"] == "SEMANTIC_UNCERTAIN", 40, "语义不确定")
+
+    # ---- 次要复核小袋: 只占剩余额度, 不超 100 ----
+    # 7) 非语义标签 (少量抽查)
+    pick(lambda r: r["_cls"] == "NON_SEMANTIC_TAG", 8, "非语义标签")
+    # 8) 技术内部标识 (少量抽查)
+    pick(lambda r: r["_cls"] == "TECHNICAL_LABEL", 6, "技术内部标识")
+    # 1) 普通短句
+    short_sem = [r for r in rows if r["_cls"] == "ENGLISH_SEMANTIC" and len(r["source_text"]) <= 24]
+    pick(lambda r: r in short_sem, 6, "普通短句")
+    # 2) 长姿势名
+    long_sem = [r for r in rows if r["_cls"] == "ENGLISH_SEMANTIC" and len(r["source_text"]) > 40]
+    pick(lambda r: r in long_sem, 3, "长姿势名")
+    # 3) Left/Right/方向
+    pick(lambda r: r["source_text"].strip().lower() in {"left","right","top","bottom","front","back"}, 2, "Left/Right/方向")
+    # 9) 成人/姿势术语
+    adult_kw = re.compile(r"(sex|kiss|fuck|fuckin|blow|oral|thrust|penetrat|nude|strip|bdsm|mastur|orgasm|cum|erect|arous|bondage|vibrat|fellat|cunniling|anal|breast|ass\b|booty|pussy|dick|whore|lust|seduct|flirt|tease|massage|sass)", re.I)
+    pick(lambda r: bool(adult_kw.search(r["source_text"])), 3, "成人/姿势术语")
+    # 10) 其他 (若仍未满 100 则跨包补足)
+    pick(lambda r: True, 100 - len(samples), "其他/补充")
+
+    # ---------------- 输出 ----------------
+    print(f"\n抽样总数: {len(samples)} / 100")
+    out_cols = ["sample_group", "text_class", "source_text", "ref_count", "unique_keys",
+                "sample_package", "sample_pose_pack", "sample_stbl_instance", "sample_locale",
+                "neighbor_poses", "neighbor_display_texts", "decision", "reason"]
+    sample_out = out_dir / "translation_samples_100.csv"
+    with open(sample_out, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=out_cols)
+        w.writeheader()
+        for grp, r in samples:
+            w.writerow({
+                "sample_group": grp,
+                "text_class": r["_cls"],
+                "source_text": r["source_text"],
+                "ref_count": r.get("ref_count", ""),
+                "unique_keys": r.get("unique_keys", ""),
+                "sample_package": r.get("sample_package", ""),
+                "sample_pose_pack": r.get("sample_pose_pack", ""),
+                "sample_stbl_instance": r.get("sample_stbl_instance", ""),
+                "sample_locale": r.get("sample_locale", ""),
+                "neighbor_poses": r.get("sample_neighbor_poses", ""),
+                "neighbor_display_texts": r.get("sample_neighbor_display_texts", ""),
+                "decision": r.get("_decision", ""),
+                "reason": r.get("_reason", ""),
+            })
+    print(f"已写出: {sample_out}")
+    print("\n按样本组统计:")
+    for grp, cnt in Counter(g for g, _ in samples).most_common():
+        print(f"  {grp:16} = {cnt}")
+    print("\ndecision 分布 (抽样内):")
+    for k, v in Counter(r.get("_decision", "") for _, r in samples).most_common():
+        print(f"  {k:12} = {v}")
