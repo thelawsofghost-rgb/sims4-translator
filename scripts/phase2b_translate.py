@@ -611,6 +611,9 @@ def main():
 
     # ---- phrase-level 翻译准备: 每行切 phrase -> glossary 直译 -> 剩余交模型(带 context) -> rebuild ----
     jobs = {}
+    n_modelfree = 0   # 该行所有 phrase 均由 glossary 直译 (零模型调用)
+    n_needmodel = 0   # 该行至少 1 个 phrase 需交模型
+    n_phrase_total = 0
     for d in need_translate:
         r = d[0]
         tid = r.get("translation_id")
@@ -619,10 +622,27 @@ def main():
         gloss, pending = glossary_resolve(segs)
         # 过滤纯空白 phrase (切分残留), 不交模型
         pending = [p for p in pending if p["t"].strip()]
+        n_phrase_total += len(pending)
+        if pending:
+            n_needmodel += 1
+        else:
+            n_modelfree += 1
         ctx_str = " | ".join(ctx[:3]) if ctx else ""
         for p in pending:
             p["ctx"] = ctx_str
         jobs[tid] = {"segs": segs, "gloss": gloss, "pending": pending}
+
+    # 精确分类 breakdown (必须严格等于 todo 行数)
+    _appr = sum(1 for d in decided if d[1] == "APPROVED")
+    _keep = sum(1 for d in decided if d[1] == "KEEP")
+    _full = sum(1 for d in decided if d[1] == "FULL_TRANSLATE")
+    _part = sum(1 for d in decided if d[1] == "PARTIAL_TRANSLATE")
+    print("[计数] TOTAL={}  APPROVED={}  KEEP={}  PARTIAL={}  FULL={}  | 校验: TOTAL==({}+{}+{}+{})".format(
+        len(decided), _appr, _keep, _part, _full, _appr, _keep, _part, _full))
+    print("[计数] 待翻译(PENDING=FULL+PARTIAL)={}  | 其中 glossary 直译(零模型)={}  需调模型(≥1 phrase)={}  总 phrase={}".format(
+        len(need_translate), n_modelfree, n_needmodel, n_phrase_total))
+    print("[计数] 校验 待翻译 == glossary直译 + 需调模型 : {} == {}".format(
+        len(need_translate), n_modelfree + n_needmodel))
 
     # 构建一条待翻译 = 单个 pending phrase + 其 context (便于逐 phrase 映射回填)
     phrase_items = []          # (composite_key, block_text)
