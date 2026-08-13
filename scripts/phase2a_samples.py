@@ -76,7 +76,10 @@ _SEM_WORD = {"kiss","kissing","kicked","kicking","open","opening","door","wall",
              "tired","bored","surprised","shocked","worried","embarrassed",
              "shrug","inspect","inspecting","cower","uncomfortable","scream","shout",
              "doubt","disappointment","surprise","rescue","nervous","squeeze","pinching",
-             "balled","fists","fist","peering","peek","pointing","pointed","lean","leaning"}
+             "balled","fists","fist","peering","peek","pointing","pointed","lean","leaning",
+             # 2026-08-13 新增确定语义单短词 (从 SEMANTIC_UNCERTAIN 归位)
+             "deadpan","uncertain","rambling","arrogant","couple","teleporter","gasp",
+             "conversational","calm","standing"}
 
 # ---- 编号/角色/变体标签 -> NON_SEMANTIC_TAG (默认不译) ----
 # 纯数字 / 小数: 1 2.1
@@ -106,6 +109,9 @@ _TAG_FEMME_HOMME = re.compile(r"^(?:femme|homme)\s*_?\s*\d+$", re.I)
 _TAG_NUM_SLASH_LETTER = re.compile(r"^\d+/[A-Za-z]$")
 # 数字/空格斜杠/字母 角色编号: 2/ F 3/ M (数字+空格+斜杠隔空格+字母)
 _TAG_NUM_SPACE_SLASH_LETTER = re.compile(r"^\d+\s*/\s*[A-Za-z]$")
+# 补充: 纯数字-数字编号: 2-1 / 4-1 / 4-2 (作者槽位编码, 无字母无语义)
+_TAG_NUM_DASH_NUM = re.compile(r"^\d+-\d+$")
+
 # 字母+数字-数字+字母 变体: F2-1A / F2-1B (字母编号-子变体)
 _TAG_LETNUM_DASH_LET = re.compile(r"^[A-Za-z]+\d+-\d+[A-Za-z]$")
 # 数字.单字母 性别变体: 1.F 1.M 2.F 2.M
@@ -124,8 +130,45 @@ _TECH_HEAVY_UNDERSCORE = (
     lambda t: t.count("_") >= 2 and bool(re.search(r"\d", t))
 )
 
+# 功能 MOD 阶段/状态命名: Intro/Loop + NPC/Object (Brainwashing Machine, 无数字无下划线)
+_TECH_STAGE = re.compile(r"^(?:intro|loop)(?:npc|object)$", re.I)
+
 # 账号/作者 handle 强证据: 含数字字母混合且无空格的笔名 (t0nischwartz/Simmerianne93)
 _HANDLE_LIKE = re.compile(r"^(?=.*[0-9])(?=.*[A-Za-z])[A-Za-z0-9_.-]{1,20}$")
+
+
+# ---- 一般性「物件/位置槽位标签」规则 (2026-08-13) ----
+# 不是逐词白名单, 而是: 通用物件/位置语义域词干 + 紧贴数字(+可选性别字母) -> 作者编号标签
+# 覆盖: stool1~6 armchair1~3 chair1~5 bar1~3 kitchencounter1~2 doorarch1 standing1 laying3
+# 必须带数字且紧贴 (无空格)。"Rescue 7" 有空格是展示结构 -> 语义。Teleporter/Chair 无数字 -> 不触发。
+# 词干仅限通用物件/位置/身体槽位语义域, 不含情绪/动作词 (那些即便 short 也仍是语义)。
+_SLOT_STEMS = {
+    # 家具/台面
+    "stool", "armchair", "chair", "bar", "desk", "table", "bench", "sofa", "couch",
+    "counter", "kitchencounter", "shelf", "shelves", "cabinet", "dresser", "wardrobe",
+    "closet", "bed", "crib", "cradle", "seat", "cushion", "pillow", "mattress",
+    # 建筑/位置
+    "door", "doorarch", "doorway", "window", "wall", "floor", "ceiling", "stair",
+    "stairs", "ladder", "railing", "balcony", "porch", "patio", "roof", "garden",
+    "yard", "fence", "gate", "pool", "shower", "bathtub", "sink", "toilet", "tile",
+    # 身体/动作槽位
+    "arm", "leg", "head", "foot", "hand", "knee", "hip", "shoulder", "neck",
+    "waist", "chest", "back", "lap", "ground", "floor", "side", "front", "chairside",
+    # 站/坐/躺 体位
+    "standing", "sitting", "laying", "lying", "kneeling", "crouching", "squatting",
+    "kneel", "crouch", "squat", "lyingdown", "standingup", "sitdown", "lean",
+}
+# 词干+紧贴数字(+可选单个性别/变体字母结尾, 如 stool1 / stool1f / bar2m)
+_TAG_SLOT_NUM = re.compile(r"^([A-Za-z]+)(\d+)(?:[A-Za-z])?$")
+
+
+def _is_slot_label(t: str) -> bool:
+    """物件/位置词干 + 紧贴数字 -> 作者编号标签 (NON_SEMANTIC_TAG)。"""
+    m = _TAG_SLOT_NUM.match(t.strip())
+    if not m:
+        return False
+    stem = m.group(1).lower()
+    return stem in _SLOT_STEMS or stem.rstrip("s") in _SLOT_STEMS
 
 
 def _is_non_semantic_tag(t: str) -> bool:
@@ -139,7 +182,9 @@ def _is_non_semantic_tag(t: str) -> bool:
                 or _TAG_NUM_SLASH_LETTER.match(tt)
                 or _TAG_NUM_SPACE_SLASH_LETTER.match(tt)
                 or _TAG_LETNUM_DASH_LET.match(tt) or _TAG_NUM_DOT_LETTER.match(tt)
-                or _TAG_RANGE_MF.match(tt) or _TAG_USE_MF_NUM.match(tt))
+                or _TAG_RANGE_MF.match(tt) or _TAG_USE_MF_NUM.match(tt)
+                or _TAG_NUM_DASH_NUM.match(tt)
+                or _is_slot_label(tt))
 
 
 def _is_technical_label(t: str) -> bool:
@@ -147,6 +192,8 @@ def _is_technical_label(t: str) -> bool:
     if _TECH_LABEL.match(tt):
         return True
     if _TECH_HEAVY_UNDERSCORE(tt):
+        return True
+    if _TECH_STAGE.match(tt):
         return True
     return False
 
@@ -240,64 +287,94 @@ print("\n类型分布 (3567 候选):")
 for k, v in cls_dist.most_common():
     print(f"  {k:18} = {v}")
 
-# ---------------- 分层抽样 100 条 ----------------
+# ---------------- 分层抽样 100 条 (跨 package 随机, 可复现) ----------------
+# 2026-08-13 重写: 上一版严重聚集于少数 package (PROPER_NAME 全来自 Gounafiers,
+# SEMANTIC_WITH_NUM 27 条来自 2 个 SamsSims 包), 不能当类别准确率。
+# 新策略: 固定 seed; 同一 package 每类别最多 1~2 条; 优先覆盖尽可能多 package/作者。
+import random
+random.seed(20260813)
+
 samples = []
-seen = set()
+seen_text = set()          # 全局去重 source_text
+pkg_used = {}              # pkg -> {label -> count}  每类别每包限额
+
+# 每 package 每类别最大抽取数 (重点类别放宽到 2, 其余 1)
+PER_PKG_CAP = {
+    "专名/作者": 2, "语义不确定": 2, "带数字语义名": 2,
+    "普通短句": 1, "长姿势名": 1, "Left/Right/方向": 1,
+    "非语义标签": 1, "技术内部标识": 1, "成人/姿势术语": 1, "其他/补充": 1,
+}
+
+
+def _pkg_of(r):
+    return str(r.get("sample_package") or "").strip()
+
 
 def pick(pred, n, label):
-    got = 0
+    """跨 package 分层随机抽 n 条 (固定 seed 已设)。同一包同一 label 最多 PER_PKG_CAP。"""
+    # 候选池: 满足 pred + 未全局用过 + 未在本 label 抽过该 pkg
+    pool = []
     for r in rows:
+        if r["source_text"] in seen_text:
+            continue
+        if not pred(r):
+            continue
+        pkg = _pkg_of(r)
+        if pkg_used.setdefault(pkg, {}).get(label, 0) >= PER_PKG_CAP.get(label, 1):
+            continue
+        pool.append(r)
+    random.shuffle(pool)
+    got = 0
+    for r in pool:
         if got >= n:
             break
-        if r["source_text"] not in seen and pred(r):
-            samples.append((label, r))
-            seen.add(r["source_text"])
-            got += 1
+        if r["source_text"] in seen_text:
+            continue
+        pkg = _pkg_of(r)
+        if pkg_used[pkg].get(label, 0) >= PER_PKG_CAP.get(label, 1):
+            continue
+        samples.append((label, r))
+        seen_text.add(r["source_text"])
+        pkg_used[pkg][label] = pkg_used[pkg].get(label, 0) + 1
+        got += 1
+    if got < n:
+        print(f"  [提示] {label}: 跨包配额下仅抽到 {got}/{n}")
+    return got
 
-# 抽样策略: 重点复查污染最重的三袋
-# 总目标 100 条: PROPER_NAME=20 + SEMANTIC_WITH_NUM=30 + SEMANTIC_UNCERTAIN=20, 其余补齐
 
-# 1) 普通短句 (ENGLISH_SEMANTIC, 短)
+print("\n抽样 (跨 package 分层随机, seed=20260813):")
+# 1) 普通短句
 short_sem = [r for r in rows if r["_cls"] == "ENGLISH_SEMANTIC" and len(r["source_text"]) <= 24]
 pick(lambda r: r in short_sem, 6, "普通短句")
 
-# 2) 长姿势名 (英文长语义名)
+# 2) 长姿势名
 long_sem = [r for r in rows if r["_cls"] == "ENGLISH_SEMANTIC" and len(r["source_text"]) > 40]
 pick(lambda r: r in long_sem, 3, "长姿势名")
 
-# 3) Left / Right 及方向类
+# 3) Left/Right/方向
 pick(lambda r: r["source_text"].strip().lower() in {"left","right","top","bottom","front","back"}, 2, "Left/Right/方向")
 
-# 4) 专名 (PROPER_NAME) —— 重点, 抽 20 条 (此袋用户判定仍全误判, 需重新审视)
-pick(lambda r: r["_cls"] == "PROPER_NAME", 20, "专名/作者")
+# 4) 专名 —— 重点, 跨包 30 条 (尽量 30 个不同 package)
+pick(lambda r: r["_cls"] == "PROPER_NAME", 30, "专名/作者")
 
-# 5) 带数字语义名 (SEMANTIC_WITH_NUM) —— 重点, 抽 30 条
+# 5) 带数字语义名 —— 重点, 跨包 30 条
 pick(lambda r: r["_cls"] == "SEMANTIC_WITH_NUM", 30, "带数字语义名")
 
-# 6) 语义不确定 (SEMANTIC_UNCERTAIN) —— 重点, 抽 20 条
-pick(lambda r: r["_cls"] == "SEMANTIC_UNCERTAIN", 20, "语义不确定")
+# 6) 语义不确定 —— 重点, 跨包 40 条
+pick(lambda r: r["_cls"] == "SEMANTIC_UNCERTAIN", 40, "语义不确定")
 
-# 7) 非语义标签 (NON_SEMANTIC_TAG)
+# 7) 非语义标签 (已稳定, 少量抽查)
 pick(lambda r: r["_cls"] == "NON_SEMANTIC_TAG", 8, "非语义标签")
 
-# 8) 技术内部标识 (TECHNICAL_LABEL)
+# 8) 技术内部标识 (已稳定, 少量抽查)
 pick(lambda r: r["_cls"] == "TECHNICAL_LABEL", 6, "技术内部标识")
 
-# 9) 成人/姿势术语 (含关键词)
+# 9) 成人/姿势术语
 adult_kw = re.compile(r"(sex|kiss|fuck|fuckin|blow|oral|thrust|penetrat|nude|strip|bdsm|mastur|orgasm|cum|erect|arous|bondage|vibrat|fellat|cunniling|anal|breast|ass\b|booty|pussy|dick|whore|lust|seduct|flirt|tease|massage|sass)", re.I)
 pick(lambda r: bool(adult_kw.search(r["source_text"])), 3, "成人/姿势术语")
 
-# 10) 其他 (补足到 100)
-need = 100 - len(samples)
-if need < 0:
-    need = 0
-for r in rows:
-    if need <= 0:
-        break
-    if r["source_text"] not in seen:
-        samples.append(("其他/补充", r))
-        seen.add(r["source_text"])
-        need -= 1
+# 10) 其他 (补足到 100, 同样跨包)
+pick(lambda r: True, 100 - len(samples), "其他/补充")
 
 # ---------------- 输出 ----------------
 print(f"\n抽样总数: {len(samples)} / 100")
