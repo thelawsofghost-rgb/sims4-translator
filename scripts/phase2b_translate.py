@@ -342,17 +342,44 @@ class OllamaTranslator(Translator):
         import httpx
         self._httpx = httpx
 
-    def translate_batch(self, items, concurrency=4, per_call=8):
-        """按批次并发调用; 逐条失败时回退原生 /api/chat。返回 {key: zh}。"""
+    def translate_batch(self, items, concurrency=2, per_call=8, max_retry=3):
+        """按批次并发调用; 失败/空结果重试, 逐条回退原生 /api/chat。返回 {key: zh}。
+
+        全量场景(数千 phrase)下并发过高会压垮本机 Ollama 导致返回空译文,
+        这里压低并发并加入: 空结果重试 + native 回退。
+        """
         import concurrent.futures as cf
+        import time
         results = {}
-        batches = [items[i:i + per_call] for i in range(0, len(items), per_call)]
-        with cf.ThreadPoolExecutor(max_workers=concurrency) as ex:
-            futs = {ex.submit(self._call_openai, b): b for b in batches}
-            for fu in cf.as_completed(futs):
-                keymap, zh = fu.result()
-                for k, z in zip(keymap, zh):
-                    results[k] = z
+        cur = items[:]
+        for attempt in range(max_retry):
+            if not cur:
+                break
+            batches = [cur[i:i + per_call] for i in range(0, len(cur), per_call)]
+            got = {}
+            with cf.ThreadPoolExecutor(max_workers=concurrency) as ex:
+                futs = {ex.submit(self._call_openai, b): b for b in batches}
+                for fu in cf.as_completed(futs):
+                    keymap, zh = fu.result()
+                    for k, z in zip(keymap, zh):
+                        got[k] = z
+            # 完成/空 判定
+            done_here = {k: v for k, v in got.items() if v and not v.startswith("[ERR")}
+            results.update(done_here)
+            cur = [kvt for kvt in cur if kvt[0] not in done_here]
+            if cur and attempt < max_retry - 1:
+                print(f"[重试] 第{attempt+2}轮: 仍缺 {len(cur)} phrase, 稍候重试 ...")
+                time.sleep(3 * (attempt + 1))
+        # 仍缺失的: 用原生逐条兜底 (可靠优先)
+        if cur:
+            print(f"[回退] 剩余 {len(cur)} phrase 用原生 /api/chat 逐条兜底 ...")
+            for k, t in cur:
+                try:
+                    _, zh = self._call_native([(k, t)])
+                    if zh and zh[0] and not zh[0].startswith("[ERR"):
+                        results[k] = zh[0]
+                except Exception:  # noqa
+                    pass
         return results
 
     def _call_openai(self, items):
@@ -380,7 +407,7 @@ class OllamaTranslator(Translator):
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.2,
-            "max_tokens": 2048,
+            "max_tokens": 4096,
         }
         url = f"{self.base_url}/v1/chat/completions"
         try:
