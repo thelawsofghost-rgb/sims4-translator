@@ -192,6 +192,11 @@ def _is_gender_code(t, i):
 
 # 版本号含点: v.2 / 6.2 / v.1 整体 prot (正则在 _PROTECTED 之外再补: 字母+v.+数字, 数字.数字)
 _VERSION_DOT = re.compile(r"(?:[Vv]\s*[.]\s*\d+(?:[.]\d+)*|\d+[.]\d+)")
+# 下划线连接的字母数字编号: M1_1 / F2_4 / P2_1 -> 整体 prot (下划线是编号分隔, 非自然词)。
+# 仅匹配 单字母+数字+(_数字)+ 形态, 不误伤 walk_2/left_leg 这类自然下划线词
+_UNDERCODE = re.compile(r"[A-Za-z]\d+(?:_\d+)+")
+# 方括号技术标签: [L2S] / [anim] / [mw] / [P2] -> 整体 prot
+_BRACKET_TAG = re.compile(r"\[[\w./-]+\]")
 # 分隔符: / \ , ; ( ) [ ] * , 以及前后带空白的连字符 (不计 angry-sad 内部连字符)
 _SEPARATOR = re.compile(r"\\|/|[,;:()\[\]*]|\s+-\s+|\s+-$|^-\s+")
 
@@ -226,12 +231,30 @@ def split_semantic_spans(text: str):
                 segs.append({"t": tok, "kind": "prot"})
                 i = vm.end()
                 continue
+        # 2b) 下划线连接编号 (M1_1 / F2_4 / P2_1) 整体 prot —— 下划线与字母数字同属编号, 不给模型翻成"下划线"
+        #      (先于性别代号判断, 因 M1_1 应整体吞, 不能被 M1 性别代号抢先拆开)
+        um = _UNDERCODE.match(t, i)
+        if um:
+            prev_ok = (i == 0 or not t[i - 1].isalnum() or t[i - 1] == "_")
+            nxt_ok = (um.end() == n or not t[um.end()].isalnum())
+            if prev_ok and nxt_ok:
+                flush_sem()
+                segs.append({"t": um.group(0), "kind": "prot"})
+                i = um.end()
+                continue
         # 2) 单字母性别/索引代号 (f2/m2/f1) 整体 prot
         code = _is_gender_code(t, i)
         if code:
             flush_sem()
             segs.append({"t": code, "kind": "prot"})
             i += len(code)
+            continue
+        # 2c) 方括号技术标签 ([L2S] / [anim] / [P2]) 整体 prot
+        bm = _BRACKET_TAG.match(t, i)
+        if bm:
+            flush_sem()
+            segs.append({"t": bm.group(0), "kind": "prot"})
+            i = bm.end()
             continue
         # 受保护 token 优先 (是硬断点); 必须 以数字/*/大写字母数字混合 开头才安全, 避免误吃自然词
         pm = _PROTECTED.match(t, i)
