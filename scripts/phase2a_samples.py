@@ -13,6 +13,14 @@
   SEMANTIC_UNCERTAIN  拿不准是否专名→标此, 不硬猜 (宁可不确定, 不误跳 PROPER_NAME)
   NON_ENGLISH         非英文 (德语/法语/韩文/日文等)
 
+2026-08-13 第二轮 (decision/reason 分离 + 上下文第二层):
+  - 每个候选输出 decision (TRANSLATE/KEEP/REVIEW) + reason (SEMANTIC/SEMANTIC_WITH_NUM/
+    PROPER_NAME/NON_SEMANTIC_TAG/TECHNICAL_LABEL/...)。llama1 与 Faye 都是 KEEP(不译)
+    但 reason 必须不同 (llama1=>NON_SEMANTIC_TAG; Faye=>PROPER_NAME)。
+  - 不再无限扩 _SEM_WORD 白名单: 优先结构规则 (编号/性别/版本/槽位/方向+序号/下划线编号/
+    方括号/括号注解/构词法后缀)。剩余单短词拿不准时, 用 neighbor_display_texts 上下文层判定
+    (邻居全是语义词->语义; 全是编号->不译; 全是人名->PROPER_NAME)。
+
 translation_id 预览: candidate 表先给 source_text+context 分组示意,
   正式 translations.csv 将用 translation_id (source_text+context_group) 承载拆分。
 
@@ -111,6 +119,45 @@ _TAG_NUM_SLASH_LETTER = re.compile(r"^\d+/[A-Za-z]$")
 _TAG_NUM_SPACE_SLASH_LETTER = re.compile(r"^\d+\s*/\s*[A-Za-z]$")
 # 补充: 纯数字-数字编号: 2-1 / 4-1 / 4-2 (作者槽位编码, 无字母无语义)
 _TAG_NUM_DASH_NUM = re.compile(r"^\d+-\d+$")
+# 方向/位置/姿态词 + 连字符 + 纯编号: left-14 / right-15 / sitting-08 / standing-01
+#   (作者"方向/部位 + 序号"体系, 无实际语义标题; 区别于 "10 - Standing" 有空格=语义)
+_TAG_DIR_DASH_NUM = re.compile(r"^(?:left|right|sitting|standing|sit|stand|front|back|side|lying|laying|kneeling|kneel|crouch|crouching|squat|squatting|top|bottom|walking|walk|running|run)\s*-\s*\d{1,2}$", re.I)
+# 下划线编号: 03_02 / 04_01 (NN_NN, 纯数字下划线编号)
+_TAG_NUM_UNDERSCORE_NUM = re.compile(r"^\d{1,2}_\d{1,2}$")
+# 坐标/变量轴编号: x_1 / y_2 / x_3 (字母+下划线+数字, 坐标轴)
+_TAG_AXIS_UNDERSCORE_NUM = re.compile(r"^[A-Za-z]{1,3}_\d{1,2}$")
+# 版本标签 N V2 / N v.2 / N v2: 数字 + 空格/V 变体
+_TAG_NUM_V_SPACE = re.compile(r"^\d{1,2}\s*(?:v\.?|ver\.?|version)\s*\d{1,2}$", re.I)
+# [POSE N] 方括号编号: [POSE 8]
+_TAG_BRACKET_POSE = re.compile(r"^\s*\[\s*pose\s*\d+\s*\]\s*$", re.I)
+# POSE N-M 范围: POSE 9-13 / POSE 1-6
+_TAG_POSE_DASH_RANGE = re.compile(r"^pose\s*\d{1,2}-\d{1,2}$", re.I)
+# 数字(括号)注释标签: 4(move) / 5(move) / 6(move)
+_TAG_NUM_PAREN_ANNOT = re.compile(r"^\d{1,2}\s*\([A-Za-z]{1,12}\)\s*$")
+# 数字+空格+性别字母: 2 F / 1 M / 3 F (单数字+性别, 作者角色编号; 区别于 2 pose: woman 1 有语义)
+_TAG_NUM_SPACE_MF = re.compile(r"^\d{1,2}\s+[FM]$", re.I)
+# 数字-单字母+数字 变体: 3 - M2 / 4 - M1 (编号-性别版本)
+_TAG_NUM_DASH_MF_NUM = re.compile(r"^\d{1,2}\s*-\s*[FM]\d{1,2}$", re.I)
+# 数字+空格+性别+数字: 7 А2 含 Cyrillic 变体已由 NUM_DASH 覆盖; 2 F V2 也由 V 规则处理
+
+# Animation N / Animation NN: 动画序号标题 (Goodnight Animation Pack)
+_TAG_ANIMATION_NUM = re.compile(r"^animation\s*\d+$", re.I)
+# 纯性别单词+数字 (无空格): Female3 / Male2 (作者"性别+序号"编号)
+_TAG_MFWORD_NUM = re.compile(r"^(?:female|male|woman|man|boy|girl|child|infant|baby|teen|adult|senior|elder)\d+$", re.I)
+# "<性别词> N" 无 more 语义 -> 编号 (Male 7-2 已由 dash 规则覆盖; Male 2 / Female 1)
+_TAG_MFWORD_SPACE_NUM = re.compile(r"^(?:female|male|woman|man|boy|girl|child|infant|baby|teen|adult|senior|elder)\s+\d{1,2}$", re.I)
+# "<性别词> N-N" 角色+双编号: Male 7-2 / Female 3-1 / Female 2-1
+_TAG_MFWORD_DASH_NUM = re.compile(r"^(?:female|male|woman|man|boy|girl|child|infant|baby|teen|adult|senior|elder)\s*\d{1,2}\s*-\s*\d{1,2}$", re.I)
+# 编号+字母+(注解) 动画/变体标注: 2b (animation) P.W acc / 2a (static)
+_TAG_NUM_LET_PAREN_ANNOT = re.compile(r"^\d{1,2}[A-Za-z]?\s*\([A-Za-z ]{1,15}\)", re.I)
+# "N v2 <性别>" / "07 v2 Male" / "05 Male" (数字+版本+性别, 无语义)
+_TAG_NUM_V_MF = re.compile(r"^\d{1,2}\s*(?:v\.?\d{1,2})?\s+(?:female|male|woman|man|boy|girl|child|infant|baby|teen)$", re.I)
+# "N - <性别>" 纯角色编号: 04 - Female / 05 - Male
+_TAG_NUM_DASH_MF = re.compile(r"^\d{1,2}\s*-\s*(?:female|male|woman|man|boy|girl)$", re.I)
+# 数字+性别字母+空格+角色词: 8M EMPLOYEE / 8F BOSS (角色编号+角色身份)
+_TAG_NUM_MF_ROLE = re.compile(r"^\d{1,2}[FM]\s+[A-Za-z'\s]{2,15}$", re.I)
+# 字母+数字+组合编号: Pose x12 / Pose x1 (字母 x + 数字, 坐标/变体)
+_TAG_POSE_X_NUM = re.compile(r"^pose\s*x\d{1,2}$", re.I)
 
 # 字母+数字-数字+字母 变体: F2-1A / F2-1B (字母编号-子变体)
 _TAG_LETNUM_DASH_LET = re.compile(r"^[A-Za-z]+\d+-\d+[A-Za-z]$")
@@ -154,12 +201,41 @@ _SLOT_STEMS = {
     # 身体/动作槽位
     "arm", "leg", "head", "foot", "hand", "knee", "hip", "shoulder", "neck",
     "waist", "chest", "back", "lap", "ground", "floor", "side", "front", "chairside",
+    # 2026-08-13 用户确认: 物件/容器/主题槽位 + 编号 -> NON_SEMANTIC_TAG (非逐词白名单语义, 而是槽位体系)
+    "gaming", "picnic", "llama", "container", "box", "crate", "basket", "bin", "tub",
+    "cupboard", "fridge", "oven", "stove", "washer", "dryer", "armoire", "hutch",
     # 站/坐/躺 体位
     "standing", "sitting", "laying", "lying", "kneeling", "crouching", "squatting",
     "kneel", "crouch", "squat", "lyingdown", "standingup", "sitdown", "lean",
 }
 # 词干+紧贴数字(+可选单个性别/变体字母结尾, 如 stool1 / stool1f / bar2m)
 _TAG_SLOT_NUM = re.compile(r"^([A-Za-z]+)(\d+)(?:[A-Za-z])?$")
+# 多词物件/位置槽位 + 数字结尾: "Gaming chair 1" / "Tied up chair 2" / "Tied up floor 1"
+#   规则: 末尾是紧贴编号, 且前面词干全部属于物件/位置/体位语义域 -> 槽位编号
+#   (区别于 "Rescue 7" 有空格但 Rescue 是动作语义词)。"Tied up chair 2" 含动作词 tied, 但
+#   "up chair N/foor N" 是明确槽位, 由用户确认归 NON_SEMANTIC_TAG。
+_TAG_SLOT_NUM_MULTIWORD = re.compile(r"^(?P<words>[A-Za-z][A-Za-z ]*[A-Za-z])\s+(?P<num>\d{1,2})$")
+
+
+_SLOT_DOMAIN_WORDS = ("gaming", "chair", "stool", "floor", "bed", "table", "desk", "sofa",
+                      "couch", "counter", "shelf", "cabinet", "door", "window", "wall",
+                      "stair", "stairs", "bench", "seat", "pool", "tub", "sink", "toilet",
+                      "shower", "ground", "side", "front", "back", "top", "lap", "kneel",
+                      "kneeling", "crouch", "crouching", "squat", "tied", "up", "down",
+                      "lying", "laying", "sitting", "standing", "container", "box", "crate")
+
+
+def _is_slot_label_mult(iw: list[str]) -> bool:
+    """多词槽位标签: 末尾紧贴数字, 且词干全在槽位/体位域 (含可忽略的功能词)。
+    仅当原始串形如 '<槽位词...> N' (空格分隔末尾数字) 时启用, 避免误伤纯语义词组。"""
+    if not iw:
+        return False
+    func_ok = {"a", "an", "the", "of", "on", "in", "at", "for", "and", "with"}
+    # 展平所有非功能词, 任一不在槽位域 -> 不是槽位标签
+    sig = [w.lower() for w in iw if w.lower() not in func_ok and w.lower() not in _FUNC]
+    if not sig:
+        return False
+    return all(w in _SLOT_DOMAIN_WORDS for w in sig)
 
 
 def _is_slot_label(t: str) -> bool:
@@ -184,7 +260,18 @@ def _is_non_semantic_tag(t: str) -> bool:
                 or _TAG_LETNUM_DASH_LET.match(tt) or _TAG_NUM_DOT_LETTER.match(tt)
                 or _TAG_RANGE_MF.match(tt) or _TAG_USE_MF_NUM.match(tt)
                 or _TAG_NUM_DASH_NUM.match(tt)
-                or _is_slot_label(tt))
+                or _TAG_DIR_DASH_NUM.match(tt) or _TAG_NUM_UNDERSCORE_NUM.match(tt)
+                or _TAG_AXIS_UNDERSCORE_NUM.match(tt) or _TAG_NUM_V_SPACE.match(tt)
+                or _TAG_BRACKET_POSE.match(tt) or _TAG_POSE_DASH_RANGE.match(tt)
+                or _TAG_NUM_PAREN_ANNOT.match(tt) or _TAG_NUM_SPACE_MF.match(tt)
+                or _TAG_NUM_DASH_MF_NUM.match(tt) or _TAG_ANIMATION_NUM.match(tt)
+                or _TAG_MFWORD_NUM.match(tt) or _TAG_MFWORD_SPACE_NUM.match(tt)
+                or _TAG_MFWORD_DASH_NUM.match(tt) or _TAG_NUM_LET_PAREN_ANNOT.match(tt)
+                or _TAG_NUM_V_MF.match(tt) or _TAG_NUM_DASH_MF.match(tt)
+                or _TAG_NUM_MF_ROLE.match(tt) or _TAG_POSE_X_NUM.match(tt)
+                or _is_slot_label(tt)
+                or (_TAG_SLOT_NUM_MULTIWORD.match(tt)
+                    and _is_slot_label_mult(re.findall(r"[A-Za-z]+", tt))))
 
 
 def _is_technical_label(t: str) -> bool:
@@ -248,10 +335,12 @@ def classify(s: str) -> str:
 
     # 5) 带数字但含真实语义 -> SEMANTIC_WITH_NUM (保序号翻文字)
     if re.search(r"\d", t):
-        # 只要不是纯标签/技术串/纯 handle, 带数字+有英文词 -> 语义带序号
-        if words and (has_func or has_sem_word or len(words) >= 2):
+        # 能走到这里的: 已过滤掉所有物件/角色/性别/技术/编号标签(步骤 2/2.5/3/3.5 及新 tag 规则),
+        # 剩余 = 带数字的语义姿势名。 只要含一个英文词 (无论单双词 + 序号), 即为语义带序号。
+        #   覆盖: Rescue 1 / Positive 3 / 7 - Sweet / 15 reverence / Walk 2
+        if words:
             return "SEMANTIC_WITH_NUM"
-        # 带数字但无明确语义证据: 拿不准 -> 语义不确定
+        # 带数字但无英文词 (纯 4(move) 等已在上层捕获, 此处为兜底)
         return "SEMANTIC_UNCERTAIN"
 
     # 6) 英文单词/短语
@@ -270,6 +359,17 @@ def classify(s: str) -> str:
     if len(words) >= 2 and len(t) <= 40:
         return "ENGLISH_SEMANTIC"
 
+    # 9.5) 自然语言形态 (构词法, 非单词白名单): -ing/-ed/-tion/-sion/-ous/-ful/-ive/-ly/-ness 等
+    #       后缀 -> 明显英文自然语言, 即便单短词也归语义 (Stretching/Pacing/Stressed/Explaining/
+    #       Confessing/Tripping/Catastrophizing/Playful/Solemn/Walk…)。这是结构判断, 不建逐个词白名单。
+    if len(words) == 1 and len(words[0]) <= 16:
+        w = words[0]
+        wl = w.lower()
+        if (wl in _SEM_WORD or wl.rstrip("s") in _SEM_WORD):
+            return "ENGLISH_SEMANTIC"
+        if re.search(r"(?:ing|ed|tion|sion|ous|ful|ive|ness|able|ible|est|er)\b$", wl):
+            return "ENGLISH_SEMANTIC"
+
     # 10) 单短词(非语义词表、非功能词): 无法确认是专名还是姿势名 -> 语义不确定
     if len(words) == 1 and len(words[0]) <= 15:
         return "SEMANTIC_UNCERTAIN"
@@ -277,15 +377,84 @@ def classify(s: str) -> str:
     # 11) 其他(长串内部名等) -> 语义
     return "ENGLISH_SEMANTIC"
 
-# 打分类
+# 打分类 (decision/reason 分离)
+#   decision = TRANSLATE / KEEP / REVIEW   (是否处理、是否送人工复核)
+#   reason   = 细分依据: SEMANTIC / SEMANTIC_WITH_NUM / PROPER_NAME /
+#              NON_SEMANTIC_TAG / TECHNICAL_LABEL / SYMBOL_OR_MIXED / SEMANTIC_UNCERTAIN
+# 说明: llama1 与 Faye 最终都是 KEEP(不译), 但 reason 必须不同
+#       (llama1 => NON_SEMANTIC_TAG; Faye => PROPER_NAME), 不能用"都不译"掩盖分类差异。
+def classify_meta(s: str) -> tuple:
+    cls = classify(s)
+    if cls in ("ENGLISH_SEMANTIC", "SEMANTIC_WITH_NUM"):
+        return ("TRANSLATE", cls)
+    if cls in ("PROPER_NAME", "NON_SEMANTIC_TAG", "TECHNICAL_LABEL"):
+        return ("KEEP", cls)
+    if cls in ("SYMBOL_OR_MIXED", "SEMANTIC_UNCERTAIN", "NON_ENGLISH"):
+        return ("REVIEW", cls)
+    return ("REVIEW", cls)
+
+
+def _split_neighbors(neigh: str) -> list[str]:
+    """把 neighbor_display_texts 拆成条目 (以 | 分隔, 也可能逗号/换行)。"""
+    if not neigh:
+        return []
+    parts = re.split(r"\s*\|\s*|\s*,\s*|\n+", neigh.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _neighbor_semantic_ratio(neigh: str):
+    """邻居中清晰语义条目占比 vs 清晰编号/专名条目占比。返回 (sem_cnt, tag_cnt)。"""
+    sem_cnt = tag_cnt = 0
+    for n in _split_neighbors(neigh):
+        c = classify(n)
+        if c in ("ENGLISH_SEMANTIC", "SEMANTIC_WITH_NUM"):
+            sem_cnt += 1
+        elif c in ("NON_SEMANTIC_TAG", "PROPER_NAME", "TECHNICAL_LABEL"):
+            tag_cnt += 1
+    return sem_cnt, tag_cnt
+
+
+def classify_with_context(s: str, neigh: str = "") -> tuple:
+    """分层分类: 先用结构规则 classify(), 若落到 SEMANTIC_UNCERTAIN(拿不准),
+    再用 neighbor_display_texts 上下文做第二层判断 —— 而不是无限加单词白名单。
+
+    - 邻居以清晰语义姿势名/情绪词为主 -> 提升为语义 (TRANSLATE / 原类别)
+    - 邻居以编号/性别/专名标签为主 -> 保持不译 (KEEP / NON_SEMANTIC_TAG)
+    - 邻居全是单短词人名/首字母大写 (Isaac|Elliot|Faye...) -> KEEP / PROPER_NAME
+    - 邻居也判断不出 -> 保留 REVIEW / SEMANTIC_UNCERTAIN (不硬猜)
+    """
+    cls = classify(s)
+    dec, rs = classify_meta(s)
+    # 只有拿不准的才动用上下文 (明确 TRANSLATE/KEEP 不动, 保持结构优先)
+    if dec != "REVIEW" or cls != "SEMANTIC_UNCERTAIN":
+        return dec, rs
+    nb = _split_neighbors(neigh)
+    sem_cnt, tag_cnt = _neighbor_semantic_ratio(neigh)
+    # 人名组: 邻居全是 单个首字母大写短词 (姓名集), 且本串也似人名 -> PROPER_NAME
+    if nb and all(re.fullmatch(r"[A-Z][a-z]{1,15}", n.strip()) for n in nb) \
+            and re.fullmatch(r"[A-Z][a-z]{1,15}", s.strip()):
+        return ("KEEP", "PROPER_NAME")
+    if sem_cnt >= 2 and sem_cnt > tag_cnt:
+        # 邻居几乎全是语义词 -> 本串也是姿势名 (Walk 在 Wave|Walk|Dance|Happy 邻居中)
+        return ("TRANSLATE", "SEMANTIC_UNCERTAIN->ENGLISH_SEMANTIC")
+    if tag_cnt >= 2 and tag_cnt > sem_cnt:
+        return ("KEEP", "NON_SEMANTIC_TAG")
+    return ("REVIEW", "SEMANTIC_UNCERTAIN")
+
+
 for r in rows:
     r["_cls"] = classify(r["source_text"])
+    r["_decision"], r["_reason"] = classify_with_context(
+        r["source_text"], r.get("sample_neighbor_display_texts") or "")
     r["_ref"] = int(r.get("ref_count") or 0)
 
 cls_dist = Counter(r["_cls"] for r in rows)
 print("\n类型分布 (3567 候选):")
 for k, v in cls_dist.most_common():
     print(f"  {k:18} = {v}")
+print("\ndecision 分布:")
+for k, v in Counter(r["_decision"] for r in rows).most_common():
+    print(f"  {k:12} = {v}")
 
 # ---------------- 分层抽样 100 条 (跨 package 随机, 可复现) ----------------
 # 2026-08-13 重写: 上一版严重聚集于少数 package (PROPER_NAME 全来自 Gounafiers,
@@ -376,7 +545,7 @@ pick(lambda r: True, 100 - len(samples), "其他/补充")
 print(f"\n抽样总数: {len(samples)} / 100")
 out_cols = ["sample_group", "text_class", "source_text", "ref_count", "unique_keys",
             "sample_package", "sample_pose_pack", "sample_stbl_instance", "sample_locale",
-            "neighbor_poses", "neighbor_display_texts"]
+            "neighbor_poses", "neighbor_display_texts", "decision", "reason"]
 sample_out = out_dir / "translation_samples_100.csv"
 with open(sample_out, "w", newline="", encoding="utf-8-sig") as f:
     w = csv.DictWriter(f, fieldnames=out_cols)
@@ -394,8 +563,13 @@ with open(sample_out, "w", newline="", encoding="utf-8-sig") as f:
             "sample_locale": r.get("sample_locale", ""),
             "neighbor_poses": r.get("sample_neighbor_poses", ""),
             "neighbor_display_texts": r.get("sample_neighbor_display_texts", ""),
+            "decision": r.get("_decision", ""),
+            "reason": r.get("_reason", ""),
         })
 print(f"已写出: {sample_out}")
 print("\n按样本组统计:")
 for grp, cnt in Counter(g for g, _ in samples).most_common():
     print(f"  {grp:16} = {cnt}")
+print("\ndecision 分布 (抽样内):")
+for k, v in Counter(r.get("_decision", "") for _, r in samples).most_common():
+    print(f"  {k:12} = {v}")
