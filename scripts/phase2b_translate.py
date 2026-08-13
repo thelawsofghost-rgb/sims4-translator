@@ -219,12 +219,7 @@ class OllamaTranslator(Translator):
         return results
 
     def _call_openai(self, items):
-        if len(items) == 1:
-            # 单条: 用原生 /api/chat 更简单可靠
-            try:
-                return self._call_native(items)
-            except Exception as e:  # noqa
-                return [k for k, _ in items], [f"[ERR {e!r}]" for _ in items]
+        """优先 OpenAI-compatible /v1/chat/completions, 失败/404 回退原生 /api/chat。"""
         lines = "\n".join(f"{i}. {t}" for i, (_, t) in enumerate(items))
         prompt = (
             "你是模拟人生4动作包汉化专家。把下面的英文/多语动作姿态名翻译为简体中文。\n"
@@ -251,12 +246,12 @@ class OllamaTranslator(Translator):
                 return self._call_native(items)
             r.raise_for_status()
             content = r.json()["choices"][0]["message"]["content"]
+            return self._parse_numbered(content, items)
         except Exception as e:  # noqa
             try:
                 return self._call_native(items)
             except Exception as e2:  # noqa
                 return [k for k, _ in items], [f"[ERR openai:{e!r} native:{e2!r}]" for _ in items]
-        return self._parse_numbered(content, items)
 
     def _call_native(self, items):
         """Ollama 原生 /api/chat, 逐条 (可靠优先)。返回 (keys, zh)。"""
@@ -277,7 +272,22 @@ class OllamaTranslator(Translator):
             r = self._httpx.post(url, json=payload, timeout=180)
             r.raise_for_status()
             keys.append(k)
-            zhs.append(r.json()["message"]["content"].strip())
+            try:
+                j = r.json()
+                content = (j.get("message") or {}).get("content", "")
+            except Exception:
+                # 可能是 SSE 流式: 逐行取 data: 里的 final message
+                content = ""
+                for ln in r.text.splitlines():
+                    if ln.startswith("data:"):
+                        import json as _j
+                        seg = ln[5:].strip()
+                        if seg and seg != "[DONE]":
+                            try:
+                                content = (_j.loads(seg).get("message") or {}).get("content", content)
+                            except Exception:
+                                pass
+            zhs.append((content or "").strip())
         return keys, zhs
 
     @staticmethod
@@ -344,25 +354,39 @@ def main():
         # 分层: FULL / PARTIAL 各自按固定种子抽, 尽量跨不同 source; 并强制纳入非英语 + *anim/编号样例
         import random
         random.seed(20260813)
-        full = [d for d in need_translate if d[1] == "FULL_TRANSLATE"]
-        part = [d for d in need_translate if d[1] == "PARTIAL_TRANSLATE"]
+        need = need_translate[:]
+        full = [d for d in need if d[1] == "FULL_TRANSLATE"]
+        part = [d for d in need if d[1] == "PARTIAL_TRANSLATE"]
         # 非英语候选 (detected_language 非 en/zxx)
-        nonen = [d for d in need_translate if d[0].get("detected_language") not in ("en", "zxx")]
-        # 优先保证抽样覆盖: 非英语, PARTIAL 含 *anim/编号, 普通英文语义
+        nonen = [d for d in need if d[0].get("detected_language") not in ("en", "zxx")]
+        # 优先保证覆盖: 非英语, PARTIAL 含 *anim/编号, 普通英文语义; 但总数必须 == SAMPLE
         forced = []
-        for d in nonen[:3]:
+        for d in nonen:
+            if len(forced) >= SAMPLE:
+                break
             if d not in forced:
                 forced.append(d)
         proto = [d for d in part if re.search(r"\*anim|\d", d[0].get("source_text", "") or "")]
-        for d in proto[:3]:
+        for d in proto:
+            if len(forced) >= SAMPLE:
+                break
             if d not in forced:
                 forced.append(d)
-        pool = [d for d in need_translate if d not in forced]
+        # full 普通语义 (保证至少 1 条, 若空间允许)
+        for d in full:
+            if len(forced) >= SAMPLE:
+                break
+            if d not in forced:
+                forced.append(d)
+        pool = [d for d in need if d not in forced]
         random.shuffle(pool)
         pick = forced + pool[: max(0, SAMPLE - len(forced))]
         sample_pick = set(id(d) for d in pick)
-        need_translate = [d for d in need_translate if id(d) in sample_pick]
-        print(f"[抽样] 抽查 {len(need_translate)} 行 (含非英语={len([d for d in need_translate if d[0].get('detected_language') not in ('en','zxx')])})")
+        need_translate = [d for d in need if id(d) in sample_pick]
+        print(f"[抽样] 抽查 {len(need_translate)} 行 "
+              f"(FULL={len([d for d in need_translate if d[1]=='FULL_TRANSLATE'])}, "
+              f"PARTIAL={len([d for d in need_translate if d[1]=='PARTIAL_TRANSLATE'])}, "
+              f"非英语={len([d for d in need_translate if d[0].get('detected_language') not in ('en','zxx')])})")
 
     # 翻译引擎: 默认本机 Ollama
     if NO_LLM or (SAMPLE is None and len(need_translate) == 0):
