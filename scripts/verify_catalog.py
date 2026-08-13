@@ -38,6 +38,17 @@ LANG_CASES = [
     ("Mirando", "es",  "NON_ENGLISH_SEMANTIC","REVIEW"),
     ("Asustado","es",  "NON_ENGLISH_SEMANTIC","REVIEW"),
     ("All in One","en","ENGLISH_SEMANTIC",    "TRANSLATE"),
+    # --- ID-like token 剥离后再检测语言 (用户 2026-08-13 拍板) ---
+    # 单个西里尔字符混入编号不应判 ru, 剥离 A1 后为英文语义 -> en
+    ("11 А1 sits", "en", "SEMANTIC_WITH_NUM", "TRANSLATE"),
+    # 纯编号 + 西里尔字母索引 -> 剥离后无语义词 -> zxx
+    ("6 А2",       "zxx", "NON_SEMANTIC_TAG", "KEEP"),
+    # 完整俄语短语必须判 ru (剥离 F1/3Д 后剩 ВЕРСИЯ С ЯЗЫКОМ)
+    ("F1 (ВЕРСИЯ С 3Д ЯЗЫКОМ)", "ru", "SYMBOL_OR_MIXED", "REVIEW"),
+    ("РЫЦАРЬ / KNIGHT", "ru", "SYMBOL_OR_MIXED", "REVIEW"),
+    ("41Ha Holding Arm Fist Up", "en", "SEMANTIC_WITH_NUM", "TRANSLATE"),
+    # 剥离 *anim/编号后无语义词 -> zxx (分类仍为语义, KEEP 由翻译层决定)
+    ("5M *anim",   "zxx", "SEMANTIC_WITH_NUM", "TRANSLATE"),
 ]
 for text, wl, wr, wd in LANG_CASES:
     cls = classify(text); dec, reason = classify_with_context(text, "")

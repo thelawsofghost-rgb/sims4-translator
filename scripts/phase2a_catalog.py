@@ -74,19 +74,58 @@ _LEX_DE = {"der","die","das","und","ein","eine","mit","für","von","zu","auf","s
 _LEX_IT = {"il","lo","la","i","gli","e","un","una","con","per","da","del","della","seduto","in","piedi"}
 _LEX_PT = {"o","a","os","as","e","um","uma","com","para","por","do","da","de","em","sentado","pé"}
 
+# ---- ID-like token 剥离 (语言检测第二层) ----
+# 先剥离/忽略编号、版本号、动画标记、括号标签、孤立单字母索引等 ID-like token,
+# 再对剩余的真实语义部分做语言检测。避免单个西里尔字符混入编号(如 А1, 3Д)拖累整条判 ru,
+# 但完整俄语短语(如 ВЕРСИЯ С ЯЗЫКОМ)必须判 ru。
+_ID_TOKEN_INNER = re.compile(r"[\[\]()*]")
+
+def _is_id_token(tok: str) -> bool:
+    """判断单个 token 是否为作者编号/技术标记而非语义词。"""
+    if not tok:
+        return True
+    # 括号/方括号/星号 -> 作者标签 (如 [L2S], [POSE 6], *anim, (Female))
+    if _ID_TOKEN_INNER.search(tok):
+        return True
+    # 无任何字母 -> 纯数字/编号 (如 1, 1-7, 2-1, 8-11)
+    if not re.search(r"[A-Za-z\u0400-\u04ff]", tok):
+        return True
+    # 含数字 且 混字母/西里尔 -> 编号 (如 A1, 5M, 41Ha, F1, C1-3, 7-18, v2, 3Д)
+    if re.search(r"\d", tok):
+        return True
+    # 孤立单字母拉丁索引 (A/B/F/M 等) -> 编号/性别/姿势索引
+    if re.fullmatch(r"[A-Za-z]", tok):
+        return True
+    return False
+
+def _split_semantic_tokens(t: str):
+    """按空白和常见分隔符分词, 返回 (语义token列表, ID-like token列表)。"""
+    sem, ids = [], []
+    for raw in re.split(r"[\s/\\()\[\],]+", t):
+        tok = raw.strip()
+        if not tok:
+            continue
+        (ids if _is_id_token(tok) else sem).append(tok)
+    return sem, ids
+
 def detect_language(s: str, cls: str, reason: str) -> str:
     t = (s or "").strip()
-    words = re.findall(r"[A-Za-z]{2,}", t)
-    has_alpha_word = any(len(w) >= 2 for w in words)
-    if not has_alpha_word:
-        return "zxx"                       # 纯编号/单字母索引/技术串: 无语言内容
+    sem_tokens, _ = _split_semantic_tokens(t)
+    sem_text = " ".join(sem_tokens)
+    # 只在真实语义部分找字母词 (拉丁与西里尔都算)
+    words = re.findall(r"[A-Za-z]{2,}", sem_text)
+    cyr_words = re.findall(r"[\u0400-\u04ff]{2,}", sem_text)
+    has_content = bool(words) or bool(cyr_words) \
+        or is_cjk(sem_text) or is_kr(sem_text) or is_jp(sem_text)
+    if not has_content:
+        return "zxx"                       # 剥离 ID token 后无真实语义词
     if reason in ("NON_SEMANTIC_TAG", "TECHNICAL_LABEL"):
         return "zxx"
     if cls in ("NON_ENGLISH_SEMANTIC",):
-        if is_cjk(t): return "zh"
-        if is_kr(t):  return "ko"
-        if is_jp(t):  return "ja"
-        if is_cyrillic(t): return "ru"
+        if is_cjk(sem_text): return "zh"
+        if is_kr(sem_text):  return "ko"
+        if is_jp(sem_text):  return "ja"
+        if cyr_words: return "ru"
         lset = set(w.lower() for w in words)
         if lset & _LEX_ES: return "es"
         if lset & _LEX_FR: return "fr"
@@ -94,10 +133,10 @@ def detect_language(s: str, cls: str, reason: str) -> str:
         if lset & _LEX_IT: return "it"
         if lset & _LEX_PT: return "pt"
         return "und"
-    if is_cjk(t): return "zh"
-    if is_kr(t):  return "ko"
-    if is_jp(t):  return "ja"
-    if is_cyrillic(t): return "ru"
+    if is_cjk(sem_text): return "zh"
+    if is_kr(sem_text):  return "ko"
+    if is_jp(sem_text):  return "ja"
+    if cyr_words: return "ru"
     return "en"
 
 def source_hash(s: str) -> str:
