@@ -5,8 +5,9 @@
 
 分类 (轻量启发式, 供人工确认; 作者/角色/品牌名默认保留不硬翻):
   ENGLISH_SEMANTIC    可读英文短语/姿势描述 (送翻译)
-  SEMANTIC_WITH_NUM   带数字但含真实语义 (翻文字, 保序号; e.g. "Bed 2 - Kissing Belly")
-  NON_SEMANTIC_TAG    编号/序号标签 非语义 (e.g. "1" "2.1" "F2" "3M" "Pose 1") 默认不译
+  SEMANTIC_WITH_NUM   带数字但含真实语义 (翻文字, 保序号; e.g. "4 - Arms Crossed")
+  NON_SEMANTIC_TAG    编号/角色/变体标签 非语义 (e.g. "1" "2.1" "F2" "3M" "Pose 1" "Female 2" "1-A") 默认不译
+  TECHNICAL_LABEL     技术内部标识 (a2o_/loopN/START/STOP/_seated_x/蛇纹) 默认不译
   PROPER_NAME         强势专名 (作者 handle / 角色 / 品牌 / 账号格式) 保留不译
   SYMBOL_OR_MIXED     符号/混合/难以归类
   SEMANTIC_UNCERTAIN  拿不准是否专名→标此, 不硬猜 (宁可不确定, 不误跳 PROPER_NAME)
@@ -60,29 +61,54 @@ _DIR_SEM = {"left","right","top","bottom","front","back","up","down","sit","stoo
 # 姿势/成人相关强语义词: 命中即语义(即便标题大小写/单短词)
 _SEM_WORD = {"kiss","kissing","kicked","kicking","open","opening","door","wall","bed","stairs","stair",
              "belly","breasts","breast","tease","teasing","massage","flirty","sass","couch","love",
-             "ride","riding","clean","drunk","drunk","confession","goth","emotion","argue","argument",
+             "ride","riding","clean","drunk","confession","goth","emotion","argue","argument",
              "listen","listening","music","sad","male","female","punch","pulling","dance","dancing",
-             "thrust","oral","nude","strip","orgasm","lick","rub","grind","spank"}
+             "thrust","oral","nude","strip","orgasm","lick","rub","grind","spank",
+             "happy","angry","sad","normal","mum","mom","thinking","think","crossed","arms"}
 
-# 纯编号标签正则 -> NON_SEMANTIC_TAG
-#   "1" "2.1" "F2" "3M" "1F" "Pose 1" "Pose 2" "3A" "4B" "2b" "m1" "f4"
-_TAG_STRICT = re.compile(r"^(?:\d+(?:\.\d+)?|[FfMm][0-9]+(?:[A-Za-z]*)|(?:[Pp]ose\s*)?\d+[A-Za-z]*[A-Za-z]*)$")
-# 宽松补充: 纯 "字母+数字" 或 "数字+字母" 无空格且整体较短
-_TAG_ALNUM = re.compile(r"^(?=.{1,4}$)[A-Za-z]*[0-9][A-Za-z0-9]*$")
-_TAG_POSE = re.compile(r"^pose\s*\d+$", re.I)
+# ---- 编号/角色/变体标签 -> NON_SEMANTIC_TAG (默认不译) ----
+# 纯数字 / 小数: 1 2.1
+_TAG_PURE_NUM = re.compile(r"^\d+(?:\.\d+)?$")
+# 数字+单字母变体(不限 M/F): 3-M 1-F 2-A 1-B 4-M 1-A
+_TAG_NUM_DASH_LETTER = re.compile(r"^\d+-[A-Za-z]$")
+# 单字母+数字: F2 3M 1F M2 2b m1 f4 (字母开头的作者编号体系)
+_TAG_LETTER_NUM = re.compile(r"^[A-Za-z]\d+$")
+# 数字+字母(无空格, 短): 1A 3A 2B 6F 2b 8F
+_TAG_NUM_LETTER = re.compile(r"^\d+[A-Za-z]$")
+# Pose N / PoseN
+_TAG_POSE = re.compile(r"^(?:pose\s*)?\d+$", re.I)
+# 角色+数字: Female 1~6 / Male 1~6 / Pose 4 Female / Female 2
+_TAG_FEMALE_MALE_NUM = re.compile(r"^(?:female|male)\s+\d+$", re.I)
+_TAG_ROLE_POS_NUM = re.compile(r"^pose\s+\d+\s+female$|^pose\s+\d+\s+male$", re.I)
+# m / f 单个字母 (性别标签)
+_TAG_MF = re.compile(r"^[mf]$", re.I)
 
-# 专名强证据: 账号格式 / 作者 handle / 明显标识符 (含数字字母混合且无空格的笔名)
-#   t0nischwartz / Simmerianne93 / mdrayvv / GREENSOUL(?), 但 GREENSOUL 更像作者封名
+# ---- 技术内部标识 -> TECHNICAL_LABEL (默认不译) ----
+# 特征: a2o_ / 大量下划线 / START|STOP / loopN / _seated_x / 蛇纹命名
+_TECH_LABEL = re.compile(
+    r"^(?=.*[A-Za-z])(?=.*\d).*\(?:^|_)(?:a2o_|loop\d|start|stop|seated|standing|lying)(?:_|$)",
+    re.I)
+_TECH_HEAVY_UNDERSCORE = (
+    lambda t: t.count("_") >= 2 and bool(re.search(r"\d", t))
+)
+
+# 账号/作者 handle 强证据: 含数字字母混合且无空格的笔名 (t0nischwartz/Simmerianne93)
 _HANDLE_LIKE = re.compile(r"^(?=.*[0-9])(?=.*[A-Za-z])[A-Za-z0-9_.-]{1,20}$")
-# 全小写短词串可能是作者小写笔名 (若不在姿势词表)
 
 
 def _is_non_semantic_tag(t: str) -> bool:
-    if _TAG_POSE.match(t):
+    tt = t.strip()
+    return bool(_TAG_PURE_NUM.match(tt) or _TAG_NUM_DASH_LETTER.match(tt)
+                or _TAG_LETTER_NUM.match(tt) or _TAG_NUM_LETTER.match(tt)
+                or _TAG_POSE.match(tt) or _TAG_FEMALE_MALE_NUM.match(tt)
+                or _TAG_ROLE_POS_NUM.match(tt) or _TAG_MF.match(tt))
+
+
+def _is_technical_label(t: str) -> bool:
+    tt = t.strip()
+    if _TECH_LABEL.match(tt):
         return True
-    if _TAG_STRICT.match(t):
-        return True
-    if _TAG_ALNUM.match(t):
+    if _TECH_HEAVY_UNDERSCORE(tt):
         return True
     return False
 
@@ -106,44 +132,48 @@ def classify(s: str) -> str:
     if tl in _DIR_SEM:
         return "ENGLISH_SEMANTIC"
 
-    # 2) 纯编号标签 -> 不译
+    # 2) 纯编号/角色/变体标签 -> 不译
     if _is_non_semantic_tag(t):
         return "NON_SEMANTIC_TAG"
 
-    # 3) 账号/作者 handle 强证据: 字母+数字无空格短标识符, 且不在常见语义词表
+    # 3) 技术内部标识 (a2o_/loopN/START/STOP/_seated_x/蛇纹) -> 不译
+    if _is_technical_label(t):
+        return "TECHNICAL_LABEL"
+
+    # 4) 账号/作者 handle 强证据: 字母+数字无空格短标识符, 且不在常见语义词表
     if _HANDLE_LIKE.match(t) and not tl in _SEM_WORD and not tl in _DIR_SEM:
         # 排除形如 "Pose1" 这类 = 已被 _TAG_POSE 捕获; 剩下的像是笔名
         return "PROPER_NAME"
 
-    # 4) 带数字但含真实语义 -> SEMANTIC_WITH_NUM (保序号翻文字)
+    # 5) 带数字但含真实语义 -> SEMANTIC_WITH_NUM (保序号翻文字)
     if re.search(r"\d", t):
-        # 只要不是纯标签, 且不是纯 handle, 带数字+有英文词 -> 语义带序号
+        # 只要不是纯标签/技术串/纯 handle, 带数字+有英文词 -> 语义带序号
         if words and (has_func or has_sem_word or len(words) >= 2):
             return "SEMANTIC_WITH_NUM"
         # 带数字但无明确语义证据: 拿不准 -> 语义不确定
         return "SEMANTIC_UNCERTAIN"
 
-    # 5) 英文单词/短语
+    # 6) 英文单词/短语
     if not any(re.match(r"[A-Za-z]", w) for w in words):
         return "SYMBOL_OR_MIXED"
 
-    # 6) 姿势语义词命中 -> 语义 (Flirty/Massage/Tease/Sass/Kiss...)
+    # 7) 姿势语义词命中 -> 语义 (Flirty/Massage/Tease/Sass/Kiss...)
     if has_sem_word:
         return "ENGLISH_SEMANTIC"
 
-    # 7) 有功能词 (介词/连词) -> 语义短语
+    # 8) 有功能词 (介词/连词) -> 语义短语
     if has_func:
         return "ENGLISH_SEMANTIC"
 
-    # 8) 多词短语 (>=2 词) 无功能词 -> 语义 (标题大小写不再当专名证据)
+    # 9) 多词短语 (>=2 词) 无功能词 -> 语义 (标题大小写不再当专名证据)
     if len(words) >= 2 and len(t) <= 40:
         return "ENGLISH_SEMANTIC"
 
-    # 9) 单短词(非语义词表、非功能词): 无法确认是专名还是姿势名 -> 语义不确定
+    # 10) 单短词(非语义词表、非功能词): 无法确认是专名还是姿势名 -> 语义不确定
     if len(words) == 1 and len(words[0]) <= 15:
         return "SEMANTIC_UNCERTAIN"
 
-    # 10) 其他(长串内部名等) -> 语义
+    # 11) 其他(长串内部名等) -> 语义
     return "ENGLISH_SEMANTIC"
 
 # 打分类
@@ -170,22 +200,25 @@ def pick(pred, n, label):
             seen.add(r["source_text"])
             got += 1
 
+# 抽样策略: 重点复查 SEMANTIC_WITH_NUM (污染最重), 额外加 TECHNICAL_LABEL
+# 总目标 100 条: SEMANTIC_WITH_NUM=40 (重点), 其余各组补齐
+
 # 1) 普通短句 (ENGLISH_SEMANTIC, 短)
 short_sem = [r for r in rows if r["_cls"] == "ENGLISH_SEMANTIC" and len(r["source_text"]) <= 24]
-pick(lambda r: r in short_sem, 18, "普通短句")
+pick(lambda r: r in short_sem, 8, "普通短句")
 
-# 2) 长姿势名
-long_sem = [r for r in rows if r["_cls"] in ("ENGLISH_SEMANTIC", "SEMANTIC_WITH_NUM") and len(r["source_text"]) > 40]
-pick(lambda r: r in long_sem, 15, "长姿势名")
+# 2) 长姿势名 (英文长语义名)
+long_sem = [r for r in rows if r["_cls"] == "ENGLISH_SEMANTIC" and len(r["source_text"]) > 40]
+pick(lambda r: r in long_sem, 4, "长姿势名")
 
 # 3) Left / Right 及方向类
-pick(lambda r: r["source_text"].strip().lower() in {"left","right","top","bottom","front","back"}, 6, "Left/Right/方向")
+pick(lambda r: r["source_text"].strip().lower() in {"left","right","top","bottom","front","back"}, 2, "Left/Right/方向")
 
 # 4) 专名 (PROPER_NAME)
 pick(lambda r: r["_cls"] == "PROPER_NAME", 10, "专名/作者")
 
-# 5) 带数字语义名 (SEMANTIC_WITH_NUM)
-pick(lambda r: r["_cls"] == "SEMANTIC_WITH_NUM", 14, "带数字语义名")
+# 5) 带数字语义名 (SEMANTIC_WITH_NUM) —— 重点, 抽 40 条
+pick(lambda r: r["_cls"] == "SEMANTIC_WITH_NUM", 40, "带数字语义名")
 
 # 6) 非语义标签 (NON_SEMANTIC_TAG)
 pick(lambda r: r["_cls"] == "NON_SEMANTIC_TAG", 10, "非语义标签")
@@ -193,12 +226,17 @@ pick(lambda r: r["_cls"] == "NON_SEMANTIC_TAG", 10, "非语义标签")
 # 7) 语义不确定 (SEMANTIC_UNCERTAIN)
 pick(lambda r: r["_cls"] == "SEMANTIC_UNCERTAIN", 8, "语义不确定")
 
-# 8) 成人/姿势术语 (含关键词)
-adult_kw = re.compile(r"(sex|kiss|fuck|fuckin|blow|oral|thrust|penetrat|nude|strip|bdsm|mastur|orgasm|cum|erect|arous|bondage|vibrat|fellat|cunniling|anal|breast|ass\b|booty|pussy|dick|whore|lust|seduct|flirt|tease|massage|sass)", re.I)
-pick(lambda r: bool(adult_kw.search(r["source_text"])), 12, "成人/姿势术语")
+# 8) 技术内部标识 (TECHNICAL_LABEL)
+pick(lambda r: r["_cls"] == "TECHNICAL_LABEL", 10, "技术内部标识")
 
-# 9) 其他 (补足到 100)
+# 9) 成人/姿势术语 (含关键词)
+adult_kw = re.compile(r"(sex|kiss|fuck|fuckin|blow|oral|thrust|penetrat|nude|strip|bdsm|mastur|orgasm|cum|erect|arous|bondage|vibrat|fellat|cunniling|anal|breast|ass\b|booty|pussy|dick|whore|lust|seduct|flirt|tease|massage|sass)", re.I)
+pick(lambda r: bool(adult_kw.search(r["source_text"])), 5, "成人/姿势术语")
+
+# 10) 其他 (补足到 100)
 need = 100 - len(samples)
+if need < 0:
+    need = 0
 for r in rows:
     if need <= 0:
         break
