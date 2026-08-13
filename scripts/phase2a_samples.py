@@ -73,7 +73,10 @@ _SEM_WORD = {"kiss","kissing","kicked","kicking","open","opening","door","wall",
              "wink","smirk","woman","teen","child","irritated","cocky","confused","nervous",
              "unsure","talking","talk","injured","hurt","sleep","sleeping","cry","crying",
              "laugh","laughing","smile","smiling","shy","scared","afraid","proud","excited",
-             "tired","bored","surprised","shocked","worried","embarrassed"}
+             "tired","bored","surprised","shocked","worried","embarrassed",
+             "shrug","inspect","inspecting","cower","uncomfortable","scream","shout",
+             "doubt","disappointment","surprise","rescue","nervous","squeeze","pinching",
+             "balled","fists","fist","peering","peek","pointing","pointed","lean","leaning"}
 
 # ---- 编号/角色/变体标签 -> NON_SEMANTIC_TAG (默认不译) ----
 # 纯数字 / 小数: 1 2.1
@@ -101,6 +104,8 @@ _TAG_NUM_V_NUM = re.compile(r"^\d+[a-z]\d+$", re.I)
 _TAG_FEMME_HOMME = re.compile(r"^(?:femme|homme)\s*_?\s*\d+$", re.I)
 # 数字/斜杠/字母 角色编号: 2/F 3/F 5/M 6/M (数字/单字母)
 _TAG_NUM_SLASH_LETTER = re.compile(r"^\d+/[A-Za-z]$")
+# 数字/空格斜杠/字母 角色编号: 2/ F 3/ M (数字+空格+斜杠隔空格+字母)
+_TAG_NUM_SPACE_SLASH_LETTER = re.compile(r"^\d+\s*/\s*[A-Za-z]$")
 # 字母+数字-数字+字母 变体: F2-1A / F2-1B (字母编号-子变体)
 _TAG_LETNUM_DASH_LET = re.compile(r"^[A-Za-z]+\d+-\d+[A-Za-z]$")
 # 数字.单字母 性别变体: 1.F 1.M 2.F 2.M
@@ -132,6 +137,7 @@ def _is_non_semantic_tag(t: str) -> bool:
                 or _TAG_POSE_NUM_MF.match(tt) or _TAG_LETNUM_DASH.match(tt)
                 or _TAG_NUM_V_NUM.match(tt) or _TAG_FEMME_HOMME.match(tt)
                 or _TAG_NUM_SLASH_LETTER.match(tt)
+                or _TAG_NUM_SPACE_SLASH_LETTER.match(tt)
                 or _TAG_LETNUM_DASH_LET.match(tt) or _TAG_NUM_DOT_LETTER.match(tt)
                 or _TAG_RANGE_MF.match(tt) or _TAG_USE_MF_NUM.match(tt))
 
@@ -166,6 +172,16 @@ def classify(s: str) -> str:
 
     # 2) 纯编号/角色/变体标签 -> 不译
     if _is_non_semantic_tag(t):
+        return "NON_SEMANTIC_TAG"
+
+    # 2.5) 英文词+数字 无分隔(无空格/下划线): 若词干为通用姿势动作词 -> 作者编号标签
+    #      standing1/laying3/sitting1 -> NON_SEMANTIC_TAG;  kiss2(语义) / Simmerianne93(笔名) 例外
+    _BARE_WORD_NUM_STEMS = {"standing","sitting","laying","lying","kneeling","crouching",
+                            "kneel","crouch","squat","lyingdown","standingup","sitdown",
+                            "pose","variant","variation","ver","version","copy"}
+    bm = re.match(r"^([A-Za-z]+)(\d+)$", t)
+    if bm and (bm.group(1).lower().rstrip("s") in _BARE_WORD_NUM_STEMS
+               or bm.group(1).lower() in _BARE_WORD_NUM_STEMS):
         return "NON_SEMANTIC_TAG"
 
     # 3) 技术内部标识 (a2o_/loopN/START/STOP/_seated_x/蛇纹) -> 不译

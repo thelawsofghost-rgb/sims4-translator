@@ -240,9 +240,9 @@ def main():
                     root = ET.fromstring(txt)
                 except Exception:
                     continue
-                for p in extract_pose_text_mapping(root):
-                    p["pose_pack_instance"] = xinst_id
-                    poses.append(p)
+                for pe in extract_pose_text_mapping(root):
+                    pe["pose_pack_instance"] = xinst_id
+                    poses.append(pe)
 
             # 2) 读所有 STBL → keyHash→(text, instance_id) 映射 (+ locale)
             stbl_map = {}     # keyHash:int -> (text, stbl_instance_id)
