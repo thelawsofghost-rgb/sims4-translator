@@ -18,7 +18,7 @@ translation_id 预览: candidate 表先给 source_text+context 分组示意,
 
 输入: output/pose_translation_candidates.csv (3567 语义候选, 列:
        source_text, ref_count, unique_keys, sample_package, sample_pose_pack,
-       sample_stbl_instance, sample_locale, sample_neighbor_poses)
+       sample_stbl_instance, sample_locale, sample_neighbor_poses, sample_neighbor_display_texts)
 输出: output/translation_samples_100.csv
 """
 import sys, csv, re
@@ -69,7 +69,11 @@ _SEM_WORD = {"kiss","kissing","kicked","kicking","open","opening","door","wall",
              "listen","listening","music","sad","male","female","punch","pulling","dance","dancing",
              "thrust","oral","nude","strip","orgasm","lick","rub","grind","spank",
              "happy","angry","sad","normal","mum","mom","thinking","think","crossed","arms",
-             "dad","father","son","daughter","wife","husband"}
+             "dad","father","son","daughter","wife","husband",
+             "wink","smirk","woman","teen","child","irritated","cocky","confused","nervous",
+             "unsure","talking","talk","injured","hurt","sleep","sleeping","cry","crying",
+             "laugh","laughing","smile","smiling","shy","scared","afraid","proud","excited",
+             "tired","bored","surprised","shocked","worried","embarrassed"}
 
 # ---- 编号/角色/变体标签 -> NON_SEMANTIC_TAG (默认不译) ----
 # 纯数字 / 小数: 1 2.1
@@ -97,6 +101,14 @@ _TAG_NUM_V_NUM = re.compile(r"^\d+[a-z]\d+$", re.I)
 _TAG_FEMME_HOMME = re.compile(r"^(?:femme|homme)\s*_?\s*\d+$", re.I)
 # 数字/斜杠/字母 角色编号: 2/F 3/F 5/M 6/M (数字/单字母)
 _TAG_NUM_SLASH_LETTER = re.compile(r"^\d+/[A-Za-z]$")
+# 字母+数字-数字+字母 变体: F2-1A / F2-1B (字母编号-子变体)
+_TAG_LETNUM_DASH_LET = re.compile(r"^[A-Za-z]+\d+-\d+[A-Za-z]$")
+# 数字.单字母 性别变体: 1.F 1.M 2.F 2.M
+_TAG_NUM_DOT_LETTER = re.compile(r"^\d+\.[A-Za-z]$")
+# 补零两位编号+性别-范围: 01M-12M / 01F-12F / 02F-03F
+_TAG_RANGE_MF = re.compile(r"^\d{1,2}[A-Za-z]-\d{1,2}[A-Za-z]$")
+# use+F/M+数字 开关变体: useF1 useM1 (作者角色开关)
+_TAG_USE_MF_NUM = re.compile(r"^use[FM]\d+$", re.I)
 
 # ---- 技术内部标识 -> TECHNICAL_LABEL (默认不译) ----
 # 特征: a2o_ / 大量下划线 / START|STOP / loopN / _seated_x / 蛇纹命名
@@ -119,7 +131,9 @@ def _is_non_semantic_tag(t: str) -> bool:
                 or _TAG_ROLE_POS_NUM.match(tt) or _TAG_MF.match(tt)
                 or _TAG_POSE_NUM_MF.match(tt) or _TAG_LETNUM_DASH.match(tt)
                 or _TAG_NUM_V_NUM.match(tt) or _TAG_FEMME_HOMME.match(tt)
-                or _TAG_NUM_SLASH_LETTER.match(tt))
+                or _TAG_NUM_SLASH_LETTER.match(tt)
+                or _TAG_LETNUM_DASH_LET.match(tt) or _TAG_NUM_DOT_LETTER.match(tt)
+                or _TAG_RANGE_MF.match(tt) or _TAG_USE_MF_NUM.match(tt))
 
 
 def _is_technical_label(t: str) -> bool:
@@ -157,6 +171,12 @@ def classify(s: str) -> str:
     # 3) 技术内部标识 (a2o_/loopN/START/STOP/_seated_x/蛇纹) -> 不译
     if _is_technical_label(t):
         return "TECHNICAL_LABEL"
+
+    # 3.5) 强语义词命中(Emotion/姿势/家庭角色…) 必须优先于 handle/专名判定:
+    #       带数字 -> SEMANTIC_WITH_NUM (Injured_01, 2 - Unsure, Bed 2 - Kissing Belly)
+    #       不带数字 -> ENGLISH_SEMANTIC (Wink/Smirk/Cocky/Dad…)
+    if has_sem_word:
+        return "SEMANTIC_WITH_NUM" if re.search(r"\d", t) else "ENGLISH_SEMANTIC"
 
     # 4) 账号/作者 handle 强证据: 字母+数字无空格短标识符, 且不在常见语义词表
     if _HANDLE_LIKE.match(t) and not tl in _SEM_WORD and not tl in _DIR_SEM:
@@ -267,7 +287,7 @@ for r in rows:
 print(f"\n抽样总数: {len(samples)} / 100")
 out_cols = ["sample_group", "text_class", "source_text", "ref_count", "unique_keys",
             "sample_package", "sample_pose_pack", "sample_stbl_instance", "sample_locale",
-            "neighbor_poses"]
+            "neighbor_poses", "neighbor_display_texts"]
 sample_out = out_dir / "translation_samples_100.csv"
 with open(sample_out, "w", newline="", encoding="utf-8-sig") as f:
     w = csv.DictWriter(f, fieldnames=out_cols)
@@ -284,6 +304,7 @@ with open(sample_out, "w", newline="", encoding="utf-8-sig") as f:
             "sample_stbl_instance": r.get("sample_stbl_instance", ""),
             "sample_locale": r.get("sample_locale", ""),
             "neighbor_poses": r.get("sample_neighbor_poses", ""),
+            "neighbor_display_texts": r.get("sample_neighbor_display_texts", ""),
         })
 print(f"已写出: {sample_out}")
 print("\n按样本组统计:")

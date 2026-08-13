@@ -233,7 +233,8 @@ if _n_inst == 0:
 
 # ---------------- 输出: 语义文本去重候选表 ----------------
 cand_cols = ["source_text", "ref_count", "unique_keys", "sample_package",
-             "sample_pose_pack", "sample_stbl_instance", "sample_locale", "sample_neighbor_poses"]
+             "sample_pose_pack", "sample_stbl_instance", "sample_locale",
+             "sample_neighbor_poses", "sample_neighbor_display_texts"]
 
 # 预建: 每个 (package, pose_pack_instance) 组 的 member rows (用于相邻上下文),
 #       以 pose_pack_instance 的单条目 id 为单位, 而非整个 ";";" 连接串
@@ -268,8 +269,10 @@ for txt, cnt in sem_texts.most_common():
     sample_inst = candidate.get("stbl_resource_instance", "") or ""
     sample_locale = candidate.get("locale_byte", "") or ""
 
-    # 相邻姿势上下文: 取 与 candidate 同包同 pose-pack 单实例 的其他 pose_name
+    # 相邻姿势上下文 1) 内部 pose_name (供技术定位)
+    #               2) 真实玩家显示文字 neighbor_display_texts (同类 source_text, 供翻译消歧)
     neighbor_poses = []
+    neighbor_display_texts = []
     pkg = candidate.get("package_path", "") or ""
     for seg in (sample_pp.split(";") if sample_pp else []):
         seg = seg.strip()
@@ -277,15 +280,24 @@ for txt, cnt in sem_texts.most_common():
             continue
         for x in pp_members.get((pkg, seg), []):
             pn = (x.get("pose_name") or "").strip()
+            dt = (x.get("source_text") or "").strip()
             if pn and pn not in neighbor_poses:
                 neighbor_poses.append(pn)
-        if len(neighbor_poses) >= 6:
+            if dt and dt not in neighbor_display_texts:
+                neighbor_display_texts.append(dt)
+        if len(neighbor_display_texts) >= 8:
             break
     neighbor_poses = neighbor_poses[:6]
+    neighbor_display_texts = neighbor_display_texts[:8]
 
     nkeys = len({(x.get("package_path"), x.get("pose_display_name_hash")) for x in occ})
-    sem_cand.append([txt, cnt, nkeys, sample_pkg.replace("\\", "/").split("/")[-1], sample_pp,
-                     sample_inst, sample_locale, "; ".join(neighbor_poses)])
+    # 包名定为实际 .package 文件 basename; 若单元格意外是 dict(旧输出), 防御性取其中 package_path
+    if isinstance(sample_pkg, dict):
+        sample_pkg = str(sample_pkg.get("package_path", "") or "")
+    pkg_base = str(sample_pkg).replace("\\", "/").split("/")[-1]
+    sem_cand.append([txt, cnt, nkeys, pkg_base, sample_pp,
+                     sample_inst, sample_locale, "; ".join(neighbor_poses),
+                     " | ".join(neighbor_display_texts)])
 
 cand_out = out_dir / "pose_translation_candidates.csv"
 with open(cand_out, "w", newline="", encoding="utf-8-sig") as f:
