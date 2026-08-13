@@ -462,11 +462,11 @@ class OllamaTranslator(Translator):
         import httpx
         self._httpx = httpx
 
-    def translate_batch(self, items, concurrency=2, per_call=8, max_retry=3):
+    def translate_batch(self, items, concurrency=8, per_call=8, max_retry=3):
         """按批次并发调用; 失败/空结果重试, 逐条回退原生 /api/chat。返回 {key: zh}。
 
-        全量场景(数千 phrase)下并发过高会压垮本机 Ollama 导致返回空译文,
-        这里压低并发并加入: 空结果重试 + native 回退。
+        并发越快越快; 若本机 Ollama 扛不住会返回空译文, 由 空结果重试 + native 回退
+        (以及下方的自适应降并发) 兜底, 因此默认提高到 8 而不牺牲正确性。
         """
         import concurrent.futures as cf
         import time
@@ -505,6 +505,12 @@ class OllamaTranslator(Translator):
             failed = len(got) - len(done_here)
             failed_total += failed
             cur = [kvt for kvt in cur if kvt[0] not in done_here]
+            # 自适应降并发: 若本轮失败/空比例过高, 说明本机 Ollama 扛不住当前并发,
+            # 自动减半, 避免无谓重试拖时间; 正常则保持高并发快速推进。
+            attempted = len(got)
+            if attempted > 0 and failed / attempted > 0.3 and concurrency > 2:
+                concurrency = max(2, concurrency // 2)
+                print(f"[降并发] 失败率过高 ({failed}/{attempted}), 并发降为 {concurrency}", flush=True)
             if cur and attempt < max_retry - 1:
                 print(f"[重试] 第{attempt+2}轮: 仍缺 {len(cur)} phrase (本批失败/空 {failed}), 稍候重试 ...", flush=True)
                 time.sleep(3 * (attempt + 1))
