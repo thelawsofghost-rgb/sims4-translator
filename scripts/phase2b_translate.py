@@ -686,7 +686,7 @@ def main():
             phrase_map[ck] = (tid, p["key"])
 
     phrase_res = {}
-    if phrase_items and SAMPLE:
+    if phrase_items:
         print(f"[翻译] 调用引擎 {type(eng).__name__}, 共 {len(phrase_items)} 个 phrase ...")
         raw = eng.translate_batch(phrase_items)
         print("[翻译] 完成。")
