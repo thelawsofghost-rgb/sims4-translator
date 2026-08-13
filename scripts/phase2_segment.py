@@ -158,36 +158,29 @@ def display_hash_to_int(d):
 rev_cols = ["package_path", "pose_pack_instance", "pose_entry_idx", "pose_display_name_hash",
             "stbl_resource_instance", "locale_byte", "source_text", "text_class", "pose_name"]
 
-# 预缓存 package 索引
-pkg_cache = {}
-for r in rows:
-    p = r.get("package_path", "")
-    if p and p not in pkg_cache:
-        pkg_cache[p] = pkg_index(p)
-
+# 上下文(pack instance / stbl instance / entry idx)直接取自上游 pose_text_mapping.csv,
+# 上游 map_pose_texts 已成功解析并写入, 不再在此重扫 package (避免重复解析不一致)。
 for r in rows:
     if r.get("status") != "MAPPED":
         continue
     p = r.get("package_path", "")
-    key = (r.get("stbl_key_hash") or "").strip()
-    kh = display_hash_to_int(key) if key else None
-    stbl_map, xml_pose, _ = pkg_cache.get(p, ({}, [], {}))
-    inst_info = ("", "")
-    if kh is not None and kh in stbl_map:
-        inst_id, lb, txt = stbl_map[kh]
-        inst_info = (f"0x{inst_id:016X}", f"byte_{lb:02X}")
     src = r.get("stbl_text") or ""
     cls = classify(src)
+    pp = (r.get("pose_pack_instance") or "").strip()
+    inst = (r.get("stbl_resource_instance") or "").strip()
+    # 规范化 pack instance 为 0x... : tag 形式 (上游已是 0x..; 无 tag 时补占位)
+    pp_norm = ";".join(f"{x.strip()}:p" if ":" not in x else x.strip()
+                        for x in pp.split(";") if x.strip()) if pp else ""
     row = {
         "package_path": p,
-        "pose_pack_instance": ";".join(f"0x{i:016X}:{t}" for i, t in xml_pose) or "",
-        "pose_entry_idx": "",
+        "pose_pack_instance": pp_norm,
+        "pose_entry_idx": (r.get("pose_entry_idx") or "").strip(),
         "pose_display_name_hash": r.get("display_ref", ""),
-        "stbl_resource_instance": inst_info[0],
-        "locale_byte": f"{r.get('locale','')} | min_locale={inst_info[1]}",
+        "stbl_resource_instance": inst,
+        "locale_byte": (r.get("locale") or "").strip(),
         "source_text": src,
         "text_class": cls,
-        "pose_name": r.get("pose_name", ""),
+        "pose_name": (r.get("pose_name") or "").strip(),
     }
     rev_rows.append(row)
     if cls == "SEMANTIC_TEXT":
@@ -234,9 +227,9 @@ print(f"  pose_pack_instance 非空   = {_n_pp}/{len(rev_rows)}")
 print(f"  stbl_resource_instance 非空= {_n_inst}/{len(rev_rows)}")
 print(f"  pose_name 非空           = {_n_pose_name}/{len(rev_rows)}")
 if _n_pp == 0:
-    print("  !! rev_rows 层 pose_pack_instance 全空 -> 问题在 pkg_index 的 xml_pose 检测, 不在候选聚合")
+    print("  !! rev_rows 层 pose_pack_instance 全空 -> 上游 map_pose_texts 未检出 XML(含 pose_list)的 instance id")
 if _n_inst == 0:
-    print("  !! rev_rows 层 stbl_resource_instance 全空 -> 问题在 STBL keyHash 解析/匹配")
+    print("  !! rev_rows 层 stbl_resource_instance 全空 -> 上游 map_pose_texts 未写入 STBL instance id")
 
 # ---------------- 输出: 语义文本去重候选表 ----------------
 cand_cols = ["source_text", "ref_count", "unique_keys", "sample_package",

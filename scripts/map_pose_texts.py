@@ -57,7 +57,8 @@ def _is_xml_candidate(tid: int) -> bool:
 
 
 def read_xml_texts(backend, entries):
-    """读取候选 XML 并【要求真正 parse 成功】; 乱码一律丢弃。"""
+    """读取候选 XML 并【要求真正 parse 成功】; 乱码一律丢弃。
+    返回 [(xml_instance_id:int, 可解析文本 str), ...] —— instance_id 即 PosePackInstance。"""
     texts = []
     for e in entries:
         if not _is_xml_candidate(e.type_id):
@@ -76,7 +77,7 @@ def read_xml_texts(backend, entries):
                 ET.fromstring(raw)
             except Exception:
                 continue
-            texts.append(raw)
+            texts.append((getattr(e, "instance_id", 0), raw))
             break
     return texts
 
@@ -231,25 +232,29 @@ def main():
                 continue
             backend = get_backend("readonly").open(str(p))
 
-            # 1) 读 XML, 提取 pose entries
+            # 1) 读 XML, 提取 pose entries (附带 PosePackInstance = xml instance_id)
             xml_texts = read_xml_texts(backend, idx.entries)
             poses = []
-            for txt in xml_texts:
+            for xinst_id, txt in xml_texts:
                 try:
                     root = ET.fromstring(txt)
                 except Exception:
                     continue
-                poses += extract_pose_text_mapping(root)
+                for p in extract_pose_text_mapping(root):
+                    p["pose_pack_instance"] = xinst_id
+                    poses.append(p)
 
-            # 2) 读所有 STBL → keyHash→text 映射 (+ locale)
-            stbl_map = {}
+            # 2) 读所有 STBL → keyHash→(text, instance_id) 映射 (+ locale)
+            stbl_map = {}     # keyHash:int -> (text, stbl_instance_id)
             locales = set()
             for e in idx.entries:
                 if e.type_id == STBL_TID:
                     data = backend.read_small_resource(e, max_bytes=2 * 1024 * 1024)
                     parsed = parse_stbl(data) if data else None
                     if parsed is not None:
-                        stbl_map.update(parsed)
+                        for h, t in parsed.items():
+                            if h not in stbl_map:
+                                stbl_map[h] = (t, getattr(e, "instance_id", 0))
                         byte, name, known = locale_of_stbl(e.instance_id)
                         locales.add(f"{name}(byte0x{byte:02X})" if byte is not None else name)
             backend.close()
@@ -259,7 +264,7 @@ def main():
             pkg_pose_entries = len(poses)
             agg["pose_entries"] += pkg_pose_entries
 
-            for pose in poses:
+            for pidx, pose in enumerate(poses):
                 disp = pose.get("display") or ""
                 ph = parse_display_hash(disp)
                 row = {
@@ -268,6 +273,9 @@ def main():
                     "display_ref": disp,
                     "stbl_key_hash": f"0x{ph:08X}" if ph is not None else "",
                     "locale": ";".join(sorted(locales)) if locales else "",
+                    "pose_pack_instance": f"0x{pose.get('pose_pack_instance', 0):016X}" if pose.get("pose_pack_instance") else "",
+                    "pose_entry_idx": str(pidx),
+                    "stbl_resource_instance": "",
                 }
                 if not disp:
                     row.update({"status": "EMPTY", "reason": "pose_display_name 为空"})
@@ -281,11 +289,13 @@ def main():
                                 "reason": "display_ref=0x0 作者未设置该姿势的显示名 (非待翻文本)"})
                     agg["placeholder"] += 1; pkg_plots["placeholder"] += 1
                 else:
-                    hits = [t for h, t in stbl_map.items() if h == ph]
+                    hits = [(t, i) for h, (t, i) in stbl_map.items() if h == ph]
                     if len(hits) == 1:
-                        txt = hits[0]
+                        txt, inst_id = hits[0]
                         row.update({"status": "MAPPED", "reason": "",
-                                    "stbl_text": txt, "text_intent": "CHINESE" if _is_chinese(txt) else "ENGLISH"})
+                                    "stbl_text": txt,
+                                    "stbl_resource_instance": f"0x{inst_id:016X}" if inst_id else "",
+                                    "text_intent": "CHINESE" if _is_chinese(txt) else "ENGLISH"})
                         agg["mapped_ok"] += 1; pkg_plots["mapped_ok"] += 1
                         if _is_chinese(txt): agg["chinese"] += 1; pkg_plots["chinese"] += 1
                         else: agg["english"] += 1; pkg_plots["english"] += 1
@@ -294,8 +304,8 @@ def main():
                         agg["ref_fail"] += 1; pkg_plots["ref_fail"] += 1
                     else:
                         row.update({"status": "MAPPING_UNCERTAIN",
-                                    "reason": f"一个 key 0x{ph:08X} 对应 {len(hits)} 个文本: {hits!r}",
-                                    "stbl_text": ";".join(hits)})
+                                    "reason": f"一个 key 0x{ph:08X} 对应 {len(hits)} 个文本: {[t for t,_ in hits]!r}",
+                                    "stbl_text": ";".join(t for t,_ in hits)})
                         agg["uncertain"] += 1; pkg_plots["uncertain"] += 1
                 rows.append(row)
 
@@ -329,7 +339,8 @@ def main():
 
     # 每个 package 详细 CSV (pose 级)
     cols = ["package_path", "pose_name", "display_ref", "stbl_key_hash",
-            "stbl_text", "text_intent", "locale", "status", "reason"]
+            "stbl_text", "text_intent", "locale", "status", "reason",
+            "pose_pack_instance", "stbl_resource_instance", "pose_entry_idx"]
     out_csv = out_dir / "pose_text_mapping.csv"
     with open(out_csv, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=cols)
