@@ -225,25 +225,73 @@ with open(rev_out, "w", newline="", encoding="utf-8-sig") as f:
         w.writerow({k: row.get(k, "") for k in rev_cols})
 print(f"\n完整反向映射已写出: {rev_out}  ({len(rev_rows)} 行)")
 
+# ---- 上下文覆盖诊断: 定位 pose_pack_instance / stbl_resource_instance 在哪层丢失 ----
+_n_pp = sum(1 for r in rev_rows if (r.get("pose_pack_instance") or "").strip())
+_n_inst = sum(1 for r in rev_rows if (r.get("stbl_resource_instance") or "").strip())
+_n_pose_name = sum(1 for r in rev_rows if (r.get("pose_name") or "").strip())
+print("[诊断] rev_rows 上下文覆盖:")
+print(f"  pose_pack_instance 非空   = {_n_pp}/{len(rev_rows)}")
+print(f"  stbl_resource_instance 非空= {_n_inst}/{len(rev_rows)}")
+print(f"  pose_name 非空           = {_n_pose_name}/{len(rev_rows)}")
+if _n_pp == 0:
+    print("  !! rev_rows 层 pose_pack_instance 全空 -> 问题在 pkg_index 的 xml_pose 检测, 不在候选聚合")
+if _n_inst == 0:
+    print("  !! rev_rows 层 stbl_resource_instance 全空 -> 问题在 STBL keyHash 解析/匹配")
+
 # ---------------- 输出: 语义文本去重候选表 ----------------
 cand_cols = ["source_text", "ref_count", "unique_keys", "sample_package",
              "sample_pose_pack", "sample_stbl_instance", "sample_locale", "sample_neighbor_poses"]
+
+# 预建: 每个 (package, pose_pack_instance) 组 的 member rows (用于相邻上下文),
+#       以 pose_pack_instance 的单条目 id 为单位, 而非整个 ";";" 连接串
+# pose_pack_instance 形如 "0x...:tag;0x...:tag" -> 拆成单 id 列表
+from collections import defaultdict
+pp_members = defaultdict(list)   # (pkg, single_pp_id) -> [row,...]
+for row in rev_rows:
+    pp = (row.get("pose_pack_instance") or "").strip()
+    pkg = row.get("package_path", "")
+    if pp:
+        for seg in pp.split(";"):
+            seg = seg.strip()
+            if seg:
+                pp_members[(pkg, seg)].append(row)
+
 sem_cand = []
 for txt, cnt in sem_texts.most_common():
-    # 找到该文本的所有出现, 采样首个 package 的上下文
-    sample_pkg = ""; sample_pp = ""; sample_inst = ""; sample_locale = ""
+    occ = [row for row in rev_rows if row["source_text"] == txt]
+    # 挑一个“上下文最完整”的出现（优先有 pose_pack_instance 且有 stbl_resource_instance）
+    candidate = None
+    for row in occ:
+        if not (row.get("pose_pack_instance") or "").strip():
+            continue
+        if candidate is None or not (candidate.get("stbl_resource_instance") or "").strip() \
+           and (row.get("stbl_resource_instance") or "").strip():
+            candidate = row
+    if candidate is None:
+        candidate = occ[0] if occ else {k: "" for k in rev_cols}
+
+    sample_pkg = candidate.get("package_path", "") or ""
+    sample_pp = candidate.get("pose_pack_instance", "") or ""
+    sample_inst = candidate.get("stbl_resource_instance", "") or ""
+    sample_locale = candidate.get("locale_byte", "") or ""
+
+    # 相邻姿势上下文: 取 与 candidate 同包同 pose-pack 单实例 的其他 pose_name
     neighbor_poses = []
-    for row in rev_rows:
-        if row["source_text"] == txt:
-            sample_pkg = row["package_path"]; sample_pp = row["pose_pack_instance"]
-            sample_inst = row["stbl_resource_instance"]; sample_locale = row["locale_byte"]
-            # 同包内与它相邻的 pose_name (上下文)
-            same_pkg = [x for x in rev_rows
-                        if x["package_path"] == row["package_path"] and row["pose_pack_instance"] and x["pose_pack_instance"] == row["pose_pack_instance"]]
-            neighbor_poses = [x["pose_name"] for x in same_pkg][:6]
+    pkg = candidate.get("package_path", "") or ""
+    for seg in (sample_pp.split(";") if sample_pp else []):
+        seg = seg.strip()
+        if not seg:
+            continue
+        for x in pp_members.get((pkg, seg), []):
+            pn = (x.get("pose_name") or "").strip()
+            if pn and pn not in neighbor_poses:
+                neighbor_poses.append(pn)
+        if len(neighbor_poses) >= 6:
             break
-    nkeys = len({(x["package_path"], x["pose_display_name_hash"]) for x in rev_rows if x["source_text"] == txt})
-    sem_cand.append([txt, cnt, nkeys, sample_pkg.split("\\")[-1], sample_pp,
+    neighbor_poses = neighbor_poses[:6]
+
+    nkeys = len({(x.get("package_path"), x.get("pose_display_name_hash")) for x in occ})
+    sem_cand.append([txt, cnt, nkeys, sample_pkg.replace("\\", "/").split("/")[-1], sample_pp,
                      sample_inst, sample_locale, "; ".join(neighbor_poses)])
 
 cand_out = out_dir / "pose_translation_candidates.csv"
