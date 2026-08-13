@@ -350,36 +350,60 @@ class OllamaTranslator(Translator):
         """
         import concurrent.futures as cf
         import time
+        total = len(items)
+        t0 = time.time()
+        print(f"[进度] 待翻译 phrase 共 {total} 个, 开始 (并发={concurrency}, 每批={per_call}) ...")
         results = {}
         cur = items[:]
+        failed_total = 0
         for attempt in range(max_retry):
             if not cur:
                 break
             batches = [cur[i:i + per_call] for i in range(0, len(cur), per_call)]
             got = {}
+            done_cnt = [total - len(cur)]   # 已累计完成的 phrase 数
+            last_log = [0.0]
             with cf.ThreadPoolExecutor(max_workers=concurrency) as ex:
                 futs = {ex.submit(self._call_openai, b): b for b in batches}
                 for fu in cf.as_completed(futs):
                     keymap, zh = fu.result()
                     for k, z in zip(keymap, zh):
                         got[k] = z
+                    done_cnt[0] += len(zh)
+                    now = time.time()
+                    if done_cnt[0] >= total or now - last_log[0] >= 12.0 or done_cnt[0] % 50 == 0:
+                        done = min(done_cnt[0], total)
+                        pct = done / total * 100
+                        el = now - t0
+                        rate = done / el if el > 0 else 0
+                        eta = (total - done) / rate / 60 if rate > 0 else 0
+                        print(f"[进度] {done}/{total} ({pct:5.1f}%)  已用 {el/60:4.1f}min  预计剩 {eta:4.1f}min  (本批补回 {len(zh)})", flush=True)
+                        last_log[0] = now
             # 完成/空 判定
             done_here = {k: v for k, v in got.items() if v and not v.startswith("[ERR")}
             results.update(done_here)
+            failed = len(got) - len(done_here)
+            failed_total += failed
             cur = [kvt for kvt in cur if kvt[0] not in done_here]
             if cur and attempt < max_retry - 1:
-                print(f"[重试] 第{attempt+2}轮: 仍缺 {len(cur)} phrase, 稍候重试 ...")
+                print(f"[重试] 第{attempt+2}轮: 仍缺 {len(cur)} phrase (本批失败/空 {failed}), 稍候重试 ...", flush=True)
                 time.sleep(3 * (attempt + 1))
         # 仍缺失的: 用原生逐条兜底 (可靠优先)
         if cur:
-            print(f"[回退] 剩余 {len(cur)} phrase 用原生 /api/chat 逐条兜底 ...")
-            for k, t in cur:
+            print(f"[回退] 剩余 {len(cur)} phrase 用原生 /api/chat 逐条兜底 ...", flush=True)
+            fb = len(cur)
+            for i0, (k, t) in enumerate(cur, 1):
                 try:
                     _, zh = self._call_native([(k, t)])
                     if zh and zh[0] and not zh[0].startswith("[ERR"):
                         results[k] = zh[0]
                 except Exception:  # noqa
                     pass
+                if i0 == fb or i0 % 25 == 0:
+                    print(f"[回退] {i0}/{fb} ...", flush=True)
+        el = time.time() - t0
+        miss = total - len(results)
+        print(f"[进度] 完成: {len(results)}/{total}  (失败/未翻 {miss}, 重试失败累计 {failed_total}), 总耗时 {el/60:.1f}min", flush=True)
         return results
 
     def _call_openai(self, items):
