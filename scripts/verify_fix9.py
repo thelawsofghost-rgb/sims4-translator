@@ -45,6 +45,25 @@ cases = [
     # TECHNICAL_LABEL
     ("TECHNICAL_LABEL", "IntroNPC"), ("TECHNICAL_LABEL", "IntroObject"),
     ("TECHNICAL_LABEL", "LoopNPC"), ("TECHNICAL_LABEL", "LoopObject"),
+    # --- 2026-08-13 Fix11: 新增编号结构规则 ---
+    # 单/短字母词 + 空格 + 编号: M 03 / SF 3 (性别/角色词+序号)
+    ("NON_SEMANTIC_TAG", "M 03"), ("NON_SEMANTIC_TAG", "SF 3"),
+    ("NON_SEMANTIC_TAG", "F 01"),
+    # 数字 + 空格 + 单字母: 3 A / 10 B (模型姿态索引变体)
+    ("NON_SEMANTIC_TAG", "3 A"), ("NON_SEMANTIC_TAG", "10 B"), ("NON_SEMANTIC_TAG", "5 C"),
+    # 数字 + 空格 + 西里尔字母 + 数字: 6 А2 / 9 А2 / 11 А1
+    ("NON_SEMANTIC_TAG", "6 А2"), ("NON_SEMANTIC_TAG", "9 А2"), ("NON_SEMANTIC_TAG", "11 А1"),
+    # 方括号空格数字: [ 3 ] / [6 ] / [ 7 ]
+    ("NON_SEMANTIC_TAG", "[ 3 ]"), ("NON_SEMANTIC_TAG", "[6 ]"), ("NON_SEMANTIC_TAG", "[ 7 ]"),
+    # 单字母索引: D / H
+    ("NON_SEMANTIC_TAG", "D"), ("NON_SEMANTIC_TAG", "H"), ("NON_SEMANTIC_TAG", "B"),
+    # 运行式动画状态标识符 -> 技术内部标识: reabokeintroobj / rebakeloopO
+    ("TECHNICAL_LABEL", "reabokeintroobj"), ("TECHNICAL_LABEL", "rebakeloopO"),
+    ("TECHNICAL_LABEL", "insideRebake_intro"),
+    # 拉丁非英语语义词 -> NON_ENGLISH_SEMANTIC (仍进翻译候选, 先标记)
+    ("NON_ENGLISH_SEMANTIC", "Femme"), ("NON_ENGLISH_SEMANTIC", "Revisando"),
+    ("NON_ENGLISH_SEMANTIC", "Asomado"), ("NON_ENGLISH_SEMANTIC", "Asustado"),
+    ("NON_ENGLISH_SEMANTIC", "Hombre"),
 ]
 
 regressions = [
@@ -138,6 +157,24 @@ ctx_cases = [
     ("KEEP", "NON_SEMANTIC_TAG", "3 - M2", "3 - M1 | 3 - M2 | 4 - M1 | 4 - M2"),
     # Faye: 邻居全是人名 (首字母大写单短词) -> KEEP / PROPER_NAME
     ("KEEP", "PROPER_NAME", "Faye", "Isaac | Elliot | Faye | Skyler | Imani | Brooke"),
+    # Fix11: 邻居是语义词组(带英文派生形态)时, 优先当语义而非人名 -> TRANSLATE
+    ("TRANSLATE", "ENGLISH_SEMANTIC", "Indignant",
+     "Angry | Confident | Irritated | Dazed | Depressed | Elated | Embarrassed | Fearless"),
+    ("TRANSLATE", "ENGLISH_SEMANTIC", "Silly",
+     "Angry | Confident | Irritated | Dazed | Depressed | Elated | Embarrassed | Fearless"),
+    ("TRANSLATE", "ENGLISH_SEMANTIC", "Skeptical",
+     "Happy | Skeptical | Worried | Schoked | Sad | Scared | Angry | Thinking"),
+    # Fix11: 非英语语义(Femme) -> REVIEW / NON_ENGLISH_SEMANTIC (不再被名字启发误判 PROPER_NAME)
+    ("REVIEW", "NON_ENGLISH_SEMANTIC", "Femme", "Femme"),
+    ("REVIEW", "NON_ENGLISH_SEMANTIC", "Revisando",
+     "Revisando | Asustado | Asustado Cama 1 | Asustado Cama 2 | Asomado"),
+    # Fix11: 技术阶段标识(reabokeintroobj) -> KEEP / TECHNICAL_LABEL
+    ("KEEP", "TECHNICAL_LABEL", "reabokeintroobj",
+     "intro-npc | intro-obj | loop-npc | loop-obj | insideRebake_intro | insideRebake_loop | reabokeintroobj | rebakeloopO"),
+    # Fix11: 编号标签直接结构判定 / 上下文确认
+    ("KEEP", "NON_SEMANTIC_TAG", "M 03", "Photo couple 01 | M 01 | F 01 | M 02 | M 03"),
+    ("KEEP", "NON_SEMANTIC_TAG", "3 A", "1 A | 2 A | 3 A | 4 A | 5 A | 6 A"),
+    ("KEEP", "NON_SEMANTIC_TAG", "D", "A | B | C | D | E | F | G | H"),
 ]
 ctx_fails = 0
 for expd, expr, src, neigh in ctx_cases:

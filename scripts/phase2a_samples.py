@@ -159,6 +159,18 @@ _TAG_NUM_MF_ROLE = re.compile(r"^\d{1,2}[FM]\s+[A-Za-z'\s]{2,15}$", re.I)
 # 字母+数字+组合编号: Pose x12 / Pose x1 (字母 x + 数字, 坐标/变体)
 _TAG_POSE_X_NUM = re.compile(r"^pose\s*x\d{1,2}$", re.I)
 
+# (Fix11) 单字母/短字母词 + 空格 + 编号: M 03 / SF 3 / F 01 (性别/角色词+序号, 非语义)
+#   仅 1~2 个字母, 避免误伤 "Pose 3"(4 字母)。
+_TAG_ALPHA_SPACE_NUM = re.compile(r"^[A-Za-z]{1,2}\s+\d{1,2}$")
+# (Fix11) 数字 + 空格 + 单字母: 3 A / 10 B / 5 C (模型姿态索引变体)
+_TAG_NUM_SPACE_LETTER = re.compile(r"^\d{1,2}\s+[A-Za-z]$")
+# (Fix11) 数字 + 空格 + 西里尔字母 + 数字: 6 А2 / 9 А2 / 11 А1 (vellesa 角色编号)
+_TAG_NUM_SPACE_CYRLETTER_NUM = re.compile(r"^\d{1,2}\s+[А-Яа-я]\d{1,2}$")
+# (Fix11) 方括号空格数字: [ 3 ] / [6 ] / [ 7 ] (裸编号)
+_TAG_BRACKET_NUM = re.compile(r"^\s*\[\s*\d+\s*\]\s*$")
+# (Fix11) 单字母索引: D / H / A / B (模型姿态字母索引; m/f 已由 _TAG_MF 覆盖)
+_TAG_SINGLE_LETTER = re.compile(r"^[A-Za-z]$")
+
 # 字母+数字-数字+字母 变体: F2-1A / F2-1B (字母编号-子变体)
 _TAG_LETNUM_DASH_LET = re.compile(r"^[A-Za-z]+\d+-\d+[A-Za-z]$")
 # 数字.单字母 性别变体: 1.F 1.M 2.F 2.M
@@ -179,6 +191,12 @@ _TECH_HEAVY_UNDERSCORE = (
 
 # 功能 MOD 阶段/状态命名: Intro/Loop + NPC/Object (Brainwashing Machine, 无数字无下划线)
 _TECH_STAGE = re.compile(r"^(?:intro|loop)(?:npc|object)$", re.I)
+
+# (Fix11) 运行式小写/驼峰动画状态标识符: 内部含阶段 token(intro/loop/obj/npc/reabke/rebake/start/stop)
+#        且是 >=10 字符的无空格长串 -> 技术内部标识 (reabokeintroobj / rebakeloopO
+#        及邻居 intro-npc/intro-obj/loop-npc/insideRebake_intro...)
+_TECH_ANIM_STAGE = re.compile(
+    r"^(?=.*(?:intro|loop|obj|npc|reabke|rebake|start|stop))(?:[A-Za-z_]{10,})$")
 
 # 账号/作者 handle 强证据: 含数字字母混合且无空格的笔名 (t0nischwartz/Simmerianne93)
 _HANDLE_LIKE = re.compile(r"^(?=.*[0-9])(?=.*[A-Za-z])[A-Za-z0-9_.-]{1,20}$")
@@ -269,6 +287,9 @@ def _is_non_semantic_tag(t: str) -> bool:
                 or _TAG_MFWORD_DASH_NUM.match(tt) or _TAG_NUM_LET_PAREN_ANNOT.match(tt)
                 or _TAG_NUM_V_MF.match(tt) or _TAG_NUM_DASH_MF.match(tt)
                 or _TAG_NUM_MF_ROLE.match(tt) or _TAG_POSE_X_NUM.match(tt)
+                or _TAG_ALPHA_SPACE_NUM.match(tt) or _TAG_NUM_SPACE_LETTER.match(tt)
+                or _TAG_NUM_SPACE_CYRLETTER_NUM.match(tt) or _TAG_BRACKET_NUM.match(tt)
+                or _TAG_SINGLE_LETTER.match(tt)
                 or _is_slot_label(tt)
                 or (_TAG_SLOT_NUM_MULTIWORD.match(tt)
                     and _is_slot_label_mult(re.findall(r"[A-Za-z]+", tt))))
@@ -282,6 +303,45 @@ def _is_technical_label(t: str) -> bool:
         return True
     if _TECH_STAGE.match(tt):
         return True
+    if _TECH_ANIM_STAGE.match(tt):
+        return True
+    return False
+
+
+# (Fix11) 拉丁字母但非英语 的形态后缀/常用借词 -> NON_ENGLISH_SEMANTIC (仍进翻译候选)
+#   这是「非英语检测」的结构/小集判断, 不是 _SEM_WORD(英文语义词) 白名单。
+#   西/葡 分词与后缀 + 少量无法用后缀识别的常用拉丁借词。仅对单/短词生效, 防误伤英文。
+_NON_ENGLISH_MORPH = (
+    "ando", "iendo", "endo",  # 西/葡 现在分词 (-ando/-iendo/-endo)
+    "ado", "ada", "ados", "adas",  # 西/葡 过去分词
+    "ción", "dad", "mente", "anza", "eza",  # 西/葡 名词后缀
+    "zione", "mento", "agine",  # 意/法 名词后缀
+    "ando",
+)
+_NON_ENGLISH_WORD = {"femme", "hombre", "mujer", "homme", "señor", "señora"}
+
+
+def _is_non_english_latin(t: str) -> bool:
+    """拉丁字母但非英语的短词: 命中非英语形态后缀或常用借词 -> True。"""
+    tl = t.strip().lower()
+    if not tl or not re.fullmatch(r"[a-z]+(?:\s[a-z]+)?", tl.strip("-·")):
+        # 仅对纯字母短串(单/双词)生效, 含数字/长句不走这里
+        pass
+    tl = tl.strip(" -·")
+    if not re.fullmatch(r"[a-z]+(?:\s[a-z]+)?", tl):
+        return False
+    base = tl.replace(" ", "")
+    if len(base) > 20:
+        return False
+    wl = tl.split()
+    last = wl[-1]
+    if last in _NON_ENGLISH_WORD:
+        return True
+    for suf in _NON_ENGLISH_MORPH:
+        if last.endswith(suf) and len(last) - len(suf) >= 2:
+            # 避免误伤英文: -ado/-ada 等尾缀在英文极少见, -ando/-iendo 英文更罕见
+            # 但排除明确英文语义词(已在 _SEM_WORD/形态规则里, 不进这里兜底)
+            return True
     return False
 
 
@@ -294,6 +354,9 @@ def classify(s: str) -> str:
     n_nonlat = sum(1 for c in t if ord(c) > 127)
     if n_nonlat >= 2:
         return "NON_ENGLISH" if (is_cjk(t) or is_kr(t) or is_jp(t)) else "SYMBOL_OR_MIXED"
+    # (Fix11) 拉丁非英语 短词 -> 非英语语义 (Femme/Revisando/Asomado…)
+    if _is_non_english_latin(t):
+        return "NON_ENGLISH_SEMANTIC"
 
     tl = t.lower()
     words = re.findall(r"[A-Za-z]+", t)
@@ -389,7 +452,8 @@ def classify_meta(s: str) -> tuple:
         return ("TRANSLATE", cls)
     if cls in ("PROPER_NAME", "NON_SEMANTIC_TAG", "TECHNICAL_LABEL"):
         return ("KEEP", cls)
-    if cls in ("SYMBOL_OR_MIXED", "SEMANTIC_UNCERTAIN", "NON_ENGLISH"):
+    if cls in ("SYMBOL_OR_MIXED", "SEMANTIC_UNCERTAIN", "NON_ENGLISH", "NON_ENGLISH_SEMANTIC"):
+        # NON_ENGLISH_SEMANTIC: 非英语语义文本, 仍进翻译候选, 但需先标记/复核
         return ("REVIEW", cls)
     return ("REVIEW", cls)
 
@@ -414,6 +478,21 @@ def _neighbor_semantic_ratio(neigh: str):
     return sem_cnt, tag_cnt
 
 
+def _neighbor_sem_morph(nb: list[str]) -> int:
+    """邻居中带英文派生形态 (分词/形容词/名词后缀) 的条数 —— 语义词组的结构证据。
+    无需逐词白名单: 用构词法后缀判断邻居是"情绪/状态语义词组"还是"人名列表"。
+    (人名 Isaac/Elliot/Skyler/Imani 无这些后缀; 情绪词 Depressed/Embarrassed/Thinking 有)"""
+    cnt = 0
+    for n in nb:
+        w = n.strip()
+        if not re.fullmatch(r"[A-Za-z]+", w):
+            continue
+        wl = w.lower()
+        if re.search(r"(?:ing|ed|tion|sion|ous|ful|ive|ness|able|ible|est|er|ent|ant|ical|al|less|ly)\b$", wl):
+            cnt += 1
+    return cnt
+
+
 def classify_with_context(s: str, neigh: str = "") -> tuple:
     """分层分类: 先用结构规则 classify(), 若落到 SEMANTIC_UNCERTAIN(拿不准),
     再用 neighbor_display_texts 上下文做第二层判断 —— 而不是无限加单词白名单。
@@ -431,9 +510,13 @@ def classify_with_context(s: str, neigh: str = "") -> tuple:
     nb = _split_neighbors(neigh)
     sem_cnt, tag_cnt = _neighbor_semantic_ratio(neigh)
     # 人名组: 邻居全是 单个首字母大写短词 (姓名集), 且本串也似人名 -> PROPER_NAME
+    # (Fix11) 但若邻居带大量英文派生形态(情绪/状态形容词组 Indignant/Silly…
+    #   Angry|Confident|Depressed|Embarrassed…) 则优先当语义词组, 不硬跳 PROPER_NAME。
     if nb and all(re.fullmatch(r"[A-Z][a-z]{1,15}", n.strip()) for n in nb) \
             and re.fullmatch(r"[A-Z][a-z]{1,15}", s.strip()):
-        return ("KEEP", "PROPER_NAME")
+        if _neighbor_sem_morph(nb) < 2:
+            return ("KEEP", "PROPER_NAME")
+        # 否则落入下方语义/编号判定 (Indignant/Skeptical 会被提升为语义)
     if sem_cnt >= 2 and sem_cnt > tag_cnt:
         # 邻居几乎全是语义词 -> 本串也是姿势名 (Walk 在 Wave|Walk|Dance|Happy 邻居中)
         return ("TRANSLATE", "SEMANTIC_UNCERTAIN->ENGLISH_SEMANTIC")
