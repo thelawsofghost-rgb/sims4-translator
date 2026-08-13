@@ -679,7 +679,7 @@ def main():
         elif mode == "KEEP":
             translation = ""
             status = "DONE_SKIP"
-        elif r.get("translation_id") in jobs and SAMPLE:
+        elif r.get("translation_id") in jobs:
             j = jobs[r.get("translation_id")]
             resolved = dict(j["gloss"])
             resolved.update(phrase_res.get(r.get("translation_id"), {}))
