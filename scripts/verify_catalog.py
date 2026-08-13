@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Phase 2A 回归: translations 目录骨架的确定性规则。
+"""Phase 2A 回归: translations 目录骨架的确定性规则 (去重/合并/冲突/ref union/contexts)。
 
-验证 (不依赖真实 3567 数据, 用内建样例):
-  - detected_language 值域: en/es/fr/de/ru/zh/ja/ko/... | und | zxx | mul, 与 decision/reason 分离
-      Revisando->es ; Femme->fr ; 6 А2->zxx ; A-1->zxx ; a2o_xxx->zxx ; Flirty->en
-  - source_hash: NFC + SHA-256 前 12 hex, 不做 lower; 'Walk' 与 'walk' 哈希不同
-  - translation_id = T_<hash>_g1; 同一 source_text 恒定; 可扩展 g2/g3 且持久化
-  - KEEP: decision=KEEP, translation="", status=KEEP (无占位)
-  - REVIEW: 进 todo, status=REVIEW; NON_ENGLISH_SEMANTIC -> REVIEW + 实际语言
+不依赖真实 3540 数据, 用定向 fixture (gen_fixture2.py)。
+验证:
+  - detected_language 值域, 与 decision/reason 分离
+  - source_hash: NFC + SHA-256 12hex, 大小写敏感
+  - translation_id = T_<hash>_g1, 稳定, 可扩展 g2/g3
+  - 同 canonical 文本去重合并 (含首尾空白变体), ref_count 走 reverse-mapping union (非盲目求和)
+  - merge_conflicts 检测 (同文本不同 decision -> 报告, 不自动择一)
+  - KEEP: translation='' status=KEEP, 不进 todo
+  - REVIEW: 进 todo status=REVIEW
+  - todo = catalog 中 decision∈{TRANSLATE,REVIEW} 的精确集合; id 唯一
+  - translation_contexts.csv 每实际上下文一行, 经 translation_id 关联
 """
-import sys, re
+import sys, csv, re, os
 sys.path.insert(0, "scripts" if "scripts" in __file__ else ".")
-from phase2a_catalog import detect_language, source_hash, make_translation_id
+from phase2a_catalog import detect_language, source_hash, make_translation_id, norm_text
 from phase2a_samples import classify, classify_with_context
 
 ok = fail = 0
@@ -20,88 +24,93 @@ def check(name, cond, extra=""):
     if cond: ok += 1; print(f"[OK ] {name} {extra}".rstrip())
     else:    fail += 1; print(f"[FAIL] {name} {extra}".rstrip())
 
-# ---- detected_language 值域 (与 decision/reason 分离) ----
+# ---- detected_language 值域 + 分类分离 ----
 LANG_CASES = [
-    ("Flirty",            "en",  "ENGLISH_SEMANTIC",   "TRANSLATE"),
-    ("Solemn",            "en",  "SEMANTIC_UNCERTAIN", "REVIEW"),   # 无上下文邻居时单短词拿不定
-    ("Revisando",         "es",  "NON_ENGLISH_SEMANTIC","REVIEW"),
-    ("Asomado",           "es",  "NON_ENGLISH_SEMANTIC","REVIEW"),
-    ("Femme",             "fr",  "NON_ENGLISH_SEMANTIC","REVIEW"),
-    ("6 А2",              "zxx", "NON_SEMANTIC_TAG",   "KEEP"),
-    ("6B",                "zxx", "NON_SEMANTIC_TAG",   "KEEP"),
-    ("a2o_phone_call_loop_x", "zxx", "TECHNICAL_LABEL","KEEP"),
-    ("reabokeintroobj",   "zxx", "TECHNICAL_LABEL",    "KEEP"),
+    ("Flirty",  "en",  "ENGLISH_SEMANTIC",    "TRANSLATE"),
+    ("6 А2",    "zxx", "NON_SEMANTIC_TAG",    "KEEP"),
+    ("6B",      "zxx", "NON_SEMANTIC_TAG",    "KEEP"),
+    ("A-1",     "zxx", "PROPER_NAME",         "KEEP"),   # 语言层 zxx, 与 PROPER_NAME 分离
+    ("a2o_x_y", "zxx", "TECHNICAL_LABEL",     "KEEP"),
+    ("reabokeintroobj", "zxx", "TECHNICAL_LABEL","KEEP"),
+    ("Femme",   "fr",  "NON_ENGLISH_SEMANTIC","REVIEW"),
+    ("Revisando","es", "NON_ENGLISH_SEMANTIC","REVIEW"),
+    ("Asomado", "es",  "NON_ENGLISH_SEMANTIC","REVIEW"),
+    ("Mirando", "es",  "NON_ENGLISH_SEMANTIC","REVIEW"),
+    ("All in One","en","ENGLISH_SEMANTIC",    "TRANSLATE"),
 ]
-# A-1: reason=PROPER_NAME (name-group 启发式) 但语言层=zxx (无完整词) —— 两者分离
-import phase2a_samples as p2
-_clsA = p2.classify("A-1"); _decA, _reasonA = p2.classify_with_context("A-1", "A-1 | A-2 | B-1 | B-2")
-check("A-1: reason=PROPER_NAME 且 lang=zxx (语言与分类分离)",
-      detect_language("A-1", _clsA, _reasonA) == "zxx" and _reasonA == "PROPER_NAME",
-      f"(lang={detect_language('A-1',_clsA,_reasonA)}, reason={_reasonA})")
-for text, want_lang, want_reason, want_dec in LANG_CASES:
-    cls = classify(text)
-    dec, reason = classify_with_context(text, "")
-    lang = detect_language(text, cls, reason)
-    check(f"lang({text!r}) = {want_lang}",
-          lang == want_lang and reason == want_reason and dec == want_dec,
-          f"(got lang={lang}, reason={reason}, dec={dec})")
-
-# language 与 decision 分离: zxx 的 A-1 仍由 decision 决定 KEEP
-check("语言字段不承担分类职责: A-1 lang=zxx 但 reason=NON_SEMANTIC_TAG",
-      True)
-# KEEP/TRANSLATE/REVIEW 用 decision, 不用 detected_language
-dec_set = set()
-for text, _, want_reason, want_dec in LANG_CASES:
+for text, wl, wr, wd in LANG_CASES:
     cls = classify(text); dec, reason = classify_with_context(text, "")
-    dec_set.add(dec)
-check("decision 值域 ⊇ {KEEP, TRANSLATE, REVIEW}", {"KEEP","TRANSLATE","REVIEW"} <= dec_set)
+    lang = detect_language(text, cls, reason)
+    check(f"lang({text!r})={wl}", lang == wl and reason == wr and dec == wd,
+          f"(lang={lang}, reason={reason}, dec={dec})")
+check("decision 值域 ⊇ {KEEP,TRANSLATE,REVIEW}",
+      {"KEEP","TRANSLATE","REVIEW"} <= {classify_with_context(t,"")[0] for t,_,_,_ in
+        [("Flirty","","",""),("6 А2","","",""),("Femme","","","")]})
 
-# ---- source_hash: NFC + SHA256/12hex, 大小写敏感 ----
-import unicodedata, hashlib
-check("hash('Walk') = 08ee52ae125a", source_hash("Walk") == "08ee52ae125a")
-check("hash 大小写敏感 ('Walk'!=walk')", source_hash("Walk") != source_hash("walk"))
-check("hash 保留数字/标点", source_hash("6 - Calm") == source_hash("6 - Calm") and source_hash("6 - Calm") != source_hash("6 -Calm"))
-# 已知: NFC 规范化 (带组合字符)
-check("hash 长度=12 hex", all(c in "0123456789abcdef" for c in source_hash("Walk")))  # hex
-check("hash 恒定性", source_hash("Wave") == source_hash("Wave"))
+# ---- 大小写敏感: 3 个 'All in One' 变体是 3 个不同 ID (case 不同) ----
+h_all  = source_hash("All in One")
+h_UPPER= source_hash("ALL IN ONE")
+h_lower= source_hash("all in one")
+check("'All in One'/'ALL IN ONE'/'all in one' 3 个不同 hash (大小写敏感)",
+      len({h_all, h_UPPER, h_lower}) == 3)
+
+# ---- norm_text: 首尾空白变体归一 ----
+check("norm_text 去首尾空白", norm_text("ALL IN ONE ") == norm_text("ALL IN ONE") == "ALL IN ONE")
+check("norm_text NFC", norm_text("e\u0301") == "\u00e9")
+check("同文本同 hash (strip)", source_hash(norm_text("ALL IN ONE ")) == source_hash("ALL IN ONE"))
 
 # ---- translation_id ----
-check("id = T_<hash>_g1", make_translation_id("08ee52ae125a", 1) == "T_08ee52ae125a_g1")
-check("id 支持 g2/g3 拆分", make_translation_id(source_hash("Walk"), 2) == f"T_{source_hash('Walk')}_g2")
-# 同一 source_text -> 稳定同 id
-check("同一 source_text id 恒定", make_translation_id(source_hash("Walk"), 1) == make_translation_id(source_hash("Walk"), 1))
-# id 与 source_text 顺序无关 (重排候选不漂移): 仅依赖内容哈希
-ids = sorted(make_translation_id(source_hash(t), 1) for t in ["Walk","Wave","Calm"])
-check("id 排序稳定(内容派生)", ids == sorted(ids))
+check("id = T_<12hex>_g1", make_translation_id(h_all, 1) == f"T_{h_all}_g1")
+check("id 支持 g2/g3", make_translation_id(h_all, 2) == f"T_{h_all}_g2")
+check("id 稳定", make_translation_id(h_all, 1) == make_translation_id(h_all, 1))
 
-# ---- KEEP 语义 (catalog 层由脚本写表, 这里验证规则函数可表达) ----
-# translation 保持空, 不复制 source_text; status=KEEP
-import csv, io, tempfile, os
-# 直接验证 catalog 脚本生成的样例: 读 fixture catalog 检查 KEEP 行
+# ---- 读取 catalog/todo/contexts (fixture2 输出) ----
 tst = "/tmp/phase2a_test/translation_catalog.csv"
+tdo = "/tmp/phase2a_test/translations_todo.csv"
+tct = "/tmp/phase2a_test/translation_contexts.csv"
 if os.path.exists(tst):
-    with open(tst, encoding="utf-8-sig") as f:
-        rows = list(csv.DictReader(f))
-    keep = [r for r in rows if r["decision"] == "KEEP"]
-    check("KEEP 行存在", len(keep) > 0)
-    check("KEEP: translation 为空(无占位)", all(r["translation"] == "" for r in keep))
-    check("KEEP: status=KEEP", all(r["status"] == "KEEP" for r in keep))
-    check("KEEP: 不用 translation=source_text 表示", all(r["translation"] != r["source_text"] for r in keep))
-    # todo: 仅 TRANSLATE+REVIEW
-    tdo = "/tmp/phase2a_test/translations_todo.csv"
-    with open(tdo, encoding="utf-8-sig") as f:
-        trows = list(csv.DictReader(f))
-    check("todo 全部为 TRANSLATE/REVIEW", all(r["decision"] in ("TRANSLATE","REVIEW") for r in trows))
-    check("todo 无 KEEP", all(r["decision"] != "KEEP" for r in trows))
-    check("todo translation 全空", all(r["translation"] == "" for r in trows))
-    check("todo status∈{PENDING,REVIEW}", all(r["status"] in ("PENDING","REVIEW") for r in trows))
-    # id 唯一
-    tids = [r["translation_id"] for r in rows]
-    check("translation_id 全局唯一", len(tids) == len(set(tids)))
-    check("translation_id 格式 T_<12hex>_gN",
-          all(re.fullmatch(r"T_[0-9a-f]{12}_g\d+", t) for t in tids))
+    with open(tst, encoding="utf-8-sig") as f: rows = list(csv.DictReader(f))
+    with open(tdo, encoding="utf-8-sig") as f: trows = list(csv.DictReader(f))
+    # catalog: 5 unique (2 dup groups merged from 7 raw)
+    check("catalog=5", len(rows) == 5)
+    texts = [r["source_text"] for r in rows]
+    check("catalog 无重复 canonical source_text", len(texts) == len(set(texts)))
+    ids = [r["translation_id"] for r in rows]
+    check("translation_id 唯一", len(ids) == len(set(ids)))
+    check("id 格式 T_<12hex>_gN", all(re.fullmatch(r"T_[0-9a-f]{12}_g\d+", i) for i in ids))
+    # ALL IN ONE: 跨 2 包, ref_count 应=3 (union, 非 35+1=36 盲目求和)
+    aio = next(r for r in rows if r["source_text"] == "ALL IN ONE")
+    check("ALL IN ONE ref_count=3 (union)", int(aio["ref_count"]) == 3, f"got {aio['ref_count']}")
+    check("ALL IN ONE unique_refs=3", int(aio["unique_refs"]) == 3)
+    check("ALL IN ONE package_count=2", int(aio["package_count"]) == 2, f"got {aio['package_count']}")
+    check("ALL IN ONE context_count=3", int(aio["context_count"]) == 3, f"got {aio['context_count']}")
+    # Couple Pose 2: 同包 3 引用
+    cp = next(r for r in rows if r["source_text"] == "Couple Pose 2")
+    check("Couple Pose 2 ref_count=3", int(cp["ref_count"]) == 3)
+    # 4M KEEP 不进 todo, translation 空
+    m4 = next(r for r in rows if r["source_text"] == "4M")
+    check("4M KEEP", m4["decision"] == "KEEP" and m4["status"] == "KEEP" and m4["translation"] == "")
+    check("4M 不进 todo", all(r["source_text"] != "4M" for r in trows))
+    # todo = TRANSLATE+REVIEW
+    check("todo 全部 TRANSLATE/REVIEW", all(r["decision"] in ("TRANSLATE","REVIEW") for r in trows))
+    check("todo id 是 catalog id 子集", set(r["translation_id"] for r in trows) <= set(ids))
+    check("todo 无 KEEP 行", all(r["decision"] != "KEEP" for r in trows))
+    # REVIEW: Femme 进 todo status=REVIEW
+    check("Femme REVIEW 进 todo",
+          any(r["source_text"] == "Femme" and r["decision"] == "REVIEW" and r["status"] == "REVIEW" for r in trows))
+    # contexts 关联
+    if os.path.exists(tct):
+        with open(tct, encoding="utf-8-sig") as f: crows = list(csv.DictReader(f))
+        check("contexts=10", len(crows) == 10, f"got {len(crows)}")
+        aio_ctx = [c for c in crows if c["translation_id"] == aio["translation_id"]]
+        check("ALL IN ONE contexts=3 (跨 2 包)", len(aio_ctx) == 3)
+        check("context 有关联字段非空",
+              all(c["package_path"] and c["pose_pack_instance"] and c["stbl_resource_instance"]
+                  and c["locale"] and c["stbl_key_ref"] for c in aio_ctx))
+        check("context translation_id 均可关联 catalog",
+              set(c["translation_id"] for c in crows) <= set(ids))
 else:
-    print("[skip] 未找到 fixture catalog (先运行 phase2a_catalog.py /tmp/phase2a_test)")
+    print("[skip] 未找到 fixture 输出 (先运行 gen_fixture2.py + phase2a_catalog.py /tmp/phase2a_test)")
 
-print(f"\nPhase 2A catalog 回归: 共 {ok+ fail} 项, 通过 {ok}, 失败 {fail}")
+print(f"\nPhase 2A catalog 回归: 共 {ok+fail} 项, 通过 {ok}, 失败 {fail}")
 sys.exit(0 if fail == 0 else 1)

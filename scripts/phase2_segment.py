@@ -14,7 +14,7 @@
   output/pose_reverse_mapping_full.csv      (9061 条完整反向映射, 含 STBL resource instance + locale byte + PosePackInstance)
   终端统计
 """
-import sys, csv, re
+import sys, csv, re, unicodedata
 from pathlib import Path
 from collections import Counter, defaultdict
 import xml.etree.ElementTree as ET
@@ -25,6 +25,13 @@ from resource_types import RESOURCE_TYPES
 
 out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "D:/projects/sims4_trans/output")
 mapping_csv = out_dir / "pose_text_mapping.csv"
+
+# ---------------- 文本归一化 (去重键) ----------------
+# 同一显示文本在不同 STBL/条目里可能带首尾空白或同义组合/分解字符;
+# 候选去重必须按 N*** 并为空白不变的 canonical 键, 否则同一文本会分裂成多个候选行。
+def norm_text(s: str) -> str:
+    """canonical 去重键: N*** 规范化后去首尾空白 (保留内部空白/大小写/标点)。"""
+    return unicodedata.normalize("NFC", (s or "")).strip()
 
 # ---------------- 读取映射 ----------------
 rows = []
@@ -164,7 +171,7 @@ for r in rows:
     if r.get("status") != "MAPPED":
         continue
     p = r.get("package_path", "")
-    src = r.get("stbl_text") or ""
+    src = norm_text(r.get("stbl_text"))
     cls = classify(src)
     pp = (r.get("pose_pack_instance") or "").strip()
     inst = (r.get("stbl_resource_instance") or "").strip()
