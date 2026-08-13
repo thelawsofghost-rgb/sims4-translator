@@ -311,8 +311,7 @@ def _pkg_of(r):
 
 
 def pick(pred, n, label):
-    """跨 package 分层随机抽 n 条 (固定 seed 已设)。同一包同一 label 最多 PER_PKG_CAP。"""
-    # 候选池: 满足 pred + 未全局用过 + 未在本 label 抽过该 pkg
+    """跨 package 分层随机抽 n 条 (固定 seed)。硬上限 100; 同一包同一 label 最多 PER_PKG_CAP。"""
     pool = []
     for r in rows:
         if r["source_text"] in seen_text:
@@ -326,6 +325,8 @@ def pick(pred, n, label):
     random.shuffle(pool)
     got = 0
     for r in pool:
+        if len(samples) >= 100:      # 全局硬上限
+            break
         if got >= n:
             break
         if r["source_text"] in seen_text:
@@ -338,42 +339,37 @@ def pick(pred, n, label):
         pkg_used[pkg][label] = pkg_used[pkg].get(label, 0) + 1
         got += 1
     if got < n:
-        print(f"  [提示] {label}: 跨包配额下仅抽到 {got}/{n}")
+        print(f"  [提示] {label}: 跨包配额/总上限下仅抽到 {got}/{n}")
     return got
 
 
-print("\n抽样 (跨 package 分层随机, seed=20260813):")
-# 1) 普通短句
-short_sem = [r for r in rows if r["_cls"] == "ENGLISH_SEMANTIC" and len(r["source_text"]) <= 24]
-pick(lambda r: r in short_sem, 6, "普通短句")
+print("\n抽样 (跨 package 分层随机, seed=20260813, 全局上限 100):")
 
-# 2) 长姿势名
-long_sem = [r for r in rows if r["_cls"] == "ENGLISH_SEMANTIC" and len(r["source_text"]) > 40]
-pick(lambda r: r in long_sem, 3, "长姿势名")
-
-# 3) Left/Right/方向
-pick(lambda r: r["source_text"].strip().lower() in {"left","right","top","bottom","front","back"}, 2, "Left/Right/方向")
-
+# ---- 主评审三袋: 30/40/30 = 100, 优先抽满 ----
 # 4) 专名 —— 重点, 跨包 30 条 (尽量 30 个不同 package)
 pick(lambda r: r["_cls"] == "PROPER_NAME", 30, "专名/作者")
-
 # 5) 带数字语义名 —— 重点, 跨包 30 条
 pick(lambda r: r["_cls"] == "SEMANTIC_WITH_NUM", 30, "带数字语义名")
-
 # 6) 语义不确定 —— 重点, 跨包 40 条
 pick(lambda r: r["_cls"] == "SEMANTIC_UNCERTAIN", 40, "语义不确定")
 
-# 7) 非语义标签 (已稳定, 少量抽查)
+# ---- 次要复核小袋: 只占剩余额度, 不超 100 ----
+# 7) 非语义标签 (少量抽查)
 pick(lambda r: r["_cls"] == "NON_SEMANTIC_TAG", 8, "非语义标签")
-
-# 8) 技术内部标识 (已稳定, 少量抽查)
+# 8) 技术内部标识 (少量抽查)
 pick(lambda r: r["_cls"] == "TECHNICAL_LABEL", 6, "技术内部标识")
-
+# 1) 普通短句
+short_sem = [r for r in rows if r["_cls"] == "ENGLISH_SEMANTIC" and len(r["source_text"]) <= 24]
+pick(lambda r: r in short_sem, 6, "普通短句")
+# 2) 长姿势名
+long_sem = [r for r in rows if r["_cls"] == "ENGLISH_SEMANTIC" and len(r["source_text"]) > 40]
+pick(lambda r: r in long_sem, 3, "长姿势名")
+# 3) Left/Right/方向
+pick(lambda r: r["source_text"].strip().lower() in {"left","right","top","bottom","front","back"}, 2, "Left/Right/方向")
 # 9) 成人/姿势术语
 adult_kw = re.compile(r"(sex|kiss|fuck|fuckin|blow|oral|thrust|penetrat|nude|strip|bdsm|mastur|orgasm|cum|erect|arous|bondage|vibrat|fellat|cunniling|anal|breast|ass\b|booty|pussy|dick|whore|lust|seduct|flirt|tease|massage|sass)", re.I)
 pick(lambda r: bool(adult_kw.search(r["source_text"])), 3, "成人/姿势术语")
-
-# 10) 其他 (补足到 100, 同样跨包)
+# 10) 其他 (若仍未满 100 则跨包补足)
 pick(lambda r: True, 100 - len(samples), "其他/补充")
 
 # ---------------- 输出 ----------------
