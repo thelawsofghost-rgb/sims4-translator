@@ -127,16 +127,17 @@ _GLOSSARY = {
     "sim": "模拟市民", "idle": "待机",
     "all in one": "整合版",
 }
-# 大写首字母的展示名形式也映射 (Right/Left/Positive...)
-_GLOSSARY = {**{k.lower(): v for k, v in _GLOSSARY.items()},
-             **_GLOSSARY}
+# 统一为小写键做 casefold 不敏感查找 (All In One / ALL IN ONE / all in one 都命中)
+_GLOSSARY = {k.casefold(): v for k, v in _GLOSSARY.items()}
+# 单词语义键 (用于 phrase 内部独立 token 的嵌入式固定术语; 不含多词 all in one)
+_WORD_GLOSS = {k: v for k, v in _GLOSSARY.items() if " " not in k}
 
 
 # ---------------- 精确切分 + 重建 (格式/编号/版本由程序保留, 模型只翻语义 phrase) ----------------
 # 断点 = 受保护 token (编号/版本/*anim/纯数字) 或 独立分隔符 (斜杠/括号/逗号/空白包裹的连字符)
 _PROTECTED = re.compile(r"\d[\w]*(?:-\d[\w]*)*|\*anim\w*|[\u0400-\u04ffA-Za-z]\d[\w]*|\b(?:V|v)\d+(?:\.\d+)?\b|[\d.]+")
 # 分隔符: / \ , ; ( ) [ ] * , 以及前后带空白的连字符 (不计 angry-sad 内部连字符)
-_SEPARATOR = re.compile(r"\\|/|[,;()\[\]*]|\s+-\s+|\s+-$|^-\s+")
+_SEPARATOR = re.compile(r"\\|/|[,;:()\[\]*]|\s+-\s+|\s+-$|^-\s+")
 
 
 def split_semantic_spans(text: str):
@@ -216,42 +217,39 @@ def rebuild(segs: list, resolved: dict):
 
 
 def glossary_resolve(segs: list):
-    """整词/整 phrase 精确匹配术语表 (禁止 substring)。命中即翻译, 不进模型。
+    """整词/整 phrase 精确匹配术语表 (casefold + whole match, 禁止 substring)。
 
-    返回 (resolved, pending): resolved 直接可用; pending 为未命中需交模型的 sem phrase。
+    命中即翻译, 不进模型 (resolved)。
+    对 phrase 内部含独立术语 token 的 (如 sim walking near desk 里的 sim),
+    不强拆词序, 而是给该 phrase 打 gloss_hint (固定术语, 模型必须原样使用),
+    保证 sim/idle 等不被模型自由翻走, 同时保持自然词序 (pending)。
+
+    返回 (resolved, pending); pending 元素为 sem 段 dict, 可能带 "gloss_hint"。
     """
     resolved = {}
     pending = []
+    _WORD_RE = re.compile(r"[A-Za-z]+")
     for s in segs:
         if s["kind"] != "sem":
             continue
-        low = s["t"].strip().lower()
-        # 完整 phrase 命中
-        if low in _GLOSSARY:
-            resolved[s["key"]] = _GLOSSARY[low]
+        stripped = s["t"].strip()
+        if not stripped:
             continue
-        # 整词命中 (词边界, 不会伤及 Simple/Simmer/Simkatu)
-        match_word = None
-        if re.fullmatch(r"[A-Za-z]+", s["t"].strip()):
-            w = s["t"].strip().lower()
-            if w in _GLOSSARY and re.fullmatch(r"[A-Za-z]{2,}", w):
-                match_word = _GLOSSARY[w]
-        if match_word:
-            resolved[s["key"]] = match_word
+        cf = stripped.casefold()
+        # 1) 整 phrase 命中 (All In One / ALL IN ONE / all in one)
+        if cf in _GLOSSARY:
+            resolved[s["key"]] = _GLOSSARY[cf]
             continue
+        # 2) phrase 内含独立术语 token (整词, 不会伤及 Simple/Simmer/simkatu)
+        hits = {}
+        for tok in _WORD_RE.findall(stripped):
+            tcf = tok.casefold()
+            if tcf in _WORD_GLOSS:
+                hits.setdefault(tcf, _WORD_GLOSS[tcf])
+        if hits:
+            s = dict(s)
+            s["gloss_hint"] = "; ".join(f"{k}={v}" for k, v in sorted(hits.items()))
         pending.append(s)
-    return resolved, pending
-    """对 sem 段, 若命中术语表则直接翻译 (不进模型); 返回 (resolved, 未命中sem段列表)。"""
-    resolved = {}
-    pending = []
-    for s in segs:
-        if s["kind"] != "sem":
-            continue
-        gloss = _GLOSSARY.get(s["t"].lower())
-        if gloss:
-            resolved[s["key"]] = gloss
-        else:
-            pending.append(s)
     return resolved, pending
 
 
@@ -370,8 +368,9 @@ class OllamaTranslator(Translator):
             "规则:\n"
             "1. 只翻译每个 [编号] 块里 Target: 之后的内容为简体中文\n"
             "2. Context: 只是参考, 不要翻译、不要输出、不要改写它\n"
-            "3. 保留 Target 中的数字、字母编号、版本号(V1/v2)、*anim 等技术标记不变\n"
-            "4. 逐块输出, 每块一行译文, 用同样编号开头 (如 [0] 译文), 一条一行, 不要额外说明\n"
+            "3. 若块里有『固定术语』行, 译文中必须原样嵌入这些指定中文, 不得改用同义词\n"
+            "4. 保留 Target 中的数字、字母编号、版本号(V1/v2)、*anim 等技术标记不变\n"
+            "5. 逐块输出, 每块一行译文, 用同样编号开头 (如 [0] 译文), 一条一行, 不要额外说明\n"
             + lines
         )
         payload = {
@@ -409,7 +408,8 @@ class OllamaTranslator(Translator):
                 "规则:\n"
                 "1. 只翻译 Target: 之后的内容为简体中文, 只输出这一条译文, 不要解释。\n"
                 "2. Context: 只是参考, 不要翻译、不要输出、不要改写它。\n"
-                "3. 保留 Target 中的数字、字母编号、版本号、*anim 等技术标记不变。\n"
+                "3. 若内容含『固定术语』行, 译文中必须原样嵌入这些指定中文, 不得改用同义词。\n"
+                "4. 保留 Target 中的数字、字母编号、版本号、*anim 等技术标记不变。\n"
                 f"{text}"
             )
             payload = {
@@ -631,6 +631,8 @@ def main():
         for p in j["pending"]:
             ck = f"{tid}:::{p['key']}"
             block = f"Target: {p['t'].strip()}"
+            if p.get("gloss_hint"):
+                block += f"\n固定术语(译文中必须原样使用): {p['gloss_hint']}"
             if p.get("ctx"):
                 block += f"\nContext: {p['ctx']}"
             phrase_items.append((ck, block))
