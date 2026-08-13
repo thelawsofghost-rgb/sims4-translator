@@ -48,11 +48,15 @@ out_dir = Path(sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("
                else "D:/projects/sims4_trans/output")
 TODO = out_dir / "translations_todo.csv"
 DONE = out_dir / "translation_done.csv"
-ARGS = [a for a in sys.argv[1:] if a.startswith("--")]
+ARGS = list(sys.argv[1:])
 SAMPLE = None
-NO_LLM = "--no-llm" in ARGS or "--engine" in ARGS and "none" in ARGS
+NO_LLM = "--no-llm" in ARGS or "--engine" in ARGS
 if "--sample" in ARGS:
-    SAMPLE = int(ARGS[ARGS.index("--sample") + 1])
+    i = ARGS.index("--sample")
+    if i + 1 < len(ARGS) and not ARGS[i + 1].startswith("--"):
+        SAMPLE = int(ARGS[i + 1])
+    else:
+        print("--sample 后面缺少数字", file=sys.stderr); sys.exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from phase2a_catalog import norm_text, source_hash, _split_semantic_tokens, _is_id_token
@@ -94,6 +98,22 @@ def translate_mode_for(text: str):
     if ids:
         return "PARTIAL_TRANSLATE", real_sem, sem + ids
     return "FULL_TRANSLATE", real_sem, sem
+
+
+_ID_SPAN = re.compile(r"(?:\d[\w]*|\*anim\w*|\b[A-Za-z]\d[\w]*|\b(?:V|v)\d+(?:\.\d+)?\b|[\d.]+)")
+
+
+def protected_spans(text: str) -> str:
+    """找出 PARTIAL 时需原样保留的 token (编号/版本/*anim) 在原文本中的区间。
+
+    返回形如 "41Ha@0-4; 5M@12-14" 的串; 无则空串。
+    """
+    t = norm_text(text)
+    spans = []
+    for m in _ID_SPAN.finditer(t):
+        seg = m.group(0)
+        spans.append(f"{seg}@{m.start()}-{m.end()}")
+    return "; ".join(spans)
 
 
 # ---------------- 翻译引擎 (可插拔) ----------------
@@ -172,6 +192,108 @@ class DeepSeekTranslator(Translator):
         return [k for k, _ in items], zh
 
 
+class OllamaTranslator(Translator):
+    """本机 Ollama 翻译后端。
+
+    优先 OpenAI-compatible:  http://localhost:11434/v1/chat/completions, api_key=ollama
+    失败时回退 Ollama 原生:  http://localhost:11434/api/chat (逐条, 可靠优先)
+    """
+    def __init__(self, base_url="http://localhost:11434", model="ni-fei:latest", api_key="ollama"):
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.api_key = api_key
+        import httpx
+        self._httpx = httpx
+
+    def translate_batch(self, items, concurrency=4, per_call=8):
+        """按批次并发调用; 逐条失败时回退原生 /api/chat。返回 {key: zh}。"""
+        import concurrent.futures as cf
+        results = {}
+        batches = [items[i:i + per_call] for i in range(0, len(items), per_call)]
+        with cf.ThreadPoolExecutor(max_workers=concurrency) as ex:
+            futs = {ex.submit(self._call_openai, b): b for b in batches}
+            for fu in cf.as_completed(futs):
+                keymap, zh = fu.result()
+                for k, z in zip(keymap, zh):
+                    results[k] = z
+        return results
+
+    def _call_openai(self, items):
+        if len(items) == 1:
+            # 单条: 用原生 /api/chat 更简单可靠
+            try:
+                return self._call_native(items)
+            except Exception as e:  # noqa
+                return [k for k, _ in items], [f"[ERR {e!r}]" for _ in items]
+        lines = "\n".join(f"{i}. {t}" for i, (_, t) in enumerate(items))
+        prompt = (
+            "你是模拟人生4动作包汉化专家。把下面的英文/多语动作姿态名翻译为简体中文。\n"
+            "规则:\n"
+            "1. 译文简洁自然, 符合模组姿态命名习惯。\n"
+            "2. 保留原文中的数字、字母编号、版本号(V1/V2/v.2)、*anim 等技术标记, 不翻译、不改写。\n"
+            "3. 每个编号行只输出一条译文, 用同样的编号序号开头, 一条一行, 不要额外说明。\n"
+            "原文:\n" + lines
+        )
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": "You translate Sims 4 pose names to simplified Chinese. Output only the numbered translations."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 2048,
+        }
+        url = f"{self.base_url}/v1/chat/completions"
+        try:
+            r = self._httpx.post(url, headers={"Authorization": f"Bearer {self.api_key}"},
+                                 json=payload, timeout=180)
+            if r.status_code == 404:  # 老版本 Ollama 无 /v1, 回退原生
+                return self._call_native(items)
+            r.raise_for_status()
+            content = r.json()["choices"][0]["message"]["content"]
+        except Exception as e:  # noqa
+            try:
+                return self._call_native(items)
+            except Exception as e2:  # noqa
+                return [k for k, _ in items], [f"[ERR openai:{e!r} native:{e2!r}]" for _ in items]
+        return self._parse_numbered(content, items)
+
+    def _call_native(self, items):
+        """Ollama 原生 /api/chat, 逐条 (可靠优先)。返回 (keys, zh)。"""
+        url = f"{self.base_url}/api/chat"
+        keys, zhs = [], []
+        for k, text in items:
+            prompt = (
+                "把这条模拟人生4动作姿态名翻译为简体中文。只输出译文, 不要解释。\n"
+                "保留数字、字母编号、版本号、*anim 等技术标记不变。\n"
+                f"原文: {text}"
+            )
+            payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+                "options": {"temperature": 0.2, "num_predict": 128},
+            }
+            r = self._httpx.post(url, json=payload, timeout=180)
+            r.raise_for_status()
+            keys.append(k)
+            zhs.append(r.json()["message"]["content"].strip())
+        return keys, zhs
+
+    @staticmethod
+    def _parse_numbered(content, items):
+        out = {}
+        num_pat = re.compile(r"^\s*(?:\d+[.):]|[-*])\s*(.*)$")
+        for ln in content.splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            m = num_pat.match(ln)
+            if m:
+                out[len(out)] = m.group(1).strip()
+        return [k for k, _ in items], [out.get(i, "") for i in range(len(items))]
+
+
 class NoopTranslator(Translator):
     def translate_batch(self, items):
         return {k: "" for k, _ in items}
@@ -219,26 +341,35 @@ def main():
 
     sample_pick = None
     if SAMPLE:
-        # 分层: 从 FULL / PARTIAL 各自按固定种子抽, 尽量跨不同 source
+        # 分层: FULL / PARTIAL 各自按固定种子抽, 尽量跨不同 source; 并强制纳入非英语 + *anim/编号样例
         import random
         random.seed(20260813)
         full = [d for d in need_translate if d[1] == "FULL_TRANSLATE"]
         part = [d for d in need_translate if d[1] == "PARTIAL_TRANSLATE"]
-        nf = min(SAMPLE * 2 // 3, len(full))
-        np_ = min(SAMPLE - nf, len(part))
-        sample_pick = set(id(d) for d in random.sample(full, nf) + random.sample(part, np_))
+        # 非英语候选 (detected_language 非 en/zxx)
+        nonen = [d for d in need_translate if d[0].get("detected_language") not in ("en", "zxx")]
+        # 优先保证抽样覆盖: 非英语, PARTIAL 含 *anim/编号, 普通英文语义
+        forced = []
+        for d in nonen[:3]:
+            if d not in forced:
+                forced.append(d)
+        proto = [d for d in part if re.search(r"\*anim|\d", d[0].get("source_text", "") or "")]
+        for d in proto[:3]:
+            if d not in forced:
+                forced.append(d)
+        pool = [d for d in need_translate if d not in forced]
+        random.shuffle(pool)
+        pick = forced + pool[: max(0, SAMPLE - len(forced))]
+        sample_pick = set(id(d) for d in pick)
         need_translate = [d for d in need_translate if id(d) in sample_pick]
-        print(f"[抽样] 抽查 {len(need_translate)} 行 (FULL={nf}, PARTIAL={np_})")
+        print(f"[抽样] 抽查 {len(need_translate)} 行 (含非英语={len([d for d in need_translate if d[0].get('detected_language') not in ('en','zxx')])})")
 
-    # 翻译引擎
-    if NO_LLM or SAMPLE is None and (len(need_translate) == 0):
+    # 翻译引擎: 默认本机 Ollama
+    if NO_LLM or (SAMPLE is None and len(need_translate) == 0):
         eng = NoopTranslator()
-    elif SAMPLE is not None:
-        eng = DeepSeekTranslator()
     else:
-        # 全量翻译: 默认 DeepSeek (风险提示: 1961 条调用量大)
-        print("[引擎] 全量翻译将调用 DeepSeek, 建议先 --sample 抽查。")
-        eng = DeepSeekTranslator()
+        eng = OllamaTranslator()
+        print(f"[引擎] {type(eng).__name__} @ {eng.base_url}/v1/chat/completions (model={eng.model})")
 
     zh_map = {}
     if need_translate:
@@ -247,9 +378,9 @@ def main():
         zh_map = eng.translate_batch(items)
         print("[翻译] 完成。")
 
-    # 组装 done
+    # 组装 done; 含 protected_spans (PARTIAL 时列出需原样保留的 token 在原文本中的区间)
     done_cols = ["translation_id", "source_text", "decision", "translate_mode",
-                 "detected_language", "translation", "status", "source_hash"]
+                 "detected_language", "protected_spans", "translation", "status", "source_hash"]
     done_rows = []
     for r, mode, zh, status, lang in decided:
         text = norm_text(r.get("source_text"))
@@ -257,15 +388,19 @@ def main():
             translation = zh
         elif mode == "KEEP":
             translation = ""
+            status = "DONE_SKIP"
         else:
             translation = zh_map.get(r.get("translation_id"), "") if SAMPLE else ""
-            status = "DONE" if not SAMPLE and translation else ("PENDING" if not translation else "DONE")
+            if translation and not translation.startswith("[ERR"):
+                status = "DONE"
+        psp = protected_spans(text) if mode == "PARTIAL_TRANSLATE" else ""
         done_rows.append({
             "translation_id": r.get("translation_id"),
             "source_text": text,
             "decision": "TRANSLATE" if text in APPROVED_TEXT else r.get("decision"),
             "translate_mode": "APPROVED" if mode == "APPROVED" else mode,
             "detected_language": lang,
+            "protected_spans": psp,
             "translation": translation,
             "status": status,
             "source_hash": r.get("source_hash"),
