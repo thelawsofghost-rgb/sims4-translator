@@ -58,9 +58,29 @@ if "--sample" in ARGS:
     else:
         print("--sample 后面缺少数字", file=sys.stderr); sys.exit(2)
 
+# ---- 新增 CLI 控制 (翻译缓存 / 增量 / 定位 / 并发, 2026-08-13) ----
+def _flag_val(name, default=None):
+    if name in ARGS:
+        i = ARGS.index(name)
+        if i + 1 < len(ARGS) and not ARGS[i + 1].startswith("--"):
+            return ARGS[i + 1]
+        print(f"{name} 后面缺少值", file=sys.stderr); sys.exit(2)
+    return default
+
+ONLY_CHANGED = "--only-changed" in ARGS      # 只重翻 todo 里 source_hash 变化的行(cache 指纹已保证天然幂等, 此标志主要用于"感知")
+FORCE = "--force" in ARGS                    # 忽略 cache, 强制重翻
+ONLY_ID = _flag_val("--id")                  # 只处理指定 translation_id (逗号分隔可多个)
+ONLY_REGEX = _flag_val("--regex")            # 只处理 source_text 匹配该正则的行
+ONLY_CATEGORY = _flag_val("--category")      # 只处理 decision/category 等于该值的行
+CONCURRENCY = int(_flag_val("--concurrency", "8"))
+BATCH_SIZE = int(_flag_val("--batch-size", "8"))
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from phase2a_catalog import (norm_text, source_hash, detect_language,
                              _split_semantic_tokens, _is_id_token)
+from phrase_cache import (PhraseCache, build_fingerprint, system_prompt,
+                          model_name, target_language, temperature)
 
 # ---------------- 7 条人工审批 (用户硬编码, 禁止改写) ----------------
 APPROVED = {
@@ -312,6 +332,37 @@ def rebuild(segs: list, resolved: dict):
         else:
             out.append(s["t"])
     return "".join(out)
+
+
+def materialize_from_cache(text: str, mode: str, cache) -> (str, str):
+    """从 cache 物化一行 PARTIAL/FULL 的完整译文 (materialized output)。
+
+    对该行重新切分 + glossary, 对每个 pending phrase 查指纹; 全部命中 ->
+    rebuild 出译文并置 DONE; 任一 phrase 缺失 -> (None, 'PENDING') 表示需重翻。
+    模式 KEEP/APPROVED 不在此处理 (调用方已分支)。
+    """
+    if mode not in ("PARTIAL_TRANSLATE", "FULL_TRANSLATE"):
+        return None, "PENDING"
+    segs, _ = split_semantic_spans(text)
+    gloss, pending = glossary_resolve(segs)
+    pending = [p for p in pending if p["t"].strip()]
+    if not pending:
+        # 全由 glossary 直译 -> 可物化
+        return rebuild(segs, gloss), "DONE"
+    resolved = dict(gloss)
+    for p in pending:
+        fp = build_fingerprint(source_phrase=p["t"].strip(),
+                               glossary_hint=p.get("gloss_hint", ""),
+                               context=p.get("ctx", ""))
+        hit = cache.get(fp)
+        if not hit:
+            return None, "PENDING"
+        resolved[p["key"]] = hit["translation"]
+    translation = rebuild(segs, resolved)
+    translation = restore_protected(segs, translation)
+    if translation.strip():
+        return translation, "DONE"
+    return None, "PENDING"
 
 
 def restore_protected(segs: list, translation: str):
@@ -779,12 +830,38 @@ def main():
               f"非英语={len([d for d in need_translate if d[0].get('detected_language') not in ('en','zxx')])}, "
               f"编号/*anim={_n_proto})")
 
-    # 翻译引擎: 默认本机 Ollama
+    # ---- 定位/增量过滤 (CLI): 只处理用户指定的行, 其余不进引擎 ----
+    if ONLY_ID or ONLY_REGEX or ONLY_CATEGORY or ONLY_CHANGED:
+        before = len(need_translate)
+        filt = []
+        id_set = set(x.strip() for x in ONLY_ID.split(",")) if ONLY_ID else None
+        rx = re.compile(ONLY_REGEX) if ONLY_REGEX else None
+        for d in need_translate:
+            r = d[0]
+            tid = r.get("translation_id", "")
+            src = norm_text(r.get("source_text", ""))
+            cat = (r.get("category") or r.get("decision") or "")
+            if id_set is not None and tid not in id_set:
+                continue
+            if rx is not None and not rx.search(src):
+                continue
+            if ONLY_CATEGORY is not None and cat != ONLY_CATEGORY:
+                continue
+            filt.append(d)
+        need_translate = filt
+        print(f"[过滤] CLI 定位: {before} -> {len(need_translate)} 行 "
+              + (f"(id={ONLY_ID} regex={ONLY_REGEX} cat={ONLY_CATEGORY})" if (ONLY_ID or ONLY_REGEX or ONLY_CATEGORY) else "(only-changed 语义由 cache 指纹保证)"))
+
+    # 翻译引擎: 默认本机 Ollama (并发/批大小可由 CLI 覆盖)
     if NO_LLM or (SAMPLE is None and len(need_translate) == 0):
         eng = NoopTranslator()
+    elif globals().get("FAKE_FORCE"):
+        eng = globals()["FAKE_FORCE"]()
+        print(f"[引擎] FakeTranslator (回归用, 不调 LLM)")
     else:
         eng = OllamaTranslator()
-        print(f"[引擎] {type(eng).__name__} @ {eng.base_url}/v1/chat/completions (model={eng.model})")
+        print(f"[引擎] {type(eng).__name__} @ {eng.base_url}/v1/chat/completions (model={eng.model}) "
+              f"并发={CONCURRENCY} 批大小={BATCH_SIZE}")
 
     # ---- phrase-level 翻译准备: 每行切 phrase -> glossary 直译 -> 剩余交模型(带 context) -> rebuild ----
     jobs = {}
@@ -823,7 +900,7 @@ def main():
 
     # 构建一条待翻译 = 单个 pending phrase + 其 context (便于逐 phrase 映射回填)
     phrase_items = []          # (composite_key, block_text)
-    phrase_map = {}            # composite_key -> (tid, orig_key)
+    phrase_map = {}            # composite_key -> (tid, orig_key, source_phrase, fingerprint, gloss_hint)
     for tid, j in jobs.items():
         for p in j["pending"]:
             ck = f"{tid}:::{p['key']}"
@@ -832,45 +909,90 @@ def main():
                 block += f"\n固定术语(译文中必须原样使用): {p['gloss_hint']}"
             if p.get("ctx"):
                 block += f"\nContext: {p['ctx']}"
+            fp = build_fingerprint(
+                source_phrase=p["t"].strip(),
+                glossary_hint=p.get("gloss_hint", ""),
+                context=p.get("ctx", ""),
+            )
             phrase_items.append((ck, block))
-            phrase_map[ck] = (tid, p["key"])
+            phrase_map[ck] = (tid, p["key"], p["t"].strip(), fp, p.get("gloss_hint", "") or "")
 
+    # ---- 缓存感知翻译: fingerprint hit->复用(不调 Ollama); miss->调模型并立即写库 ----
     phrase_res = {}
-    if phrase_items:
-        print(f"[翻译] 调用引擎 {type(eng).__name__}, 共 {len(phrase_items)} 个 phrase ...")
-        raw = eng.translate_batch(phrase_items)
-        print("[翻译] 完成。")
-        for ck, out_txt in raw.items():
-            if ck in phrase_map:
-                tid, orig_key = phrase_map[ck]
-                phrase_res.setdefault(tid, {})[orig_key] = str(out_txt).strip()
+    cache = PhraseCache(out_dir, model=getattr(eng, "model", None))
+    try:
+        n_hit = n_miss = 0
+        todo_items = []      # (ck, block) 需送模型的 (fingerprint miss)
+        for ck, block in phrase_items:
+            tid, orig_key, src_phrase, fp, gh = phrase_map[ck]
+            cached = cache.get(fp)
+            if cached and not FORCE:
+                phrase_res.setdefault(tid, {})[orig_key] = cached["translation"]
+                n_hit += 1
+            else:
+                todo_items.append((ck, block))
+                n_miss += 1
+
+        if n_hit:
+            print(f"[缓存] 命中复用 {n_hit} 个 phrase (不调模型)")
+        if todo_items:
+            print(f"[翻译] 调用引擎 {type(eng).__name__}, 新翻译 {len(todo_items)} 个 phrase (cache miss) ...")
+            if hasattr(eng, "translate_batch"):
+                try:
+                    raw = eng.translate_batch(todo_items, concurrency=CONCURRENCY, per_call=BATCH_SIZE)
+                except TypeError:
+                    raw = eng.translate_batch(todo_items)
+            else:
+                raw = eng.translate_batch(todo_items)
+            print("[翻译] 完成。")
+            import time as _t
+            now = _t.strftime("%Y-%m-%d %H:%M:%S")
+            for ck, out_txt in raw.items():
+                if ck in phrase_map:
+                    tid, orig_key, src_phrase, fp, gh = phrase_map[ck]
+                    z = str(out_txt).strip()
+                    if z and not z.startswith("[ERR"):
+                        # miss 成功后立即写库 + commit (checkpoint/resume 根本)
+                        cache.put(
+                            fingerprint=fp, translation_id=tid, segment_index=int(orig_key),
+                            source_phrase=src_phrase, source_hash=source_hash(src_phrase),
+                            translation=z, now=now)
+                        phrase_res.setdefault(tid, {})[orig_key] = z
+        print(f"[缓存] 本轮: hit={n_hit} miss={n_miss} 库总条数={cache.count()}")
+    except Exception:
+        cache.close()
+        raise
 
     # 组装 done; 含 protected_spans (PARTIAL 时列出需原样保留的 token 在原文本中的区间)
     done_cols = ["translation_id", "source_text", "decision", "translate_mode",
                  "detected_language", "protected_spans", "translation", "status", "source_hash"]
     done_rows = []
-    for r, mode, zh, status, lang in decided:
-        text = norm_text(r.get("source_text"))
-        if mode == "APPROVED":
-            translation = zh
-        elif mode == "KEEP":
-            translation = ""
-            status = "DONE_SKIP"
-        elif r.get("translation_id") in jobs:
-            j = jobs[r.get("translation_id")]
-            resolved = dict(j["gloss"])
-            resolved.update(phrase_res.get(r.get("translation_id"), {}))
-            translation = rebuild(j["segs"], resolved)
-            translation = restore_protected(j["segs"], translation)
-            if any(v.startswith("[ERR") for v in resolved.values()):
-                status = "PENDING"
-            elif translation.strip():
-                status = "DONE"
+    try:
+        for r, mode, zh, status, lang in decided:
+            text = norm_text(r.get("source_text"))
+            if mode == "APPROVED":
+                translation = zh
+            elif mode == "KEEP":
+                translation = ""
+                status = "DONE_SKIP"
+            elif r.get("translation_id") in jobs:
+                j = jobs[r.get("translation_id")]
+                resolved = dict(j["gloss"])
+                resolved.update(phrase_res.get(r.get("translation_id"), {}))
+                translation = rebuild(j["segs"], resolved)
+                translation = restore_protected(j["segs"], translation)
+                if any(v.startswith("[ERR") for v in resolved.values()):
+                    status = "PENDING"
+                elif translation.strip():
+                    status = "DONE"
+                else:
+                    status = "PENDING"
             else:
-                status = "PENDING"
-        else:
-            translation = ""
-            status = "PENDING"
+                # 该行本次未进引擎 (被过滤/缺席 jobs): 仍从 cache 物化 (materialized output)
+                translation, status = materialize_from_cache(text, mode, cache)
+                if translation is None:
+                    translation = ""
+                    status = "PENDING"
         psp = protected_spans(text) if mode == "PARTIAL_TRANSLATE" else ""
         done_rows.append({
             "translation_id": r.get("translation_id"),
@@ -883,10 +1005,12 @@ def main():
             "status": status,
             "source_hash": r.get("source_hash"),
         })
-    with open(DONE, "w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=done_cols)
-        w.writeheader(); w.writerows(done_rows)
-    print(f"[写出] {DONE}  ({len(done_rows)} 行)")
+        with open(DONE, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=done_cols)
+            w.writeheader(); w.writerows(done_rows)
+        print(f"[写出] {DONE}  ({len(done_rows)} 行)")
+    finally:
+        cache.close()
 
     if SAMPLE:
         samp = out_dir / "translation_sample_zh.csv"
