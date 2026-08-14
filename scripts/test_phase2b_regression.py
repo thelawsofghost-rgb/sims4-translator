@@ -290,6 +290,30 @@ def test_100phrase_simulation():
     cache.close()
 
 
+def test_ollama_client_no_proxy():
+    """生产 Ollama 客户端契约回归: 严禁读系统代理, 统一 127.0.0.1。
+
+    防止以后重构又恢复成默认 httpx 环境代理行为(用户机器配了全局代理,
+    trust_env=True 会把本地 Ollama 请求劫持到代理 -> 502)。
+    仅实例化检查 client 配置, 不发起任何真实网络请求。
+    """
+    print("\n== 8. Ollama HTTP client 契约 (trust_env=False + 127.0.0.1) ==")
+    import httpx as _httpx
+    t = P.OllamaTranslator()
+    # 1) client 是 httpx.Client 且 trust_env 必须为 False
+    check("client 为 httpx.Client", isinstance(t.client, _httpx.Client),
+          f"type={type(t.client).__name__}")
+    check("trust_env == False (不读系统代理)", t.client.trust_env is False,
+          f"trust_env={t.client.trust_env}")
+    # 2) base_url 必须指向 127.0.0.1 (进制 localhost, 防代理/解析器劫持)
+    host = t.client.base_url.host
+    check("host == 127.0.0.1", host == "127.0.0.1", f"host={host}")
+    # 3) 若外部显式传入 localhost, 也应被归一为 127.0.0.1
+    t2 = P.OllamaTranslator(base_url="http://localhost:11434")
+    check("显式 localhost 归一为 127.0.0.1", t2.client.base_url.host == "127.0.0.1",
+          f"host={t2.client.base_url.host}")
+
+
 def count_miss_hit(rows, cache):
     n_miss = n_hit = 0
     for r in rows:
@@ -313,6 +337,7 @@ def main():
     test_language_sanity()
     test_cache_resume()
     test_100phrase_simulation()
+    test_ollama_client_no_proxy()
     print(f"\n==== 结果: PASS={len(PASS)}  FAIL={len(FAIL)} ====")
     if FAIL:
         print("失败项:", *FAIL, sep="\n  - ")

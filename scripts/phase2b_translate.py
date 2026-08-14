@@ -511,11 +511,31 @@ class OllamaTranslator(Translator):
     不再依赖 reasoning/thinking 最后一行猜译文; 每批成功即 on_done() 即时 checkpoint。
     降并发仅由 transport/load 故障触发; 解析/空结果类错误 fail-fast, 绝不整批重跑全量。
     """
-    def __init__(self, base_url="http://localhost:11434", model="ni-fei:latest", api_key="ollama"):
-        self.base_url = base_url.rstrip("/")
+    # ------------------------------------------------------------------ client -
+    # 统一本机 Ollama HTTP client。所有请求必须走 self.client:
+    #   - trust_env=False: 绝不读系统 HTTP(S)_PROXY 代理环境变量。用户机器常配
+    #     全局代理, 若走代理则本地 Ollama 请求被劫持 -> 502。这是生产必修项。
+    #   - 127.0.0.1 而非 localhost: 避免 localhost 被代理/解析器劫持。
+    # 禁止散用 httpx.post/get。health check / native chat / openai fallback
+    # 全部经由本 client, 以保持 trust_env=False 语义一致。
+    def __init__(self, base_url="http://127.0.0.1:11434", model="ni-fei:latest", api_key="ollama", timeout=300.0):
+        import httpx
         self.model = model
         self.api_key = api_key
-        import httpx
+        self.timeout = timeout
+        self.base_url = base_url.rstrip("/")
+        # base_url 可被外部指定为 http://localhost:11434 (旧默认)。这里统一归一为
+        # 127.0.0.1, 避免 localhost 走代理/被解析器劫持。
+        host = self.base_url.split("//")[-1].split("/")[0]
+        if host.rstrip("/").lower() == "localhost:11434" or host == "localhost":
+            self.base_url = "http://127.0.0.1:11434"
+        self.client = httpx.Client(
+            base_url=self.base_url,
+            trust_env=False,
+            timeout=timeout,
+            # 本机回环, 带上简短 User-Agent, 代理/网关不会据此劫持
+            headers={"User-Agent": "sims4-translator/phase2b"},
+        )
         self._httpx = httpx
 
     # ---------------------------------------------------------------- schema -
@@ -662,8 +682,9 @@ class OllamaTranslator(Translator):
             "format": self._SCHEMA,
             "options": {"temperature": 0.0, "num_predict": 1024},
         }
-        url = f"{self.base_url}/api/chat"
-        r = self._httpx.post(url, json=payload, timeout=180)
+        url = "/api/chat"
+        # 统一走 self.client (trust_env=False), 不读系统代理
+        r = self.client.post(url, json=payload)
         if r.status_code >= 500 or r.status_code == 429:
             raise RuntimeError(f"Ollama transport/load: HTTP {r.status_code}")
         r.raise_for_status()
