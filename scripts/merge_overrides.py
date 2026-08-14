@@ -107,14 +107,48 @@ def main():
             "notes": "dorothy_final_22",
         })
 
-    # 去重 (同 tid+source)
-    seen = set(); uniq = []
+    # 去重 (同 tid+source) 并检测冲突
+    seen = {}; uniq = []; conflicts = []
     for o in overrides:
         k = (o["translation_id"], o["source_text"])
         if k in seen:
+            if seen[k]["translation"] != o["translation"]:
+                conflicts.append((k, seen[k]["translation"], o["translation"]))
             continue
-        seen.add(k); uniq.append(o)
+        seen[k] = o; uniq.append(o)
     overrides = uniq
+
+    # ==== 严格验证 ====
+    print("\n===== 严格验证 ====")
+    # 1) source 缺失检查 (source_text 为空)
+    no_src = [o["translation_id"] for o in overrides if not (o.get("source_text") or "").strip()]
+    print(f"  missing source_text     : {len(no_src)}")
+    for t in no_src: print(f"      {t}")
+    # 2) 译文缺失检查
+    no_zh = [o["translation_id"] for o in overrides if not (o.get("translation") or "").strip()]
+    print(f"  missing final_translation: {len(no_zh)}")
+    for t in no_zh: print(f"      {t}")
+    # 3) 重复冲突检查 (同 tid+src 译文不一致)
+    print(f"  duplicate conflict       : {len(conflicts)}")
+    for (tid, src), a, b in conflicts:
+        print(f"      {tid}: '{a}' vs '{b}'")
+    # 4) 22 条 final 精确命中 (tid 存在 + 译文 == final_map 值)
+    final_ids = set(final_map)
+    over_tids = {o["translation_id"] for o in overrides}
+    miss_final = final_ids - over_tids
+    zh_mismatch = []
+    for o in overrides:
+        if o["translation_id"] in final_map and o["translation"] != final_map[o["translation_id"]]:
+            zh_mismatch.append((o["translation_id"], final_map[o["translation_id"]], o["translation"]))
+    print(f"  final22 缺 tid           : {len(miss_final)}")
+    for t in sorted(miss_final): print(f"      {t}")
+    print(f"  final22 译文不匹配       : {len(zh_mismatch)}")
+    for t, want, got in zh_mismatch: print(f"      {t}: want {want!r} got {got!r}")
+    ok = not (no_src or no_zh or conflicts or miss_final or zh_mismatch or missing)
+    if missing:
+        print(f"\n  另有 {len(missing)} 条因缺译文/缺 source 未写入 (见合并明细):")
+        for tid, why in missing: print(f"      {tid}: {why}")
+    print("\n  => " + ("全部通过 ✓" if ok else "存在失败项 ✗ (不得覆盖原文件)"))
 
     # 写合并结果 (不覆盖原文件)
     cols = ["translation_id", "source_text", "translation", "action", "reason", "notes"]
@@ -130,10 +164,6 @@ def main():
     print(f"  RESOLVED        : {len([r for r in csv.DictReader(open(res, encoding='utf-8-sig')) if (r.get('_final') or '').strip()=='RESOLVED'])}")
     print(f"  Dorothy 22 定稿 : {len(final_map)}")
     print(f"  合计 override   : {len(overrides)}")
-    if missing:
-        print(f"\n[!] {len(missing)} 条因缺译文/缺 source 被跳过 (未臆造):")
-        for tid, why in missing:
-            print(f"    {tid}: {why}")
     print(f"\n[写出] {dest}  (未覆盖原 translation_overrides.csv)")
     print("\n完成 (只读; 未调 LLM / 未改 cache / 未写 package)。")
     print("\n下一步: 人工核对 merged 后 用 `phase2b_translate.py` 重物化 (0 LLM) + `phase2b_qa.py`。")
