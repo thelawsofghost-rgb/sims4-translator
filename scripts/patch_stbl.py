@@ -359,24 +359,7 @@ def main() -> int:
         print("[ERROR] mapping.csv 无数据"); return 1
     print(f"[MAP ] mapping 条数={len(mapping)}")
 
-    # 命中 key
-    hash_to_tid = {}
-    for tid in mapping:
-        h = tid_to_hash(tid)
-        if h is not None:
-            hash_to_tid.setdefault(h, []).append(tid)
-    existing = {kh for kh, _, _, _ in recs}
-    to_patch = [(kh, tid) for kh, tids in hash_to_tid.items() if kh in existing for tid in tids]
-    if not to_patch:
-        print("[ERROR] mapping 无 key 命中 CHS STBL 现存 keyHash")
-        print(f"        现存 {len(existing)} 个 key 样例: " +
-              ", ".join(f"0x{h:08X}" for h in list(existing)[:5]))
-        return 1
-    print(f"[HIT ] 将修改 {len(to_patch)} 个 key")
-    if len(to_patch) > 1:
-        print(f"[WARN] MVP 预期单条, 实际命中 {len(to_patch)} 条 — 将全部应用")
-
-    # 命中 key (只需一个; 逐 key 原位手术)
+    # 命中 key (只需一个)
     hash_to_tid = {}
     for tid in mapping:
         h = tid_to_hash(tid)
@@ -389,11 +372,9 @@ def main() -> int:
         print(f"        现存 {len(existing)} 个 key 样例: " +
               ", ".join(f"0x{h:08X}" for h in list(existing)[:5]))
         return 1
-    print(f"[HIT ] 将修改 {len(to_patch)} 个 key: " +
-          ", ".join(f"0x{h:08X}" for h in to_patch))
+    print(f"[HIT ] 将修改 {len(to_patch)} 个 key")
 
     # 重建整个 CHS STBL (全量, 正确的 STBL 结构; 其余 key 原样保留)
-    # 对每个命中 key 应用翻译, 未命中 key 保留原文本/flags
     new_recs = []
     applied = 0
     for kh, txt, flags, _ in recs:
@@ -407,36 +388,75 @@ def main() -> int:
     if applied == 0:
         print("[ERROR] mapping 命中但文本与现有一致 (无实际变更)"); return 1
     try:
-        new_body_stored = stbl_encode(new_recs)
+        new_plain = stbl_encode(new_recs)          # 未压缩的逻辑 body
     except ValueError as e:
         print(f"[ERROR] STBL 编码失败: {e}"); return 1
-    # 存储方式跟随原 STBL: 压缩->zlib, raw->raw (保持压缩表示一致)
-    if orig_compressed:
-        cands = sorted((zlib.compress(new_body_stored, lv) for lv in range(1, 10)), key=len)
-        new_body = cands[0]
-        print(f"[OK  ] STBL 重建: {len(new_recs)} keys, 应用 {applied} 条, "
-              f"解压后 {len(new_body_stored)}B / 存储(zlib) {len(new_body)}B (原 {chs.size}B)")
-    else:
-        new_body = new_body_stored
-        print(f"[OK  ] STBL 重建: {len(new_recs)} keys, 应用 {applied} 条, "
-              f"新 body(raw) {len(new_body)}B (原 {chs.size}B)")
 
-    # 正确的 DBPF 重排: 装下新长度 STBL, 其余 resource 原字节复制
-    try:
-        new_file, new_offs = build_dbpf_relayout(raw, entries, chs.instance_id, new_body)
-    except (ValueError, AssertionError) as e:
-        print(f"[ERROR] 重排失败: {e}"); return 1
+    # 目标 STBL 的存储表示: raw(未压缩) 或 zlib(压缩)
+    if orig_compressed:
+        cands = sorted((zlib.compress(new_plain, lv) for lv in range(1, 10)), key=len)
+        new_stored = cands[0]
+        stored_is_comp = True
+    else:
+        new_stored = new_plain
+        stored_is_comp = False
+
+    if len(new_stored) <= chs.size:
+        # —— 方案 A (首选): 保持原体积 ——
+        # 尾部补零到 == 原 size, 使文件大小/索引/offset/size **全部不变**,
+        # 仅覆盖目标 STBL 的 body 区字节 (loader 看到的是与原始几乎逐字节一致的结构)
+        new_stored = new_stored + b"\x00" * (chs.size - len(new_stored))
+        data = bytearray(raw)
+        s = chs.offset
+        data[s:s + chs.size] = new_stored
+        new_file = bytes(data)
+        mode = "inplace(体积不变)"
+        print(f"[OK  ] STBL 重建+尾部补零: {len(new_recs)} keys, 应用 {applied} 条, "
+              f"存储 {len(new_stored)}B (== 原 {chs.size}B, {mode})")
+    else:
+        # —— 方案 B (量变/增长时): 正确的 relayout ——
+        try:
+            nf, _ = build_dbpf_relayout(raw, entries, chs.instance_id, new_stored)
+        except (ValueError, AssertionError) as e:
+            print(f"[ERROR] 重排失败: {e}"); return 1
+        new_file = nf
+        mode = f"relayout(+{len(new_stored)-chs.size}B)"
+        print(f"[OK  ] STBL 重建: {len(new_recs)} keys, 应用 {applied} 条, "
+              f"新体积 {len(new_stored)}B > 原 {chs.size}B, 走 {mode}")
 
     Path(out_path).write_bytes(new_file)
     print(f"[SAVE] 已写入: {out_path} ({len(new_file)} 字节)")
 
-    # 验证1: 未编辑 resource 的 body 内容逐字节一致 + metadata(comp位)一致
-    ok, why = byte_diff_verify_resources(raw, new_file, chs.instance_id)
-    if not ok:
-        print(f"[B-DIFF] FAIL: {why} — 结构被破坏, 拒发"); return 1
-    print(f"[B-DIFF] PASS: 除目标 STBL 外, 其余 {len(entries)-1} 个 resource 的 body 内容/元数据逐字节一致")
+    if mode.startswith("inplace"):
+        # —— [STRUCT] 结构性零改动验证 (inplace 模式核心承诺) ——
+        struct_ok = True
+        if len(new_file) != len(raw):
+            struct_ok = False; print(f"[STRUCT] FAIL: 文件长度 {len(new_file)} != {len(raw)}")
+        for off, cn, msg in ((0x40, struct.unpack("<I", new_file[0x40:0x44])[0], "index_offset"),
+                             (0x2C, struct.unpack("<I", new_file[0x2C:0x30])[0], "index_size"),
+                             (0x24, struct.unpack("<I", new_file[0x24:0x28])[0], "count")):
+            if struct.unpack("<I", raw[off:off+4])[0] != cn:
+                struct_ok = False; print(f"[STRUCT] FAIL: {msg} 被改动")
+        # 检查目标 STBL 区之外所有字节一致 (含 index 全部 entry)
+        s, e = chs.offset, chs.offset + chs.size
+        for i in range(len(raw)):
+            if s <= i < e:
+                continue
+            if raw[i] != new_file[i]:
+                struct_ok = False
+                print(f"[STRUCT] FAIL: target区之外 byte@{i} 不一致 (0x{raw[i]:02X}->0x{new_file[i]:02X})")
+                break
+        if not struct_ok:
+            print("[STRUCT] FAIL: 结构性零改动承诺被破坏 — 拒发"); return 1
+        print(f"[STRUCT] PASS: 文件大小/index_offset/index_size/count 全部不变, "
+              f"目标 STBL 区之外逐字节一致 (loader 结构零变化)")
+    else:
+        ok, why = byte_diff_verify_resources(raw, new_file, chs.instance_id)
+        if not ok:
+            print(f"[B-DIFF] FAIL: {why} — 结构被破坏, 拒发"); return 1
+        print(f"[B-DIFF] PASS: 除目标 STBL 外, 其余 {len(entries)-1} 个 resource 的 body 内容/元数据逐字节一致")
 
-    # 验证2: 回读解码确认
+    # 回读解码验证
     try:
         vraw, vidx = read_index_only(out_path)
         vchs = find_chs_stbl(vidx.entries)
@@ -453,7 +473,6 @@ def main() -> int:
             ok = (got == expect)
             ok_all &= ok
             print(f"     {('OK ' if ok else 'FAIL')} 0x{kh:08X}: {got!r} (期望 {expect!r})")
-        # 未命中 key 也必须原样
         for kh, txt, _, _ in recs:
             if kh not in hash_to_tid and vmap.get(kh) != txt:
                 ok_all = False
