@@ -150,24 +150,6 @@ def _classify_field(fname):
     return "OTHER"
 
 
-def pv_category(nl):
-    """exact 字段名 -> player-visible 分类 (单一真源, 用于 pv_refs 与 TRANSLATE keys 共用)。
-
-    只认三个明确字段名(== 精确匹配, 非 substring):
-      PACK_TITLE        <- display_name
-      PACK_DESCRIPTION  <- description (仅有效非0 hash, 由 parse_display_hash=None 前置过滤)
-      POSE_DISPLAY_NAME <- pose_display_name
-    其余 (pose_name / sort_name / pose_description / internal ...) 一律不翻 -> 返回 None。
-    """
-    if nl in PV_PACK_TITLE:
-        return "TRANSLATE"
-    if nl in PV_PACK_DESC:
-        return "TRANSLATE"
-    if nl in PV_POSE_DISPLAY:
-        return "TRANSLATE"
-    return None
-
-
 def is_hash_like(s):
     s = (s or "").strip()
     if not s:
@@ -198,6 +180,33 @@ def parse_display_hash(s):
     if v == 0:
         return None
     return v
+
+
+def _is_pose_container(nl):
+    """该节点名是否为 pose 容器 (pose_list / pose / pose_entry)。pose_display_name 只能出现在这里。"""
+    nl = nl.replace("_", "")
+    return nl in ("poselist", "pose", "poseentry")
+
+
+def _walk_ctx(root):
+    """带结构位置的遍历: yield (el, pack_level, in_pose_container)。
+
+    - pack_level=True  : 该节点位于 PosePackInstance 树内、且不在任何 pose_list/pose entry 下
+                         (PACK_TITLE / PACK_DESCRIPTION 的有效位置)
+    - in_pose_container=True: 该节点位于 pose_list/pose/pose_entry 子树内
+                         (POSE_DISPLAY_NAME 的有效位置)
+    """
+    # 父->子 递归, 边遍历边跟踪祖先是否为 pose 容器
+    stack = [(root, None)]  # (node, parent_name_lower)
+    # 用显式栈模拟, 维护当前是否处在 pose 容器内
+    def _rec(node, in_pose):
+        nl = (node.attrib.get("n") or "").lower()
+        n_in_pose = in_pose or _is_pose_container(nl)
+        pack_level = (not in_pose) and (not n_in_pose)
+        yield (node, pack_level, n_in_pose)
+        for child in node:
+            yield from _rec(child, n_in_pose)
+    yield from _rec(root, False)
 
 
 def is_pose_pack_root(root):
@@ -315,8 +324,10 @@ def scan_package(path: str) -> dict:
     ref_pv_packtitle = 0
     ref_pv_packdesc = 0
     ref_pv_posedisplay = 0
-    for xinst_id, root, raw in xmls:
-        for el in root.iter():
+    for xinst_id, root, _raw in posexmls:
+        # 带结构位置遍历: 仅处理 PosePackInstance 树 (非 PosePack 的 display_name/description
+        # 一律不参与), 并按 pack_level / in_pose_container 区分三类的有效位置。
+        for el, pack_level, in_pose in _walk_ctx(root):
             n = el.attrib.get("n")
             if not n:
                 continue
@@ -329,25 +340,34 @@ def scan_package(path: str) -> dict:
             cls = _classify_field(n)
             h = parse_display_hash(val)   # None 代表无效或 zero sentinel (0/0x0/0x00000000)
             nl = n.lower()
-            pvc = pv_category(nl)          # 仅 3 个 exact 字段名 -> "TRANSLATE", 其余 None
-            # 精确字段名计数 (== 而非 substring, 避免 pose_display_name 误吞 display_name);
-            # zero sentinel (h is None) 的字段不计入任何 ref count。
+            # 结构位置门控 (2026-08-15 终审):
+            #   PACK_TITLE        = PosePackInstance-level display_name        (pack_level, 非 pose 容器内)
+            #   PACK_DESCRIPTION  = PosePackInstance-level description (非0hash) (pack_level)
+            #   POSE_DISPLAY_NAME = pose_list/pose entry 内的 pose_display_name   (in_pose)
+            pvc = None
+            if nl == "display_name" and pack_level:
+                pvc = "TRANSLATE"
+            elif nl == "description" and pack_level:
+                pvc = "TRANSLATE"
+            elif nl == "pose_display_name" and in_pose:
+                pvc = "TRANSLATE"
+            # 精确字段名计数 (zero sentinel h is None 不计)
             if h is not None:
-                if nl in PV_PACK_TITLE: ref_pv_packtitle += 1
-                if nl in PV_PACK_DESC: ref_pv_packdesc += 1
-                if nl in PV_POSE_DISPLAY: ref_pv_posedisplay += 1
+                if nl in PV_PACK_TITLE and pack_level: ref_pv_packtitle += 1
+                if nl in PV_PACK_DESC and pack_level: ref_pv_packdesc += 1
+                if nl in PV_POSE_DISPLAY and in_pose: ref_pv_posedisplay += 1
             if h is not None:
                 struct_ref.setdefault(h, []).append((n, cls, xinst_id))
-            # player-visible ref 单独记录: 只用 pv_category 判定 (与 TRANSLATE keys 同一套定义);
-            # zero sentinel (h is None) 的字段【不计入】pv_refs, 也不计 unresolved。
+            # player-visible ref: 位置门控后, 只记“确实在该规范位置且非0 hash”的字段
             if pvc is not None and h is not None:
                 pv_refs.append((n, h, pvc, xinst_id))
-            # 结构引用证据 (不含 zero sentinel): 用于 key 分类 (translate/keep)
+            # 结构引用证据 (非0 hash): translate keys 仅取位置门控后的 pvc;
+            # 其余 (authorish 且 pack_level 或任意) 归 keep。
             if h is not None:
                 if pvc is not None:
-                    translate_ref_keys.add(h)          # 该 key 属于 player-visible TRANSLATE 集合
+                    translate_ref_keys.add(h)
                 elif cls == "AUTHORISH":
-                    keep_ref_keys.add(h)               # creator/author 等 -> KEEP
+                    keep_ref_keys.add(h)
     row["pack_title_ref_count"] = ref_pv_packtitle
     row["pack_description_ref_count"] = ref_pv_packdesc
     row["pose_display_name_ref_count"] = ref_pv_posedisplay
@@ -362,7 +382,8 @@ def scan_package(path: str) -> dict:
         chs_inst, chs_ver, chs_comp, chs_kvs = chs[0]
         target_keys = {kh: (fl, txt) for kh, fl, txt in chs_kvs}  # 仅该 exact STBL 的 key
         target_key_set = set(target_keys.keys())
-        # TRANSLATE keys: 只取【exact 3 字段 allowlist】引用的 key (单一真源 pv_category),
+        # TRANSLATE keys: 只取【结构位置门控后的 exact 3 字段】引用的 key (与 pv_refs 同一套
+        # 定义+位置: PosePackInstance-level display_name/description + pose_list 内 pose_display_name),
         # 与 pv_refs 用同一套定义 —— 绝不用宽泛 DISPLAY substring (修: pose_description 等被吞)。
         tset = translate_ref_keys & target_key_set
         kset = keep_ref_keys & target_key_set
@@ -383,7 +404,7 @@ def scan_package(path: str) -> dict:
         row["invariant_ok"] = 0
 
     # ---- set-level invariant: TRANSLATE_KEY_SET == RESOLVED_PLAYER_VISIBLE_KEY_SET ----
-    # 收集 pv_refs 与生成 TRANSLATE keys 必须同源 (pv_category); 重复 XML ref 去重后比 key set。
+    # 收集 pv_refs 与生成 TRANSLATE keys 必须同源 (同一字段定义+结构位置); 重复 XML ref 去重后比 key set.
     # 即: 所有 resolve 成功的 player-visible key 集合 == 实际标成 TRANSLATE 的 key 集合。
     # KEEP (creator) 单独检查, 不混入本式。
     if row["CHS_target_STBL_count"] == 1:
