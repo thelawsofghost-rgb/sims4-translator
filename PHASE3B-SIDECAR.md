@@ -113,24 +113,32 @@ python .\scripts\audit_tibo_exact_map.py --dump-xml --keep 0xXXXX:作者Tibo131 
 fixture 回归: `scripts/_tibo_fixture.py` 生成含作者+包标题+3个 pose 显示名的测试包,
   已本地验证: pose_display_name→TRANSLATE, 作者/包标题→KEEP(override), 孤立 J→UNMAPPED。
 
-编译 (Windows, .NET Framework 4.0):
+编译 (Windows, .NET Framework 4.0; 仅依赖仓库内容 + NuGet restore):
 已内建 MSB3644 修复: 工程引用 Microsoft.NETFramework.ReferenceAssemblies 1.0.3
 (自包含 net40 reference assemblies, 无需装 .NET 4.0 Developer Pack; FrameworkPathOverride
-沿 ProjectReference 传给 s4pi 工程一并生效)。先 restore 再 build, 两步:
+沿 ProjectReference 传给 vendored s4pi 工程一并生效)。
+
+依赖: s4pi 源码已 vendored 到 `vendor/s4pi/` (固定 commit fff1936, GPL v3,
+见 vendor/s4pi/README-S4PI-VENDOR.md), Windows git clone/pull 即可获得, 无需任何手动寻找。
+
+⚠️ 用默认 Debug 配置 (不要加 /p:Configuration=Release): 上游 s4pi 的 PreBuildEvent
+硬编码 `bin\Debug\CreateAssemblyVersion` (生成 Properties\AssemblyVersion.cs),
+仅在 Debug 下可命中; Release 会因找不到该 exe 而失败。Debug 对构建工具已足够。
+先 restore 再 build, 两步:
 ```
 cd D:\projects\sims4_trans\sidecar_builder
 ```
 ```
-msbuild SidecarBuilder.csproj /t:Restore /p:Configuration=Release
+msbuild SidecarBuilder.csproj /t:Restore
 ```
 ```
-msbuild SidecarBuilder.csproj /p:Configuration=Release
+msbuild SidecarBuilder.csproj
 ```
-产物: `bin\Release\SidecarBuilder.exe`
+产物: `bin\Debug\SidecarBuilder.exe`
 
 运行 (建单 STBL 包 + 重开核对):
 ```
-SidecarBuilder.exe -out out.package -type 0x220557DA -group 0x80000000 -inst 0x014EACCF17C8B091 -k FDD36EF2:左 -k 552CC77A:相拥
+bin\Debug\SidecarBuilder.exe -out out.package -type 0x220557DA -group 0x80000000 -inst 0x014EACCF17C8B091 -k FDD36EF2:左 -k 552CC77A:相拥
 ```
 验收 (Step③ 第一关):
 1. Windows 能编译
