@@ -44,23 +44,23 @@
   <!-- 引用仓库内 s4pi 源码工程; msbuild 会自动按依赖图一并编译.
        GUID 为各 csproj 实际值 (已核对), 序列化逻辑完全由 s4pi 负责. -->
   <ItemGroup>
-    <ProjectReference Include="..\..\lib\s4pi_src\CS System Classes\CS System Classes.csproj">
+    <ProjectReference Include="..\lib\s4pi_src\CS System Classes\CS System Classes.csproj">
       <Project>{00200E76-C245-42A7-B567-5C30EDBCE977}</Project>
       <Name>System.Custom</Name>
     </ProjectReference>
-    <ProjectReference Include="..\..\lib\s4pi_src\s4pi\Interfaces\Interfaces.csproj">
+    <ProjectReference Include="..\lib\s4pi_src\s4pi\Interfaces\Interfaces.csproj">
       <Project>{51023BD2-9139-438D-B794-95E5EC023537}</Project>
       <Name>s4pi.Interfaces</Name>
     </ProjectReference>
-    <ProjectReference Include="..\..\lib\s4pi_src\s4pi\Settings\Settings.csproj">
+    <ProjectReference Include="..\lib\s4pi_src\s4pi\Settings\Settings.csproj">
       <Project>{374F37CF-1F27-4613-96FD-9B956A3D82B1}</Project>
       <Name>s4pi.Settings</Name>
     </ProjectReference>
-    <ProjectReference Include="..\..\lib\s4pi_src\s4pi\Package\Package.csproj">
+    <ProjectReference Include="..\lib\s4pi_src\s4pi\Package\Package.csproj">
       <Project>{9D8BB6F7-373E-4FBC-B5E8-9709B4CE9A37}</Project>
       <Name>s4pi.Package</Name>
     </ProjectReference>
-    <ProjectReference Include="..\..\lib\s4pi_src\s4pi Wrappers\StblResource\StblResource.csproj">
+    <ProjectReference Include="..\lib\s4pi_src\s4pi Wrappers\StblResource\StblResource.csproj">
       <Project>{672D72EC-89DA-4EF3-88CC-BEEC5BA478B2}</Project>
       <Name>s4pi.StblResource</Name>
     </ProjectReference>
