@@ -204,6 +204,7 @@ def scan_package(path: str) -> dict:
         "exact_structural_translate_count": 0,
         "keep_count": 0,
         "unmapped_uncertain_count": 0,
+        "invariant_ok": 0,
         "STBL_version": "",
         "compression_state": "",
         "non_ascii_source_present": 0,
@@ -263,24 +264,18 @@ def scan_package(path: str) -> dict:
         fams = {(i >> 32) & 0xFFFFFFFF for i, *_ in chs}
         row["multiple_target_STBL_families"] = 1 if len(fams) > 1 else 0
 
-    # ---- 所有 STBL key 池 (用于结构引用 join) ----
-    stbl_keys = {}     # kh -> (flags, text)
-    stbl_insts = {}    # kh -> [inst_id...]
-    for i, (ver, comp, kvs) in stbl_parsed.items():
-        for kh, fl, txt in kvs:
-            stbl_keys[kh] = (fl, txt)
-            stbl_insts.setdefault(kh, []).append(i)
-
     # ---- XML 结构引用 (PosePackInstance 及其它 tuning) ----
+    # struct_ref: 全包 XML 引用 hash -> [(field, cls, xml_inst_id)], 该 hash 在所有 STBL
+    # (任意 locale) 中出现与否, 仅作“包内该 hash 是否有结构引用”的证据;
+    # 最终能否 writable 取决于该 hash 是否存在于【exact CHS target STBL】并落在它上面。
     xmls = read_xml_payloads(backend, idx.entries)
     posexmls = [x for x in xmls if is_pose_pack_root(x[1])]
     row["PosePackInstance_count"] = len(posexmls)
 
-    struct_ref = {}    # kh -> [(field, cls, inst_id)]
+    struct_ref = {}    # kh -> [(field, cls, xml_inst_id)]
     ref_pv_packtitle = 0
     ref_pv_packdesc = 0
     ref_pv_posedisplay = 0
-    alltexts = []      # 全部 STBL 文本, 用于 repeated / non_ascii / long
     for xinst_id, root, raw in xmls:
         for el in root.iter():
             n = el.attrib.get("n")
@@ -305,31 +300,45 @@ def scan_package(path: str) -> dict:
     row["pack_description_ref_count"] = ref_pv_packdesc
     row["pose_display_name_ref_count"] = ref_pv_posedisplay
 
-    # ---- 逐 key 判定 (结构证据) ----
+    # ---- 逐 key 判定: 严格限定到 exact CHS target STBL ----
+    # 只有当包内 CHS 目标 STBL 唯一 (CHS_target_STBL_count == 1) 时, 才在它的 key 全集上
+    # 做三分法。多 target / 无 target 时计数一律置 0, 避免把其他 STBL/locale/orphan
+    # 的 key 混进 target 统计 (修复: [Kritical]BrainwashingMachineAtropos1c 64 vs 2)。
     translate = keep = unmapped = 0
-    for kh, (fl, txt) in stbl_keys.items():
-        refs = struct_ref.get(kh, [])
-        if not refs:
-            unmapped += 1
-            continue
-        disp = [r for r in refs if r[1] == "DISPLAY"]
-        auth = [r for r in refs if r[1] == "AUTHORISH"]
-        if disp:
-            translate += 1
-        elif auth:
-            keep += 1
-        else:
-            unmapped += 1
-        alltexts.append(txt)
+    if row["CHS_target_STBL_count"] == 1:
+        chs_inst, chs_ver, chs_comp, chs_kvs = chs[0]
+        target_keys = {kh: (fl, txt) for kh, fl, txt in chs_kvs}  # 仅该 exact STBL 的 key
+        for kh, (fl, txt) in target_keys.items():
+            refs = struct_ref.get(kh, [])       # XML 结构引用 (hash 命中)
+            disp = [r for r in refs if r[1] == "DISPLAY"]
+            auth = [r for r in refs if r[1] == "AUTHORISH"]
+            if disp:
+                translate += 1
+            elif auth:
+                keep += 1
+            else:
+                unmapped += 1                  # 该 key 在 target STBL 内但无结构引用 (orphan)
     row["exact_structural_translate_count"] = translate
     row["keep_count"] = keep
     row["unmapped_uncertain_count"] = unmapped
 
-    # ---- 文本特征 ----
-    non_ascii = any(any(ord(ch) > 127 for ch in t) for t in alltexts)
-    long_str = any(len(t) >= LONG_STRING_LEN for t in alltexts)
-    cnt = Counter(t for t in alltexts if t.strip())
-    repeated = any(n > 1 for n in cnt.values())
+    # ---- 硬 invariant: target STBL 三分法全量覆盖 ----
+    # TRANSLATE + KEEP + UNMAPPED 必须 == CHS_entry_count (exact target STBL key 总数)。
+    # 不满足 -> 计数串了 scope, 绝不判 ELIGIBLE。
+    if row["CHS_target_STBL_count"] == 1:
+        inv = translate + keep + unmapped
+        row["invariant_ok"] = 1 if inv == row["CHS_entry_count"] else 0
+    else:
+        row["invariant_ok"] = 0
+
+    # ---- 文本特征 (仅 target CHS STBL 文本, 与三分法同 scope) ----
+    non_ascii = long_str = repeated = False
+    if row["CHS_target_STBL_count"] == 1:
+        alltexts = [txt for _, _, txt in chs[0][3]]
+        non_ascii = any(any(ord(ch) > 127 for ch in t) for t in alltexts)
+        long_str = any(len(t) >= LONG_STRING_LEN for t in alltexts)
+        cnt = Counter(t for t in alltexts if t.strip())
+        repeated = any(n > 1 for n in cnt.values())
     row["non_ascii_source_present"] = 1 if non_ascii else 0
     row["long_string_present"] = 1 if long_str else 0
     row["repeated_source_text_present"] = 1 if repeated else 0
@@ -350,18 +359,31 @@ def _classify(row: dict) -> dict:
         row["status"] = "SKIP_AMBIGUOUS_TGI"
         row["reason"] = f"CHS 目标 STBL 数 {row['CHS_target_STBL_count']} != 1 (多 target / 多 family)"
         return row
+    # 硬 invariant: target STBL 三分法必须全量覆盖。
+    # TRANSLATE + KEEP + UNMAPPED == CHS_entry_count (即 exact CHS target STBL key 总数)。
+    # 不满足 => 计数串了 scope (把其他 STBL/locale/orphan key 混进 target), 绝不判 ELIGIBLE。
+    _sum = (row["exact_structural_translate_count"]
+            + row["keep_count"] + row["unmapped_uncertain_count"])
+    if _sum != row["CHS_entry_count"]:
+        row["status"] = "ERROR_COVERAGE_INVARIANT"
+        row["reason"] = (f"target 三分法不满足 invariant: "
+                          f"TRANSLATE+{row['exact_structural_translate_count']} "
+                          f"+KEEP+{row['keep_count']} +UNMAPPED+{row['unmapped_uncertain_count']} "
+                          f"={_sum} != CHS_entry_count={row['CHS_entry_count']} "
+                          f"(scope 串包: 其他 STBL/locale/orphan 混入)")
+        return row
     if row["exact_structural_translate_count"] == 0 and row["keep_count"] == 0:
         row["status"] = "SKIP_MAPPING_UNCERTAIN"
         # 语义确认 (2026-08-15): unmapped_uncertain_count>0 本身【不】触发本状态。
-        # 本状态仅当: 结构上【没有任何】 player-visible 引用能解析到 CHS STBL key
+        # 本状态仅当: 结构上【没有任何】 player-visible 引用能解析到 CHS target STBL key
         # (translate==0 且 keep==0, 即玩家可见字段引用完全无法 join) 时触发。
         # 普通 orphan/旧 STBL/无 XML 引用 key 只记 unmapped_uncertain_count, 不阻塞写入
         # 例: Tibo131 translate=36/keep=1/unmapped=17 -> 仍 ELIGIBLE (17 unmapped 全 untouched)
-        row["reason"] = ("无任何已解析的 player-visible 结构引用 (translate=0 且 keep=0); "
-                          "unmapped/orphan key 不阻塞写入")
+        row["reason"] = ("无任何已解析到 target CHS STBL 的 player-visible 结构引用 "
+                          "(translate=0 且 keep=0); unmapped/orphan key 不阻塞写入")
         return row
     row["status"] = "ELIGIBLE_EXISTING_CHS"
-    row["reason"] = "存在唯一 0x01 CHS 目标且结构映射可精确 join"
+    row["reason"] = "存在唯一 0x01 CHS 目标, 三分法全量覆盖且 invariant 满足"
     return row
 
 
@@ -530,7 +552,7 @@ def main():
     sc = Counter(r["status"] for r in rows)
     print("\n--- status 数量 ---")
     for s in ("ELIGIBLE_EXISTING_CHS", "SKIP_NO_CHS", "SKIP_AMBIGUOUS_TGI",
-              "SKIP_MAPPING_UNCERTAIN", "ERROR"):
+              "SKIP_MAPPING_UNCERTAIN", "ERROR", "ERROR_COVERAGE_INVARIANT"):
         print(f"  {s}: {sc.get(s, 0)}")
 
     # ---- cohort ----
@@ -561,7 +583,7 @@ def main():
         f.write("# 659 CONFIRMED_POSE coverage 报告 (只读)\n\n")
         f.write(f"扫描包数: {len(rows)}\n\n## status 数量\n\n")
         for s in ("ELIGIBLE_EXISTING_CHS", "SKIP_NO_CHS", "SKIP_AMBIGUOUS_TGI",
-                  "SKIP_MAPPING_UNCERTAIN", "ERROR"):
+                  "SKIP_MAPPING_UNCERTAIN", "ERROR", "ERROR_COVERAGE_INVARIANT"):
             f.write(f"- {s}: {sc.get(s, 0)}\n")
         f.write("\n## 代表性 10-cohort (程序化选择, 非随机/非人工)\n\n")
         f.write("| slot | why | package | CHS TGI | CHS entries | TRANSLATE | KEEP | UNMAPPED |\n")
@@ -586,6 +608,7 @@ _COLS = ["package_path", "file_size", "PosePackInstance_count", "STBL_count_tota
          "CHS_0x01_exists", "CHS_target_STBL_count", "CHS_target_TGI(s)", "CHS_entry_count",
          "pack_title_ref_count", "pack_description_ref_count", "pose_display_name_ref_count",
          "exact_structural_translate_count", "keep_count", "unmapped_uncertain_count",
+         "invariant_ok",
          "STBL_version", "compression_state",
          "non_ascii_source_present", "long_string_present", "repeated_source_text_present",
          "multiple_target_STBL_families", "status", "reason"]
