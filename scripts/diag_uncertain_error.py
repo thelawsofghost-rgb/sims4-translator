@@ -107,6 +107,8 @@ def diag_uncertain(path):
     print(f"  PosePack XML = {len(posexmls)} / 全部 XML = {len(xmls)}")
 
     rows = []  # (field, raw, norm, cls, pvc, xinst_id, path_str)
+    none_skipped = 0
+    none_refs = []  # (field, raw, xinst_id, path) 只供透明展示, 不计入 unresolved
     for xinst_id, root, _raw in posexmls:
         parent_map = {c: p for p in root.iter() for c in p}
         root_parent = None
@@ -131,9 +133,20 @@ def diag_uncertain(path):
             if pvc is None:
                 continue
             h = _norm(val)
+            if h is None:
+                # 与 pose_coverage 的 parse_display_hash 一致: zero/invalid sentinel = 无引用。
+                # 不计 pv total / 不计 unresolved / 不进入打印候选。只旁路做透明计数。
+                none_skipped += 1
+                none_refs.append((nl, val, xinst_id, _xml_path(el, parent_map)))
+                continue
             rows.append((nl, val, h, pvc, xinst_id, _xml_path(el, parent_map)))
 
-    print(f"\n  位置门控后 player-visible refs 总数 = {len(rows)}")
+    print(f"\n  位置门控后 player-visible refs 总数 = {len(rows)}  "
+          f"(另跳过 None/zero sentinel=无引用 {none_skipped})")
+    if none_refs:
+        print("  被滤掉的 None/zero sentinel refs(不计 pv total/unresolved):")
+        for nl, raw, xid, xp in none_refs:
+            print(f"    field={nl} raw={raw!r} xinst=0x{xid:016X} path={xp}")
     if not rows:
         print("  (无位置门控后的 pv refs)")
 
@@ -146,14 +159,17 @@ def diag_uncertain(path):
     for h, refs in by_hash.items():
         nl, raw, pvc, xid, xpath = refs[0]
         fcat = _PV_NAMES.get(nl, pvc)
-        print(f"\n  --- unresolved 候选 (hash=0x{h:08X}, {fcat}) ---")
+        # 防御: h 绝不为 None (收集时已滤), 但绝不冒险用 None 做 :08X
+        hstr = f"None (无引用/已滤)" if h is None else f"0x{h:08X}"
+        print(f"\n  --- unresolved 候选 (hash={hstr}, {fcat}) ---")
         print(f"    field           : {nl}")
         print(f"    raw hash        : {raw}")
-        print(f"    normalized hash : 0x{h:08X}" if h else f"    normalized hash : None (zero sentinel/无引用)")
+        print(f"    normalized hash : {hstr}")
         for (nl2, raw2, pvc2, xid2, xp) in refs:
             print(f"    XML ref         : field={nl2} cls={pvc2} xinst=0x{xid2:016X} path={xp}")
         if h is None:
-            print("    -> hash 无效/zero: 不计 unresolved, 不构成 SKIP 原因")
+            # 防御: 收集时已滤, 理论上不可达; 绝不冒险继续
+            print("    -> hash 无效/zero: 已滤, 不计 unresolved")
             continue
 
         # 命中判定
