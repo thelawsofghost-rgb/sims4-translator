@@ -136,7 +136,7 @@ msbuild SidecarBuilder.csproj
 ```
 产物: `bin\Debug\SidecarBuilder.exe`
 
-运行 (建单 STBL 包 + 重开核对):
+运行 (建单 STBL 包 + 重开核对; ⚠️ 仅为 serializer smoke test):
 ```
 bin\Debug\SidecarBuilder.exe -out out.package -type 0x220557DA -group 0x80000000 -inst 0x014EACCF17C8B091 -k FDD36EF2:左 -k 552CC77A:相拥
 ```
@@ -145,3 +145,62 @@ bin\Debug\SidecarBuilder.exe -out out.package -type 0x220557DA -group 0x80000000
 2. 能创建只含 1 个 STBL 的 package
 3. 重新打开能核对 TGI + entries
 通过后才进入 1包 -> 10包 -> 50包 -> 659包。
+
+---
+
+## ⚠️ -k 模式 = TEST ONLY (serializer smoke test), 严禁进生产
+上面与下方所有 `-k key:value` 用法都是【新建空 STBL、只添加命令行传入的 key】, 即
+**partial STBL**。这与已锁定的 Sidecar 规则 (same TGI override = 覆盖整张原始 CHS STBL) 不符。
+
+- 仅用于在 Windows 验证 s4pi 序列化链路能跑通 (建包 / SaveAs / reopen / 核对 TGI+entries)。
+- 严禁用于生产 pipeline, 严禁把 partial STBL 包放进游戏。
+- 生产 writer 必须是下方“生产 writer 接口”的完整 STBL 基线模式。
+
+## 生产 writer 接口 (Windows build 验证通过后实现; 本阶段不改)  
+最终输入 (至少):
+```
+SidecarBuilder.exe \
+  -source  <source_package>      # 原 mod 只读打开
+  -type    0x220557DA            # 目标 STBL 的精确 Type
+  -group   0x80000000            # 目标 STBL 的精确 Group
+  -inst    0x...                 # 目标 STBL 的精确 Instance (即唯一 TGI 锁定)
+  -locale  0x01                  # 必须为 CHS_CN (0x01 高字节)
+  -out     <output_path>         # !<mod>_CHS.package
+  -m       KEYHASH:EXPECTED:VALUE   # 可多次: 替换 key, 校验当前文本==EXPECTED, 改为 VALUE
+```
+> 说明: exact TGI 用于唯一锁定目标 STBL。若包内该 TGI 不存在或非 locale 0x01 → fail。
+> 提供 `-locale 0x01` 参数以满足“显式约定中文 locale”, 与 exact-instance 锁定互为双重校验。
+
+### Writer 流程 (11 步, 锁定)
+1. 只读打开 source_package
+2. 按精确 Type/Group/Instance 找到唯一目标 STBL (找不到/多个 → fail)
+3. 读取完整 STBL, 记录全部 entries (如 Tibo131 必须是 54 entries)
+4. 对每个 modification:
+   - key 必须存在
+   - 当前文本必须 == expected_source
+   - 任一不符 → 立即 fail, 不写包
+5. 只替换被批准的 key value
+6. 其他所有 key / value / flags 原样保留
+7. 新建独立 DBPF
+8. 只加入这一张修改后的完整 STBL (非 partial)
+9. SaveAs
+10. reopen
+11. 验证:
+   - resource_count = 1
+   - TGI exact
+   - entry_count == source entry_count
+   - modified keys == expected translated values
+   - 所有 untouched keys == source
+
+### 硬性禁止
+- 禁止根据文本扫描决定修改
+- 禁止 source-text-only join
+- 禁止 partial STBL (只含部分 key 的 STBL 不进游戏)
+
+### Tibo131 期望验收数 (canary 阶段)
+- source CHS entries = 54
+- 输出 sidecar CHS entries 也必须 = 54
+- TRANSLATE 36 可修改
+- KEEP 1 不动
+- UNMAPPED_UNCERTAIN 17 不动
+

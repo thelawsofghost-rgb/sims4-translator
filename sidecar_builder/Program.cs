@@ -5,7 +5,18 @@
 //   3. 能重新打开并核对 TGI + entries
 // 本版绝不生成批量/659 包, 不碰 Animation, 原 mod 只读。
 //
-// 复用的成熟 writer: s4pi (仓库 lib/s4pi_src) — 序列化逻辑完全由 s4pi 负责, 零手写 DBPF。
+// ⚠️ 本版 -k 模式 = TEST ONLY (serializer smoke test)
+//   - 它【新建一个空 STBL, 只添加命令行传入的 key】→ 是 partial STBL,
+//     与已锁定的 Sidecar 规则 (“覆盖整张原始 CHS STBL”) 不符。
+//   - 严禁用于生产 pipeline, 严禁把这样生成的 partial STBL 放进游戏。
+//   - 用途仅限在 Windows 验证 s4pi 序列化链路能跑通: 建包 / SaveAs / reopen / 核对 TGI+entries。
+//
+// 生产接口 (window build 验证通过后实现, 见 PHASE3B-SIDECAR.md §“生产 writer 接口”):
+//   以【完整原始 CHS STBL 为基线】, 读取 source_package + 精确 TGI + locale=0x01,
+//   对每个 modification(仅替换传入 key 的 value, 其余 key/value/flags 原样保留),
+//   再新建独立 DBPF, 只加入这一张修改后的完整 STBL, SaveAs, reopen, 全量核对。
+//
+// 复用的成熟 writer: s4pi (仓库 vendor/s4pi) — 序列化逻辑完全由 s4pi 负责, 零手写 DBPF。
 //
 // 用法 (示例):
 //   SidecarBuilder.exe -out out.package -type 0x220557DA -group 0x80000000 -inst 0x014EACCF17C8B091 -k FDD36EF2:左 -k 552CC77A:相拥
