@@ -240,7 +240,8 @@ def load_mapping(csv_path: str) -> dict:
             txt_col = r.fieldnames[1] if len(r.fieldnames) > 1 else None
         for row in r:
             tid = (row.get(id_col) or "").strip()
-            txt = (row.get(txt_col) or "").strip() if txt_col else ""
+            # 文本不做 .strip(): 保留首尾空格 (test5 需要尾部 ASCII 空格来等长)
+            txt = (row.get(txt_col) or "") if txt_col else ""
             if tid:
                 m[tid] = txt
     return m
@@ -325,11 +326,13 @@ def main() -> int:
                       f" body8={body_hdr}" + (f" locale=0x{loc:02X}" if tid == STBL_TID else ""))
         return 0
 
-    if len(sys.argv) != 4:
-        print("用法: python patch_stbl.py input.package output.package mapping.csv")
+    if len(sys.argv) not in (4, 5):
+        print("用法: python patch_stbl.py input.package output.package mapping.csv [--strict]")
         print("  mapping.csv 列: translation_id (T_<hash>_g1) + new_text")
+        print("  --strict: 纯诊断 — 禁止尾部补零/禁止 relayout, rebuilt 必须天然 == 原 size, 否则 ABORT")
         return 2
 
+    strict = len(sys.argv) == 5 and sys.argv[4] == "--strict"
     in_path, out_path, map_path = sys.argv[1], sys.argv[2], sys.argv[3]
     if not Path(in_path).exists():
         print(f"[ERROR] 输入不存在: {in_path}"); return 1
@@ -401,7 +404,22 @@ def main() -> int:
         new_stored = new_plain
         stored_is_comp = False
 
-    if len(new_stored) <= chs.size:
+    if strict:
+        # —— 纯诊断 strict 模式: 禁补零 / 禁 relayout, rebuilt 必须天然 == 原 size ——
+        if len(new_stored) != chs.size:
+            print(f"[STBL-SIZE] original={chs.size} rebuilt={len(new_stored)} FAIL — "
+                  f"不相等则 ABORT (禁止 padding/relayout)")
+            return 1
+        print(f"[STBL-SIZE] original={chs.size} rebuilt={len(new_stored)} PASS")
+        print(f"[NO-PADDING] PASS (rebuilt 天然 == 原 size, 未补 0x00)")
+        data = bytearray(raw)
+        s = chs.offset
+        data[s:s + chs.size] = new_stored
+        new_file = bytes(data)
+        mode = "strict(天然等长)"
+        print(f"[OK  ] STBL 重建(等长): {len(new_recs)} keys, 应用 {applied} 条, "
+              f"存储 {len(new_stored)}B == 原 {chs.size}B")
+    elif len(new_stored) <= chs.size:
         # —— 方案 A (首选): 保持原体积 ——
         # 尾部补零到 == 原 size, 使文件大小/索引/offset/size **全部不变**,
         # 仅覆盖目标 STBL 的 body 区字节 (loader 看到的是与原始几乎逐字节一致的结构)
@@ -427,8 +445,8 @@ def main() -> int:
     Path(out_path).write_bytes(new_file)
     print(f"[SAVE] 已写入: {out_path} ({len(new_file)} 字节)")
 
-    if mode.startswith("inplace"):
-        # —— [STRUCT] 结构性零改动验证 (inplace 模式核心承诺) ——
+    if mode.startswith("inplace") or mode.startswith("strict"):
+        # —— [STRUCT] 结构性零改动验证 (inplace/strict 模式核心承诺) ——
         struct_ok = True
         if len(new_file) != len(raw):
             struct_ok = False; print(f"[STRUCT] FAIL: 文件长度 {len(new_file)} != {len(raw)}")
