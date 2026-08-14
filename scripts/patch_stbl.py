@@ -205,6 +205,25 @@ def tid_to_hash(tid: str):
 
 
 def main() -> int:
+    if len(sys.argv) >= 2 and sys.argv[1] == "--inspect":
+        # --inspect input.package : 只读列出 locale 0x01 STBL 的全部 keyHash (不写)
+        p = sys.argv[2] if len(sys.argv) >= 3 else None
+        if p is None:
+            print("用法: python patch_stbl.py --inspect input.package"); return 2
+        if not Path(p).exists():
+            print(f"[ERROR] 输入不存在: {p}"); return 1
+        _, idx, bodies = read_bodies(p)
+        chs = find_chs_stbl(idx.entries)
+        if chs is None:
+            print(f"[ERROR] 无 locale 0x01 STBL"); return 1
+        raw = next(r for (e, r) in bodies if e is chs)
+        recs = stbl_decode(_z_or_raw(raw))
+        if recs is None:
+            print("[ERROR] STBL 结构不符"); return 1
+        print(f"locale=0x01 inst=0x{chs.instance_id:016X} keys={len(recs)}")
+        for kh, txt, flags, _ in recs:
+            print(f"  0x{kh:08X}  T_{kh:08x}_g1  {txt!r}")
+        return 0
     if len(sys.argv) != 4:
         print("用法: python patch_stbl.py input.package output.package mapping.csv")
         print("  mapping.csv 列: translation_id (T_<hash>_g1) + new_text")
