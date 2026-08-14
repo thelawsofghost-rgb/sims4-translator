@@ -977,7 +977,8 @@ def main():
             tid, orig_key, src_phrase, fp, gh = phrase_map[ck]
             cached = cache.get(fp)
             if cached and not FORCE:
-                phrase_res.setdefault(tid, {})[orig_key] = cached["translation"]
+                # 确定性后处理: 剥离行首 Target: 前缀 (缓存里可能存了脏值, 0 LLM 重新清洗)
+                phrase_res.setdefault(tid, {})[orig_key] = normalize_model_output(cached["translation"])
                 n_hit += 1
             else:
                 todo_items.append((ck, block))
