@@ -362,12 +362,16 @@ def normalize_model_output(text):
     return _TARGET_PREFIX_RE.sub("", str(text))
 
 
-def materialize_from_cache(text: str, mode: str, cache) -> (str, str):
+def materialize_from_cache(tid: str, text: str, mode: str, cache, ctx_map=None) -> (str, str):
     """从 cache 物化一行 PARTIAL/FULL 的完整译文 (materialized output)。
 
     对该行重新切分 + glossary, 对每个 pending phrase 查指纹; 全部命中 ->
     rebuild 出译文并置 DONE; 任一 phrase 缺失 -> (None, 'PENDING') 表示需重翻。
     模式 KEEP/APPROVED 不在此处理 (调用方已分支)。
+
+    tid/ctx_map: 与生产主流程同源的行级上下文 (tid -> list[str]); 用于给每个
+    pending 填 p['ctx'] (与 jobs 构建时一致), 保证 fingerprint 与 cache 写入时
+    完全一致。缺省时按无 ctx 处理 (与旧行为一致, 但会导致带 ctx 的行查不到)。
     """
     if mode not in ("PARTIAL_TRANSLATE", "FULL_TRANSLATE"):
         return None, "PENDING"
@@ -377,6 +381,11 @@ def materialize_from_cache(text: str, mode: str, cache) -> (str, str):
     if not pending:
         # 全由 glossary 直译 -> 可物化
         return rebuild(segs, gloss), "DONE"
+    ctx = ctx_map.get(tid, []) if ctx_map else []
+    # 生产同款: 前 3 个上下文用 " | " 连接, 填入每个 pending 的 p['ctx']
+    ctx_str = " | ".join(ctx[:3]) if ctx else ""
+    for p in pending:
+        p["ctx"] = ctx_str
     resolved = dict(gloss)
     for p in pending:
         fp = build_fingerprint(source_phrase=p["t"].strip(),
@@ -1066,7 +1075,7 @@ def main():
                     status = "PENDING"
             else:
                 # 该行本次未进引擎 (被过滤/缺席 jobs): 仍从 cache 物化 (materialized output)
-                translation, status = materialize_from_cache(text, mode, cache)
+                translation, status = materialize_from_cache(r.get("translation_id"), text, mode, cache, ctx_map)
                 if translation is None:
                     translation = ""
                     status = "PENDING"
