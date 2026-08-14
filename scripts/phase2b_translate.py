@@ -501,10 +501,15 @@ class DeepSeekTranslator(Translator):
 
 
 class OllamaTranslator(Translator):
-    """本机 Ollama 翻译后端。
+    """本机 Ollama 翻译后端 (native /api/chat 为主, 结构化 JSON 严格输出)。
 
-    优先 OpenAI-compatible:  http://localhost:11434/v1/chat/completions, api_key=ollama
-    失败时回退 Ollama 原生:  http://localhost:11434/api/chat (逐条, 可靠优先)
+    生产路径: Ollama 原生 /api/chat
+        think=false  (禁用思考, 译文稳定落 content)
+        stream=false
+        temperature=0
+        format=<JSON Schema>  -> 严格返回 {"translations":[{"id":"..","zh":".."}]}
+    不再依赖 reasoning/thinking 最后一行猜译文; 每批成功即 on_done() 即时 checkpoint。
+    降并发仅由 transport/load 故障触发; 解析/空结果类错误 fail-fast, 绝不整批重跑全量。
     """
     def __init__(self, base_url="http://localhost:11434", model="ni-fei:latest", api_key="ollama"):
         self.base_url = base_url.rstrip("/")
@@ -513,11 +518,33 @@ class OllamaTranslator(Translator):
         import httpx
         self._httpx = httpx
 
-    def translate_batch(self, items, concurrency=8, per_call=8, max_retry=3):
-        """按批次并发调用; 失败/空结果重试, 逐条回退原生 /api/chat。返回 {key: zh}。
+    # ---------------------------------------------------------------- schema -
+    _SCHEMA = {
+        "type": "object",
+        "properties": {
+            "translations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "zh": {"type": "string"},
+                    },
+                    "required": ["id", "zh"],
+                },
+            }
+        },
+        "required": ["translations"],
+    }
 
-        并发越快越快; 若本机 Ollama 扛不住会返回空译文, 由 空结果重试 + native 回退
-        (以及下方的自适应降并发) 兜底, 因此默认提高到 8 而不牺牲正确性。
+    def translate_batch(self, items, concurrency=8, per_call=8, max_retry=3, on_done=None):
+        """按批次并发调用 Ollama 原生 /api/chat (think=false + JSON Schema)。
+
+        返回 {key: zh}。每个成功 phrase 校验后立即调 on_done(key, zh) (调用方负责写库 checkpoint)。
+        Retry 分类:
+          - transport/timeout/5xx          -> 该批可重试 (属 load/网络故障)
+          - 单批 malformed (解析/schema 错) -> 仅重试当前批
+          - 大面积 EMPTY/PARSE/SCHEMA 错    -> fail-fast, 绝不整批重跑
         """
         import concurrent.futures as cf
         import time
@@ -525,197 +552,155 @@ class OllamaTranslator(Translator):
         t0 = time.time()
         print(f"[进度] 待翻译 phrase 共 {total} 个, 开始 (并发={concurrency}, 每批={per_call}) ...")
         results = {}
-        cur = items[:]
-        failed_total = 0
-        for attempt in range(max_retry):
-            if not cur:
-                break
-            batches = [cur[i:i + per_call] for i in range(0, len(cur), per_call)]
-            got = {}
-            done_cnt = [total - len(cur)]   # 已累计完成的 phrase 数
-            last_log = [0.0]
-            with cf.ThreadPoolExecutor(max_workers=concurrency) as ex:
-                futs = {ex.submit(self._call_openai, b): b for b in batches}
-                for fu in cf.as_completed(futs):
-                    keymap, zh = fu.result()
-                    for k, z in zip(keymap, zh):
-                        got[k] = z
-                    done_cnt[0] += len(zh)
-                    now = time.time()
-                    if done_cnt[0] >= total or now - last_log[0] >= 12.0 or done_cnt[0] % 50 == 0:
-                        done = min(done_cnt[0], total)
-                        pct = done / total * 100
-                        el = now - t0
-                        rate = done / el if el > 0 else 0
-                        eta = (total - done) / rate / 60 if rate > 0 else 0
-                        print(f"[进度] {done}/{total} ({pct:5.1f}%)  已用 {el/60:4.1f}min  预计剩 {eta:4.1f}min  (本批补回 {len(zh)})", flush=True)
-                        last_log[0] = now
-            # 完成/空 判定
-            done_here = {k: v for k, v in got.items() if v and not v.startswith("[ERR")}
-            results.update(done_here)
-            failed = len(got) - len(done_here)
-            failed_total += failed
-            cur = [kvt for kvt in cur if kvt[0] not in done_here]
-            # 自适应降并发: 若本轮失败/空比例过高, 说明本机 Ollama 扛不住当前并发,
-            # 自动减半, 避免无谓重试拖时间; 正常则保持高并发快速推进。
-            attempted = len(got)
-            if attempted > 0 and failed / attempted > 0.3 and concurrency > 2:
-                concurrency = max(2, concurrency // 2)
-                print(f"[降并发] 失败率过高 ({failed}/{attempted}), 并发降为 {concurrency}", flush=True)
-            if cur and attempt < max_retry - 1:
-                print(f"[重试] 第{attempt+2}轮: 仍缺 {len(cur)} phrase (本批失败/空 {failed}), 稍候重试 ...", flush=True)
-                time.sleep(3 * (attempt + 1))
-        # 仍缺失的: 用原生逐条兜底 (可靠优先)
-        if cur:
-            print(f"[回退] 剩余 {len(cur)} phrase 用原生 /api/chat 逐条兜底 ...", flush=True)
-            fb = len(cur)
-            for i0, (k, t) in enumerate(cur, 1):
+        attempted = 0
+        ok = 0
+        err_n = 0
+        last_log = [0.0]
+
+        def _log(force=False):
+            now = time.time()
+            if not force and now - last_log[0] < 12.0:
+                return
+            last_log[0] = now
+            el = now - t0
+            print(f"[进度] attempted={attempted} 成功={ok} 失败={err_n}  已用 {el/60:4.1f}min", flush=True)
+
+        def _emit(k, z):
+            nonlocal ok
+            results[k] = z
+            ok += 1
+            if on_done:
                 try:
-                    _, zh = self._call_native([(k, t)])
-                    if zh and zh[0] and not zh[0].startswith("[ERR"):
-                        results[k] = zh[0]
-                except Exception:  # noqa
-                    pass
-                if i0 == fb or i0 % 25 == 0:
-                    print(f"[回退] {i0}/{fb} ...", flush=True)
+                    on_done(k, z)
+                except Exception as e:  # 写库失败不应中断翻译主体
+                    print(f"[警告] checkpoint 写库失败 {k!r}: {e!r}", flush=True)
+
+        batches = [items[i:i + per_call] for i in range(0, len(items), per_call)]
+        # 大面积失败统计: 一旦单轮内 malformed/空结果占比过高 -> fail-fast
+        round_bad = 0
+        with cf.ThreadPoolExecutor(max_workers=concurrency) as ex:
+            futs = {ex.submit(self._call_batch, b): b for b in batches}
+            for fu in cf.as_completed(futs):
+                b = futs[fu]
+                try:
+                    keymap, zh, st = fu.result()
+                except Exception as e:  # transport/unknown: 该批重试
+                    err_n += len(b)
+                    attempted += len(b)
+                    _log()
+                    for k, _t in b:
+                        results[k] = f"[ERR {e!r}]"
+                    continue
+                attempted += len(b)
+                if st == "ok":
+                    for k, z in zip(keymap, zh):
+                        if z and not z.startswith("[ERR"):
+                            _emit(k, z)
+                        else:
+                            results[k] = z or ""
+                            err_n += 1
+                elif st == "malformed":
+                    # 单批 malformed: 仅重试当前批 (最多 max_retry 次)
+                    for _a in range(max_retry):
+                        try:
+                            keymap2, zh2, st2 = self._call_batch(b)
+                        except Exception:
+                            st2, keymap2, zh2 = "err", b, []
+                        if st2 == "ok":
+                            for k, z in zip(keymap2, zh2):
+                                if z and not z.startswith("[ERR"):
+                                    _emit(k, z)
+                                else:
+                                    results[k] = z or ""
+                                    err_n += 1
+                            break
+                    else:
+                        for k, _t in b:
+                            results[k] = "[ERR malformed-after-retry]"
+                            err_n += 1
+                else:  # 'empty' / 'schema' -> 算大面积 bad
+                    round_bad += len(b)
+                    for k, z in zip(keymap, zh):
+                        results[k] = z or ""
+                        err_n += 1
+                _log()
+        _log(force=True)
+
+        # 大面积失败 -> fail-fast (说明 prompt/schema/模型行为有系统性问题, 整批重跑无意义)
+        if round_bad and round_bad / max(1, attempted) > 0.5:
+            print(f"[FATAL] 大面积解析/空结果失败 ({round_bad}/{attempted}), 判定系统性问题 fail-fast, 不再整批重跑。", flush=True)
+            raise RuntimeError(f"Ollama 大面积解析失败 ({round_bad}/{attempted}); 请检查模型/prompt/JSON schema")
+
         el = time.time() - t0
-        miss = total - len(results)
-        print(f"[进度] 完成: {len(results)}/{total}  (失败/未翻 {miss}, 重试失败累计 {failed_total}), 总耗时 {el/60:.1f}min", flush=True)
+        print(f"[进度] 完成: attempted={attempted} 成功={ok} 失败={err_n}  总耗时 {el/60:.1f}min", flush=True)
         return results
 
-    def _call_openai(self, items):
-        """优先 OpenAI-compatible /v1/chat/completions, 失败/404 回退原生 /api/chat。"""
-        # 每 item 一个 block; 用编号前缀区分, 便于按序回填
-        blocks = []
-        for i, (k, t) in enumerate(items):
-            blocks.append(f"[{i}]\n{t}")
-        lines = "\n\n".join(blocks)
+    def _call_batch(self, items):
+        """调用 Ollama 原生 /api/chat, 单批。返回 (keys, zh_list, status)。
+
+        status: 'ok' | 'malformed' | 'empty' | 'schema'
+        """
+        blocks = [{"id": k, "t": t} for k, t in items]
         prompt = (
-            "你是模拟人生4动作包汉化专家。下面每一段是一个待翻译块, 结构为:\n"
-            "[编号]\nTarget 行: 需要翻译的语义片段\nContext 行(可选): 仅供参考\n"
+            "你是模拟人生4动作包汉化专家。把下列每个 block 中 Target 行的内容翻译为简体中文。\n"
             "规则:\n"
-            "1. 只翻译每个 [编号] 块里 Target: 之后的内容为简体中文\n"
-            "2. Context: 只是参考, 不要翻译、不要输出、不要改写它\n"
-            "3. 若块里有『固定术语』行, 译文中必须原样嵌入这些指定中文, 不得改用同义词\n"
-            "4. 保留 Target 中的数字、字母编号、版本号(V1/v2)、*anim 等技术标记不变\n"
-            "5. 逐块输出, 每块一行译文, 用同样编号开头 (如 [0] 译文), 一条一行, 不要额外说明\n"
-            + lines
+            "1. 只翻译每个 block 的 Target 行, 只输出最终中文, 不解释、不思考过程。\n"
+            "2. Context 仅供理解, 不翻译、不输出。\n"
+            "3. 若含『固定术语』行, 译文中必须原样嵌入这些指定中文, 不得用同义词。\n"
+            "4. 保留数字、字母编号、版本号(V1/v2)、*anim 等技术标记不变。\n"
+            "5. 严格按 JSON Schema 输出 translations 数组, 每项 id 用给定 id, zh 为译文。\n"
+            "输入 blocks:\n" + "\n".join(f"id={k}\nTarget: {t}\n" for k, t in items)
         )
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": "You translate Sims 4 pose names to simplified Chinese. Output only the numbered translations."},
+                {"role": "system", "content": "You translate Sims 4 pose names to simplified Chinese. Output strictly as JSON matching the provided schema."},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.2,
-            "max_tokens": 8192,
+            "stream": False,
+            "think": False,
+            "format": self._SCHEMA,
+            "options": {"temperature": 0.0, "num_predict": 1024},
         }
-        url = f"{self.base_url}/v1/chat/completions"
+        url = f"{self.base_url}/api/chat"
+        r = self._httpx.post(url, json=payload, timeout=180)
+        if r.status_code >= 500 or r.status_code == 429:
+            raise RuntimeError(f"Ollama transport/load: HTTP {r.status_code}")
+        r.raise_for_status()
+        j = r.json()
+        content = ((j.get("message") or {}).get("content") or "").strip()
+        if not content:
+            # 关 thinking 后仍无 content -> 空结果
+            return [k for k, _ in items], ["" for _ in items], "empty"
         try:
-            r = self._httpx.post(url, headers={"Authorization": f"Bearer {self.api_key}"},
-                                 json=payload, timeout=180)
-            if r.status_code == 404:  # 老版本 Ollama 无 /v1, 回退原生
-                return self._call_native(items)
-            r.raise_for_status()
-            msg = r.json()["choices"][0]["message"]
-            content = self._msg_zh(msg)   # content 空时从 reasoning 提取 (reasoning 模型)
-            return self._parse_numbered(content, items)
-        except Exception as e:  # noqa
-            try:
-                return self._call_native(items)
-            except Exception as e2:  # noqa
-                return [k for k, _ in items], [f"[ERR openai:{e!r} native:{e2!r}]" for _ in items]
-
-    @staticmethod
-    def _msg_zh(msg):
-        """从 Ollama 返回的 message 提取译文。
-
-        优先 content; 若 content 为空 (reasoning 模型把输出放 reasoning),
-        fallback 到 reasoning 的末尾提取最终译文。
-        """
-        content = (msg or {}).get("content") or ""
-        if content.strip():
-            return content
-        reasoning = (msg or {}).get("reasoning") or ""
-        if not reasoning.strip():
-            return ""
-        # reasoning 模型: 思维链末尾通常藏着最终译文。取非空尾行, 去掉常见思考引导前缀。
-        lines = [ln.strip() for ln in reasoning.splitlines() if ln.strip()]
-        tail = lines[-1] if lines else ""
-        for pre in ("译文:", "翻译:", "所以", "因此", "最终译文:", "答案是"):
-            if tail.startswith(pre):
-                tail = tail[len(pre):].strip()
-                break
-        # 末尾常带无关的总结/引号, 再精炼一次
-        tail = tail.strip("\"'「」‘’").strip()
-        return tail
+            data = json.loads(content) if isinstance(content, str) else content
+        except Exception:
+            return [k for k, _ in items], [content] * len(items), "malformed"
+        tr = data.get("translations")
+        if not isinstance(tr, list):
+            return [k for k, _ in items], [], "schema"
+        by_id = {}
+        for item in tr:
+            if isinstance(item, dict) and item.get("id") is not None:
+                by_id[str(item.get("id"))] = str(item.get("zh") or "").strip()
+        keys = [k for k, _ in items]
+        zhs = [by_id.get(str(k), "") for k, _ in items]
+        # 空/缺太多 -> malformed (交由上层 retry 该批)
+        if sum(1 for z in zhs if z) < len(zhs) * 0.5:
+            return keys, zhs, "malformed"
+        return keys, zhs, "ok"
 
     def _call_native(self, items):
-        """Ollama 原生 /api/chat, 逐条 (可靠优先)。返回 (keys, zh)。"""
-        url = f"{self.base_url}/api/chat"
+        """兼容旧调用: 逐条通过结构化批调用。返回 (keys, zh)。"""
         keys, zhs = [], []
-        for k, text in items:
-            prompt = (
-                "你是模拟人生4动作包汉化专家。下面是待翻译内容:\n"
-                "Target 行: 需要翻译的语义片段 (可能含 Context 行, 仅供参考)。\n"
-                "规则:\n"
-                "1. 只翻译 Target: 之后的内容为简体中文, 只输出这一条译文, 不要解释。\n"
-                "2. Context: 只是参考, 不要翻译、不要输出、不要改写它。\n"
-                "3. 若内容含『固定术语』行, 译文中必须原样嵌入这些指定中文, 不得改用同义词。\n"
-                "4. 保留 Target 中的数字、字母编号、版本号、*anim 等技术标记不变。\n"
-                f"{text}"
-            )
-            payload = {
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-                "options": {"temperature": 0.2, "num_predict": 512},
-            }
-            r = self._httpx.post(url, json=payload, timeout=180)
-            r.raise_for_status()
-            keys.append(k)
-            msg = {}
+        for k, t in items:
             try:
-                j = r.json()
-                msg = j.get("message") or {}
-            except Exception:
-                # 可能是 SSE 流式: 逐行取 data: 里的 final message
-                for ln in r.text.splitlines():
-                    if ln.startswith("data:") and ln.strip() != "data: [DONE]":
-                        import json as _j
-                        seg = ln[5:].strip()
-                        if seg:
-                            try:
-                                msg = (_j.loads(seg).get("message") or {})
-                            except Exception:
-                                pass
-            zh = self._msg_zh(msg)   # content 空时从 reasoning 提取
-            zhs.append(zh)
+                _, zh, st = self._call_batch([(k, t)])
+                zhs.append(zh[0] if zh else "")
+            except Exception as e:  # noqa
+                zhs.append(f"[ERR {e!r}]")
+            keys.append(k)
         return keys, zhs
-
-    @staticmethod
-    def _parse_numbered(content, items):
-        """解析模型输出: 每行 '[n] 译文' 或 'n. 译文' 或 '- 译文', 按 n 映射到对应 item。"""
-        out = {}
-        pat_idx = re.compile(r"^\s*\[(\d+)\]\s*(.*)$")
-        num_pat = re.compile(r"^\s*(?:\d+[.):]|[-*])\s*(.*)$")
-        auto = 0
-        for ln in content.splitlines():
-            ln = ln.strip()
-            if not ln:
-                continue
-            m = pat_idx.match(ln)
-            if m and m.group(2).strip():
-                out[int(m.group(1))] = m.group(2).strip()
-                continue
-            m = num_pat.match(ln)
-            if m and m.group(1).strip():
-                # 无显式编号时按出现顺序
-                while auto in out:
-                    auto += 1
-                out[auto] = m.group(1).strip()
-                auto += 1
-        return [k for k, _ in items], [out.get(i, "") for i in range(len(items))]
 
 
 class NoopTranslator(Translator):
@@ -963,27 +948,41 @@ def main():
             print(f"[缓存] 命中复用 {n_hit} 个 phrase (不调模型)")
         if todo_items:
             print(f"[翻译] 调用引擎 {type(eng).__name__}, 新翻译 {len(todo_items)} 个 phrase (cache miss) ...")
-            if hasattr(eng, "translate_batch"):
-                try:
-                    raw = eng.translate_batch(todo_items, concurrency=CONCURRENCY, per_call=BATCH_SIZE)
-                except TypeError:
-                    raw = eng.translate_batch(todo_items)
-            else:
-                raw = eng.translate_batch(todo_items)
-            print("[翻译] 完成。")
             import time as _t
             now = _t.strftime("%Y-%m-%d %H:%M:%S")
-            for ck, out_txt in raw.items():
-                if ck in phrase_map:
-                    tid, orig_key, src_phrase, fp, gh = phrase_map[ck]
-                    z = str(out_txt).strip()
-                    if z and not z.startswith("[ERR"):
-                        # miss 成功后立即写库 + commit (checkpoint/resume 根本)
-                        cache.put(
-                            fingerprint=fp, translation_id=tid, segment_index=int(orig_key),
-                            source_phrase=src_phrase, source_hash=source_hash(src_phrase),
-                            translation=z, now=now)
-                        phrase_res.setdefault(tid, {})[orig_key] = z
+            # 每个成功 phrase 校验后立即 callback 写库 + commit (checkpoint/resume 根本);
+            # 由引擎在每批完成时同步调用, 崩溃/重启用库内已落盘条目续跑。
+            committed = set()
+            def _on_done(ck, z):
+                if ck in committed:
+                    return
+                if ck not in phrase_map:
+                    return
+                z = str(z or "").strip()
+                if not z or z.startswith("[ERR"):
+                    return
+                committed.add(ck)
+                tid, orig_key, src_phrase, fp, gh = phrase_map[ck]
+                cache.put(
+                    fingerprint=fp, translation_id=tid, segment_index=int(orig_key),
+                    source_phrase=src_phrase, source_hash=source_hash(src_phrase),
+                    translation=z, now=now)
+                phrase_res.setdefault(tid, {})[orig_key] = z
+
+            if hasattr(eng, "translate_batch"):
+                try:
+                    raw = eng.translate_batch(
+                        todo_items, concurrency=CONCURRENCY, per_call=BATCH_SIZE, on_done=_on_done)
+                except TypeError:
+                    # 老接口 (FakeTranslator / NoopTranslator) 不接受 on_done: 退回后置补写
+                    raw = eng.translate_batch(todo_items)
+                    for ck, out_txt in (raw or {}).items():
+                        _on_done(ck, out_txt)
+            else:
+                raw = eng.translate_batch(todo_items)
+                for ck, out_txt in (raw or {}).items():
+                    _on_done(ck, out_txt)
+            print("[翻译] 完成。")
         print(f"[缓存] 本轮: hit={n_hit} miss={n_miss} 库总条数={cache.count()}")
     except Exception:
         cache.close()
