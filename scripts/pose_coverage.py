@@ -28,7 +28,8 @@ pose_coverage.py — 659 CONFIRMED_POSE 只读 coverage 扫描 + 代表性 10-co
   SKIP_AMBIGUOUS_TGI      CHS 目标 STBL >1 或多 target family, 无法唯一确定
   SKIP_MAPPING_UNCERTAIN  无结构证据 / pack 级字段引不到 STBL
   SKIP_DUPLICATE_KEYHASH  (唯一 target) 含重复 KeyHash, 保守跳过, 不进 ELIGIBLE
-  ERROR                   DBPF 解析失败等异常
+  SKIP_MISSING_FILE       corpus 清单中的 production source 路径不存在 (保留记录, 不泛化为 ERROR)
+  ERROR                   DBPF 解析失败等异常 (文件存在但解析失败)
   ERROR_COVERAGE_INVARIANT target 三分法不满足 invariant (计量单位/scope 异常)
 
 铁律:
@@ -54,6 +55,15 @@ STBL_TID = 0x220557DA
 MAGIC = b"STBL"
 LOCALE_CHS = 0x01
 DEFAULT_VERI = r"D:/projects/sims4_trans/output/pose_verification.csv"
+
+# corpus inventory 路径修正 (2026-08-15 实查):
+# 包文件被移动/改名后, 以 basename 匹配修正为真实 production 路径。
+# 只影响 inventory 的 package_path (重新读取并分类); 不改 mapping/TGI/structural/duplicate 判定。
+# 注意: 绝不把人工测试基准 (如 .S4S_golden.package) 当作 production source 替换原包。
+PATH_REMAP = {
+    "[KPC] Spread eagle.package":
+        r"C:\Users\thela\Documents\Electronic Arts\The Sims 4\Mods\2026.8.14\[KPC] Spread eagle.package",
+}
 
 # 玩家可见字段模型 (语义保守, 只认名字明确的)
 DISPLAY_HINTS = ("display_name", "display", "pack_title", "title", "modal_name",
@@ -267,6 +277,15 @@ def scan_package(path: str) -> dict:
     }
 
     idx, err = safe_parse(path)
+
+    # corpus inventory 缺失源文件: 路径不存在 -> 保留记录, 标 SKIP_MISSING_FILE,
+    # 不泛化为 ERROR。safe_parse 在 open() 时对不存在文件会返回 err='ERROR'。
+    # 这里提前拦截, 避免把 missing-file 当 DBPF 解析失败。
+    if not os.path.exists(path):
+        row["reason"] = "SKIP_MISSING_FILE: 源文件路径不存在 (保留记录, 不指向非 production 基准)"
+        row["status"] = "SKIP_MISSING_FILE"
+        return row
+
     if err or idx is None:
         row["reason"] = f"DBPF 解析失败: {err}"
         return row
@@ -565,10 +584,23 @@ def _classify(row: dict) -> dict:
 
 
 # ---------------------------------------------------------------- 输入清单
+def _apply_path_remap(p: str) -> str:
+    """corpus inventory 路径修正: 按 basename 匹配 PATH_REMAP。
+    不命中则原样返回。仅修正 production 源路径 (移动/改名), 不改 mapping 判定。"""
+    p = (p or "").strip()
+    if not p:
+        return p
+    # 同时按 / 与 \\ 切 basename (Windows 路径在 Linux 上无 os.path 分隔符语义)
+    base = p.replace("\\", "/").split("/")[-1]
+    if base in PATH_REMAP:
+        return PATH_REMAP[base]
+    return p
+
+
 def load_packages(list_path=None) -> list:
     if list_path:
         with open(list_path, encoding="utf-8-sig") as f:
-            return [ln.strip() for ln in f if ln.strip()]
+            return [_apply_path_remap(ln) for ln in f if ln.strip()]
     if not os.path.exists(DEFAULT_VERI):
         print(f"[ERROR] 默认清单不存在: {DEFAULT_VERI}")
         print("  请用 --list <文件> 提供 package 路径列表 (一行一个)")
@@ -579,7 +611,7 @@ def load_packages(list_path=None) -> list:
             if r.get("verification_status") == "POSE_VERIFIED":
                 p = (r.get("package_path") or "").strip()
                 if p:
-                    paths.append(p)
+                    paths.append(_apply_path_remap(p))
     return paths
 
 
@@ -734,7 +766,7 @@ def main():
     print("\n--- status 数量 ---")
     for s in ("ELIGIBLE_EXISTING_CHS", "SKIP_NO_CHS", "SKIP_AMBIGUOUS_TGI",
               "SKIP_MAPPING_UNCERTAIN", "SKIP_DUPLICATE_KEYHASH",
-              "ERROR", "ERROR_COVERAGE_INVARIANT"):
+              "SKIP_MISSING_FILE", "ERROR", "ERROR_COVERAGE_INVARIANT"):
         print(f"  {s}: {sc.get(s, 0)}")
 
     # ---- cohort ----
@@ -766,7 +798,7 @@ def main():
         f.write(f"扫描包数: {len(rows)}\n\n## status 数量\n\n")
         for s in ("ELIGIBLE_EXISTING_CHS", "SKIP_NO_CHS", "SKIP_AMBIGUOUS_TGI",
                   "SKIP_MAPPING_UNCERTAIN", "SKIP_DUPLICATE_KEYHASH",
-                  "ERROR", "ERROR_COVERAGE_INVARIANT"):
+                  "SKIP_MISSING_FILE", "ERROR", "ERROR_COVERAGE_INVARIANT"):
             f.write(f"- {s}: {sc.get(s, 0)}\n")
         f.write("\n## 代表性 10-cohort (程序化选择, 非随机/非人工)\n\n")
         f.write("| slot | why | package | CHS TGI | CHS entries | TRANSLATE | KEEP | UNMAPPED |\n")
