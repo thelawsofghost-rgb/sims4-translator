@@ -285,3 +285,34 @@ AUDIT=PASS
 - `audit_canary_pair.py` / `dbpf_forensic.py` 现输出 `STRING_LENGTH`(header) 与
   `CALCULATED_STRING_DATA_LENGTH`(= Σ UTF8+1), 二者必须相等; 不等 → 硬错
   (dbpf_forensic 归 [CONTAINER], 不再自动归 [PAYLOAD] normal)
+
+---
+
+## 🗺 659 CONFIRMED_POSE 只读 coverage + 10-cohort 选择 (2026-08-15)
+
+**新增 `scripts/pose_coverage.py`** (只读, Windows 上跑真实包; 本地仅白盒合成验证):
+
+- 输入: `--list <文件>` (一行一包) 或默认 `output/pose_verification.csv` 过滤 `POSE_VERIFIED`
+- 每包覆盖列 (全输出到 `coverage.csv`):
+  package_path / file_size / PosePackInstance_count / STBL_count_total /
+  CHS_0x01_exists / CHS_target_STBL_count / CHS_target_TGI(s) / CHS_entry_count /
+  pack_title_ref_count / pack_description_ref_count / pose_display_name_ref_count /
+  exact_structural_translate_count / keep_count / unmapped_uncertain_count /
+  STBL_version / compression_state /
+  non_ascii_source_present / long_string_present / repeated_source_text_present /
+  multiple_target_STBL_families / status / reason
+- player-visible model: PACK_TITLE(display_name/title/pack_title) · PACK_DESCRIPTION(description)
+  · POSE_DISPLAY_NAME(pose_display_name) · KEEP(creator_name/creator/author) ·
+  非UI默认不翻 (pose_name/sort_name/internal)。不按“像英文”判 TRANSLATE, 只认结构引用。
+- status: ELIGIBLE_EXISTING_CHS / SKIP_NO_CHS / SKIP_AMBIGUOUS_TGI /
+  SKIP_MAPPING_UNCERTAIN / ERROR。缺 0x01 CHS 一律 SKIP, 不自行创建、不推导 TGI。
+- cohort: 程序化选 10 (确定性 tie-break, 非随机/非人工名字), 类别缺则 NOT_PRESENT_IN_CORPUS,
+  不伪造: ①最小 ②最大 ③中等 ④多PosePackInstance ⑤多family/多target ⑥title+desc
+  ⑦仅pose_display ⑧非ASCII ⑨长字符串 ⑩repeated/protected, +压缩包(若存在)。
+- 输出: `coverage.csv` / `cohort_selection.csv` / `coverage_report.md`
+- 本阶段只读: 不生成 10 sidecar / 不写 Mods / 不批 50/659 / 不碰 Animation /
+  不处理缺 CHS 创建规则 / 不动 frozen 9061 层。
+
+**白盒验证 (合成 corpus)**: 5 状态全分类对; 四态 scan 端到端对 (ELIGIBLE: PPI=1,
+trans=4 但 title 精确计数=1 不再被 pose_display_name 误吞 / NO_CHS / MAPPING_UNCERTAIN /
+pose_list 兜底); main() 产出 3 文件; cohort 类别缺则 NOT_PRESENT (不伪造)。
