@@ -41,8 +41,13 @@ def main():
         with open(fn,"w",encoding="utf-8-sig",newline="") as f:
             w=csv.DictWriter(f,fieldnames=cols); w.writeheader(); w.writerows(arr)
         print(f"[{key}] {len(arr)} 条 -> {fn.name}")
-        for r in arr[:6]:
-            print(f"  {r['translation_id']:16s} src={(r['source_text'] or '')[:45]!r}  zh={(r['translation'] or '')[:45]!r} :: {(r['qa_reason'] or '')[:55]}")
+        if "--print-all" in args:
+            print("  --- 全部条目 (tid | src | zh) ---")
+            for r in arr:
+                print(f"  {r['translation_id']:16s} | {(r['source_text'] or ''):45s} | {(r['translation'] or '')}")
+        else:
+            for r in arr[:6]:
+                print(f"  {r['translation_id']:16s} src={(r['source_text'] or '')[:45]!r}  zh={(r['translation'] or '')[:45]!r} :: {(r['qa_reason'] or '')[:55]}")
     return 0
 
 if __name__ == "__main__":
