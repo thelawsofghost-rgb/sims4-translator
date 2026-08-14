@@ -248,3 +248,40 @@ bin\Debug\SidecarBuilder.exe \
 **forensic 若不能给出有证据的、明确字段级修复 → 不再维护自制 s4pi writer。**
 下一主线 = S4S-compatible serializer (复用 S4S 自身 Save 程序集/API/DLL, 或调用其 serializer)。
 冻结: Tibo / 10/50/659 / Animation / s4pi 参数猜测 / 翻译与 mapping 层不动 (mapping+COMPLETE-STBL 保留)。
+
+---
+
+## ✅ 根因实锤: 旧 s4pi STBL stringLength UTF-8 低估 bug (2026-08-15, forensic 确认)
+
+**字段级证据 (非猜测)**: forensic 显示 s4pi 输出 STBL header `stringLength=36` 而实际
+string data = Σ(UTF8 byte count + 1) = **70**。S4S golden = 52 与 Σ 完全一致。
+
+**根因链 (vendored s4pi `StblResource.cs` 核实)**:
+- `StringEntry.EntrySize` 旧实现: `(uint)(StringValue.Length + 1)` → 用 .NET `string.Length`
+  (UTF-16 code unit, 中文每字=1)
+- 实际 `UnParse` 写 entry 用 `Encoding.UTF8.GetBytes(StringValue)` + `(ushort)str.Length`
+  (中文每字=3 字节)
+- `UnParse` 累加 `actualSize += entry.EntrySize` 并写回 header `stringLength`
+  → 中文场景 stringLength 系统性低估 → 游戏读 STBL 越界/截断 → 拒载
+- S4S 用 UTF-8 byte count 得 52 (正确); 旧 s4pi 得 36 (低估)
+
+**单变量 backport (仅改 1 处, 其余全不动)**:
+- `EntrySize` → `(uint)Encoding.UTF8.GetByteCount(StringValue) + 1`
+- 不改: PackageIndex / indexType / SaveAs / DBPF header / writer mapping / COMPLETE-STBL 流程
+
+### 进游戏前 forensic 必须证明 (验收门)
+```
+INDEX_TYPE = 0x00000007   (保持不变)
+output entries = 5
+stringLength = 70          (必须修正, 与 Σ 一致)
+only 0x763F7534 changed
+AUDIT=PASS
+```
+- 若 stringLength=70 且 INDEX_TYPE 仍 0x07 的新 canary **游戏能启动** → 实锤根因=该 UTF-8
+  length bug; INDEX_TYPE 0x07 对该 canary 不是 blocker
+- 若仍无法启动 → stringLength bug 已修但还有第二个问题 → 才进入 INDEX_TYPE flat-index 单变量实验
+
+### 新增硬校验 (audit 工具)
+- `audit_canary_pair.py` / `dbpf_forensic.py` 现输出 `STRING_LENGTH`(header) 与
+  `CALCULATED_STRING_DATA_LENGTH`(= Σ UTF8+1), 二者必须相等; 不等 → 硬错
+  (dbpf_forensic 归 [CONTAINER], 不再自动归 [PAYLOAD] normal)

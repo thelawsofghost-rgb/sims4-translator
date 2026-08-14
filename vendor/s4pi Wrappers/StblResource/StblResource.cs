@@ -167,7 +167,10 @@ namespace StblResource
 
             internal uint EntrySize
             {
-                get { return (uint)(this.StringValue.Length + 1); }
+                // upstream Sims4Tools fix: 用 UTF-8 字节数而非 .NET string.Length(UTF-16 code unit)。
+                // 旧实现 ((uint)(StringValue.Length + 1)) 对中文低估 (中文每字 Length=1 实为 3 字节),
+                // 导致 UnParse 写入 STBL header 的 stringLength 低估 -> 游戏拒载。
+                get { return (uint)Encoding.UTF8.GetByteCount(this.StringValue) + 1; }
             }
 
             public StringEntry(int apiVersion, EventHandler handler)

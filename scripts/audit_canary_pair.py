@@ -51,7 +51,7 @@ def locale_of(inst: int) -> int:
 
 
 def read_one_stbl(path: str, e) -> tuple:
-    """读单个 STBL 资源, 返回 (version, is_compressed, reserved, [(kh,flags,text)]).
+    """读单个 STBL 资源, 返回 (version, is_compressed, reserved, string_length, [(kh,flags,text)]).
     Header 布局按 s4pi StblResource (vendored 源码核实): magic@0(u32) version@4(u16)
     isComp@6(u8) count@7(u64) reserved@15(2B) stringLength@17(u32) entries@21."""
     try:
@@ -60,11 +60,12 @@ def read_one_stbl(path: str, e) -> tuple:
         with open(path, "rb") as fh:
             fh.seek(off); body = fh.read(sz)
         if body[0:4] != b"STBL":
-            return None, None, None, None
+            return None, None, None, None, None
         version = struct.unpack_from("<H", body, 4)[0]
         is_comp = body[6]
         count = struct.unpack_from("<Q", body, 7)[0]
         reserved = body[15:17]
+        string_length = struct.unpack_from("<I", body, 17)[0]
         keys = []
         o = 21
         for _ in range(count):
@@ -76,9 +77,17 @@ def read_one_stbl(path: str, e) -> tuple:
             txt = body[o + 7:o + 7 + ln].decode("utf-8", errors="replace")
             keys.append((kh, fl, txt))
             o += 7 + ln
-        return version, is_comp, reserved, keys
+        return version, is_comp, reserved, string_length, keys
     except Exception:
-        return None, None, None, None
+        return None, None, None, None, None
+
+
+def calc_stbl_string_data_length(keys) -> int:
+    """由 entry 算出的 STBL string data 长度 = Σ(UTF8 byte count(text) + 1)。
+    s4pi EntrySize 上游修复后写入的 header stringLength 必须等于此值。"""
+    if keys is None:
+        return -1
+    return sum(len(txt.encode("utf-8")) + 1 for _, _, txt in keys)
 
 
 def expect_tgi(idx, inst):
@@ -133,17 +142,17 @@ def main():
     tgi_err = expect_tgi(out_idx, exp_inst)
     got_inst = out_stbl[0].instance_id if out_stbl else None
 
-    out_version, out_comp, out_res, out_keys = None, None, None, None
+    out_version, out_comp, out_res, out_strlen, out_keys = None, None, None, None, None
     if out_stbl:
-        out_version, out_comp, out_res, out_keys = read_one_stbl(out_path, out_stbl[0])
+        out_version, out_comp, out_res, out_strlen, out_keys = read_one_stbl(out_path, out_stbl[0])
 
     # ---- source CHS STBL (若 source 含 CHS 则取之, 否则取唯一 STBL) ----
     src_stbl = [e for e in src_idx.entries if e.type_id == A.STBL_TID]
     src_chs = [e for e in src_stbl if locale_of(e.instance_id) == LOCALE_CHS]
     src_sel = (src_chs[0] if src_chs else src_stbl[0]) if src_stbl else None
-    src_version, src_comp, src_res, src_keys = None, None, None, None
+    src_version, src_comp, src_res, src_strlen, src_keys = None, None, None, None, None
     if src_sel:
-        src_version, src_comp, src_res, src_keys = read_one_stbl(src_path, src_sel)
+        src_version, src_comp, src_res, src_strlen, src_keys = read_one_stbl(src_path, src_sel)
 
     # ---- 比对 ----
     problems = []
@@ -161,6 +170,15 @@ def main():
         problems.append(f"OUTPUT version={out_version} != 5")
     if src_version is not None and out_version != src_version:
         problems.append(f"output version {out_version} != source version {src_version}")
+
+    # STRING_LENGTH 硬校验: header stringLength 必须 == Σ(UTF8 byte count(text)+1)
+    # (旧 s4pi 用 StringValue.Length 低估 UTF-8; 修复后必须相等, 否则游戏拒载)
+    out_calc = calc_stbl_string_data_length(out_keys)
+    if out_strlen is not None and out_calc >= 0 and out_strlen != out_calc:
+        problems.append(f"STRING_LENGTH 不等: header={out_strlen} != calculated={out_calc}")
+    if out_strlen is not None and out_calc >= 0:
+        print(f"STRING_LENGTH = {out_strlen}")
+        print(f"CALCULATED_STRING_DATA_LENGTH = {out_calc}")
 
     # entries 数量
     SOURCE_ENTRIES = len(src_keys) if src_keys else 0

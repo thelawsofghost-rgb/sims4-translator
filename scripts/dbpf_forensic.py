@@ -246,8 +246,26 @@ def main():
             if any(ra) and not any(rb): s4s_wrote.append(f"  STBL reserved: A={ra.hex()} vs B={rb.hex()}")
             elif any(rb) and not any(ra): s4pi_wrote.append(f"  STBL reserved: A={ra.hex()} vs B={rb.hex()}")
             else: container.append(f"  STBL reserved: A={ra.hex()} vs B={rb.hex()}")
-        if sla != slb: payload.append(f"  STBL stringLength: A={sla} vs B={slb} (文本不同, 正常)")
-        if lena != lenb: payload.append(f"  STBL raw byte_len: A={lena} vs B={lenb} (文本不同, 正常)")
+        if sla != slb:
+            container.append(f"  STBL stringLength: A={sla} vs B={slb} (不再自动归 PAYLOAD; 见下方 STRING_LENGTH 硬校验)")
+        if lena != lenb:
+            container.append(f"  STBL raw byte_len: A={lena} vs B={lenb}")
+
+    # STRING_LENGTH 硬校验 (两侧): header stringLength 必须 == Σ(UTF8 byte count(text)+1)
+    # 旧 s4pi EntrySize 用 StringValue.Length (UTF-16) 低估 UTF-8 -> 游戏拒载。
+    def calc_str_len(keys):
+        return sum(len(txt.encode("utf-8")) + 1 for _, _, _, txt, _ in keys) if keys else -1
+    for tag, p, e, st, keys in (("A/S4S", pa, ea, sla, ka), ("B/s4pi", pb, eb, slb, kb)):
+        if st is None:
+            continue
+        c = calc_str_len(keys)
+        if c >= 0:
+            label = f"[{tag}] STRING_LENGTH header={st} calculated={c}"
+            if st == c:
+                print("  " + label + " (一致)")
+            else:
+                container.append(f"  {label} (不一致! -> UTF-8 stringLength bug 或 payload 异常)")
+
 
     print("\n--- [PAYLOAD] 文本长度不同导致的正常差异 ---")
     for x in payload: print(x)
