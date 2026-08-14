@@ -4,3 +4,4 @@ output/
 *.tar.gz
 lib/
 testdata/
+canary_hold/
