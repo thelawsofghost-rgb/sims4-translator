@@ -145,6 +145,46 @@ def main():
             else:
                 print(f"  差异 @{d}: 原=0x{o[d]:02X} 新=0x{n[d]:02X}")
 
+    print("\n===== 6. STBL body 展开 + 非 STBL 资源核查 (golden 对照) =====")
+    STBL_TID = 0x220557DA
+    print("  --- 各 resource 类型分布 ---")
+    from collections import Counter
+    def dist(es):
+        c = Counter()
+        for e in es:
+            t = "STBL" if e["tid"] == STBL_TID else f"0x{e['tid']:08X}"
+            c[t] += 1
+        return c
+    print(f"  原包资源分布: {dict(dist(oe))}")
+    print(f"  新包资源分布: {dict(dist(ne))}")
+    # 列出所有非 STBL 资源 (golden 模式下重点看这些是否被 s4pi 改动)
+    print("  --- 非 STBL 资源清单 (原包) ---")
+    for e in oe:
+        if e["tid"] != STBL_TID:
+            print(f"    tid=0x{e['tid']:08X} group=0x{e['gid']:08X} inst=0x{e['inst']:016X} "
+                  f"off={e['off_abs']} sz={e['sz_abs']} flags=0x{e['fl']:08X} rs=0x{e['rs']:08X}")
+    # STBL body 全 hex (前 64B) 逐字节对比
+    print("  --- STBL body 前 64 字节 hex: 原 vs 新 ---")
+    for i in range(oc):
+        a = oe[i]
+        if a["tid"] != STBL_TID:
+            continue
+        match = next((x for x in ne if (x["tid"],x["gid"],x["inst"])==(a["tid"],a["gid"],a["inst"])), None)
+        if match is None:
+            print(f"    STBL inst=0x{a['inst']:016X} 新包缺失")
+            continue
+        ob = o[a["off_abs"]:a["off_abs"]+a["sz_abs"]]
+        nb = n[match["off_abs"]:match["off_abs"]+match["sz_abs"]]
+        mark = "=" if ob == nb else "*"
+        loc = (a["inst"] >> 56) & 0xFF
+        print(f"    [{mark}] locale=0x{loc:02X} inst=0x{a['inst']:016X} "
+              f"size原={a['sz_abs']} 新={match['sz_abs']}")
+        if ob != nb:
+            print(f"          原: {ob[:64].hex()}")
+            print(f"          新: {nb[:64].hex()}")
+            diffb = [j for j in range(min(len(ob), len(nb))) if ob[j] != nb[j]]
+            print(f"          差异字节偏移 (body 内): {diffb[:30]}")
+
     print(f"\n===== 结果: {'存在 DIFF' if any_diff else '全部 PASS'} =====")
     return 0 if not any_diff else 1
 
