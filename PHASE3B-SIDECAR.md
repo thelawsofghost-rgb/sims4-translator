@@ -316,3 +316,42 @@ AUDIT=PASS
 **白盒验证 (合成 corpus)**: 5 状态全分类对; 四态 scan 端到端对 (ELIGIBLE: PPI=1,
 trans=4 但 title 精确计数=1 不再被 pose_display_name 误吞 / NO_CHS / MAPPING_UNCERTAIN /
 pose_list 兜底); main() 产出 3 文件; cohort 类别缺则 NOT_PRESENT (不伪造)。
+
+---
+
+## 🎯 Cohort Sidecar Production 生成 (2026-08-15) — frozen 10 包
+
+**cohort_selection.csv 已冻结** (rows=10 / distinct=10 / nonEligible=0 / missing=0), 不再改 selector。
+
+**新增 `scripts/gen_cohort_sidecars.py`** (Windows 上跑; 只生成+离线验证, 不写原包/不写 Mods/
+不做游戏启动/不碰 Animation):
+
+- 读 frozen `cohort_selection.csv` 每行 (source_package)
+- 每 source 包: 复用 `pose_coverage` 冻结映射, 抽【位置门控】approved player-visible keys:
+  PACK_TITLE(PosePackInstance-level display_name) / PACK_DESCRIPTION(description, 仅存在且 resolve)
+  / POSE_DISPLAY_NAME(pose_list/pose 内 pose_display_name)
+- 只认 exact existing 0x01 CHS target TGI; TGI 由实际 target STBL entry 派生
+  (不猜、不推导、不创建); CHS_target_STBL_count != 1 一律 fail-fast
+- 逐 approved key: 引用 hash 必须在 exact CHS target STBL key 全集内 (否则 unresolved fail-fast);
+  target STBL 含重复 KeyHash 一律 fail-fast; source_text 取 target STBL 现值
+- 译文解析优先级: `translation_overrides.csv`(T_<hash>_g1) -> `translation_done.csv` -> `translation_cache.db`
+  ; KEEP / 缺失 -> fail-fast (approved 玩家可见 key 不 guess、不 ship English)
+- 调 `SidecarBuilder.exe` (COMPLETE-STBL writer, 含 UTF8 EntrySize backport):
+  `-m KEYHASH:SOURCE:TRANSLATION` 每 approved key 一条; writer 内部做 expected-source 校验
+- 每个 sidecar 必须: writer VERIFY=PASS + `audit_canary_pair.py` AUDIT=PASS
+  (独立只读二次审计: exact TGI / resource_count=1 / version·count·order·flags preserved /
+   only approved keys changed / untouched 等价 / STRING_LENGTH==Σ(UTF8+1))
+- 输出: `<out_dir>/<slot>_<basename>_CHS.package` (每 source 一个) +
+  `<out_dir>/cohort_sidecar_manifest.csv` (slot/source/output/target_TGI/modified_key_count/
+  writer_verify/audit_result/error)
+
+用法 (Windows, 短路径, 先 cd 仓库根):
+```
+python scripts\gen_cohort_sidecars.py --cohort output\cohort_selection.csv --out-dir output\cohort_sidecars --writer sidecar_builder\bin\Debug\SidecarBuilder.exe --overrides output\translation_overrides.csv --done output\translation_done.csv --cache output\translation_cache.db
+```
+
+白盒验证 (合成 corpus, 本机): approved_pv_refs 三类别齐全 + 唯一 CHS target; TranslationResolver
+OVERRIDE/KEEP/MISSING 优先级正确; run_one 编排 writer+PASS+audit PASS+4 keys 无 error;
+fail-fast (缺译文) 不生成 sidecar; main() 端到端 10 包全 PASS + manifest 10 行 (audit -m 重复传正确)。
+
+**验证要求 (汇报)**: 10 个 sidecar 文件名 / 每包修改 key 数 / writer verify / independent audit / 是否全部 PASS。
