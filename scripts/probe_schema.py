@@ -7,6 +7,9 @@
 """
 import httpx
 
+# 统一本机 client: trust_env=False (不读系统代理) + 127.0.0.1 (不走 localhost)
+_client = httpx.Client(base_url="http://127.0.0.1:11434", trust_env=False, timeout=120)
+
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -44,6 +47,6 @@ payload = {
     "options": {"temperature": 0.0, "num_predict": 256},
 }
 
-r = httpx.post("http://localhost:11434/api/chat", json=payload, timeout=120)
+r = _client.post("/api/chat", json=payload)
 print("HTTP status:", r.status_code)
 print("content>>>", r.json().get("message", {}).get("content"))
