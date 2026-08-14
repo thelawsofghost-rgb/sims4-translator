@@ -88,14 +88,31 @@ def main():
     committed = 0
     committed_keys = set()
     on_done_calls = []
+    # ck -> 对应 source_phrase (供写库)
+    ck_to_src = {k: t for k, t in items}
+    ck_to_idx = {k: i for i, (k, t) in enumerate(items)}
 
     def on_done(ck, zh):
+        """真实生产同款 _on_done: 每个成功 phrase 立即 checkpoint 写库。"""
         nonlocal committed
         if ck in committed_keys:
             return
         committed_keys.add(ck)
         committed += 1
         on_done_calls.append((ck, zh))
+        src = ck_to_src.get(ck)
+        if src is None or not zh or zh.startswith("[ERR"):
+            return
+        fp = build_fingerprint(source_phrase=src)
+        cache.put(
+            fingerprint=fp,
+            translation_id=f"VERIFY-{ck}",
+            segment_index=0,
+            source_phrase=src,
+            source_hash=A.source_hash(src),
+            translation=zh,
+            now=now,
+        )
 
     print(f"\n== verify_n_phrase: n={n}  (vía 生产 OllamaTranslator, {P.OllamaTranslator().model} @ 127.0.0.1) ==")
     eng = P.OllamaTranslator()
