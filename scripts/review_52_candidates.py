@@ -45,8 +45,17 @@ _NEEDS_REVIEW_TOKEN = {
 # ---- 短语级规则 (仅在"该短语出现在该行当前译文"时应用, 非全局) ----
 _PHRASE_ZH = [
     (re.compile(r"\bALL[- ]?IN[- ]?ONE\b", re.IGNORECASE), "整合版"),
-    (re.compile(r"\bCarry Upstairs\b", re.IGNORECASE), "抱上楼"),
+    (re.compile(r"\bCarry[ -]?Upstairs\b", re.IGNORECASE), "抱上楼"),
     (re.compile(r"\bNegative Emotions\b", re.IGNORECASE), "负面情绪"),
+    (re.compile(r"\bArm Behind Head\b", re.IGNORECASE), "手放脑后"),
+    (re.compile(r"\bBiting Thumb Nail\b", re.IGNORECASE), "咬指甲"),
+    (re.compile(r"\bPeeping Through\b", re.IGNORECASE), "偷窥"),
+    (re.compile(r"\bLooking at teeth\b", re.IGNORECASE), "看牙齿"),
+    (re.compile(r"\bIn front of mirror\b", re.IGNORECASE), "在镜子前"),
+    (re.compile(r"\bHead hang low\b", re.IGNORECASE), "头低垂"),
+    (re.compile(r"\bClean lOVE\b", re.IGNORECASE), "纯洁的爱"),
+    (re.compile(r"\bby Sides\b", re.IGNORECASE), "在两侧"),
+    (re.compile(r"\bSweetest devotion\b", re.IGNORECASE), "最甜蜜的深情"),
 ]
 # 品牌/动作码前缀 (4字母内短码 + 某特征): 用于 KEEP_TYPE 复核
 _ACTION_CODE_RE = re.compile(r"^[0-9]{0,3}[A-Za-z]{1,3}$")  # 12Bf / 61La / 40Gd / 5Ae / v2
@@ -160,12 +169,18 @@ def main():
                 if pat.search(new_zh):
                     new_zh = pat.sub(base, new_zh)
                     changed.append(f"{tok}->{base}")
-            # 判定 SAFFE vs NEEDS_REVIEW
+            # 判定 SAFE vs NEEDS_REVIEW
+            # 关键: 替换后若仍有非 protected 的自然英文 -> 机器直译不完整/词序破坏, 降 NEEDS_REVIEW
+            new_resid = {w for w in resid_words(new_zh)
+                         if not is_protected_or_brand(w) and w.lower() not in prot}
             if set(leak_toks) & _NEEDS_REVIEW_TOKEN or not changed:
                 cat = "NEEDS_REVIEW"
                 reason = ("含需人工 token: " + ",".join(sorted(set(leak_toks) & _NEEDS_REVIEW_TOKEN))
                           if set(leak_toks) & _NEEDS_REVIEW_TOKEN
                           else "无可用直译规则(需看上下文)")
+            elif new_resid:
+                cat = "NEEDS_REVIEW"
+                reason = "替换后仍残留自然英文, 直译不完整/词序破坏, 需人工: " + ",".join(sorted(new_resid))
             else:
                 cat = "SAFE_CANDIDATE"
                 reason = "可精确 override; 替换: " + "; ".join(changed)
