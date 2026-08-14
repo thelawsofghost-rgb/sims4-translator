@@ -9,10 +9,12 @@
   - 不调 LLM / 不改 cache / 不写 package
 
 用法:
-  python scripts/merge_overrides.py <out_dir>
+  python scripts/merge_overrides.py <out_dir> [final_csv]
 
-需要先准备好 <out_dir>/dorothy_final_22.csv, 列: translation_id, final_translation
-(该文件由人工/Dorothy 提供, 本脚本只读引用, 不代填译文。)
+  final_csv 可选: Dorothy 22 条定稿 CSV 路径 (缺省用 <out_dir>/dorothy_final_22.csv)
+
+需要先准备好定稿 CSV, 列: translation_id, final_translation
+(该文件由 Dorothy 定稿提供, 本脚本只读引用, 不代填译文。)  
 若某 tid 缺失 -> 跳过并告警, 不臆造译文。
 """
 import sys, csv
@@ -26,7 +28,7 @@ def main():
 
     cand = out / "review_52_candidates.csv"      # SAFE (proposed_translation)
     res  = out / "dorothy_resolved.csv"           # RESOLVED (_final_translation)
-    fin  = out / "dorothy_final_22.csv"           # 22 条 Dorothy 定稿
+    fin  = Path(__import__("sys").argv[2]) if len(sys.argv) >= 3 else out / "dorothy_final_22.csv"
 
     if not cand.exists():
         print(f"[!] 缺 {cand}"); sys.exit(1)
