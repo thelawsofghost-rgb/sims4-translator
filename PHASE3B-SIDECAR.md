@@ -113,84 +113,94 @@ python .\scripts\audit_tibo_exact_map.py --dump-xml --keep 0xXXXX:作者Tibo131 
 fixture 回归: `scripts/_tibo_fixture.py` 生成含作者+包标题+3个 pose 显示名的测试包,
   已本地验证: pose_display_name→TRANSLATE, 作者/包标题→KEEP(override), 孤立 J→UNMAPPED。
 
-编译 (Windows, .NET Framework 4.0; 仅依赖仓库内容 + NuGet restore):
+## 编译 (Windows, .NET Framework 4.0; 仅依赖仓库内容 + NuGet restore)
 已内建 MSB3644 修复: 工程引用 Microsoft.NETFramework.ReferenceAssemblies 1.0.3
-(自包含 net40 reference assemblies, 无需装 .NET 4.0 Developer Pack; FrameworkPathOverride
-沿 ProjectReference 传给 vendored s4pi 工程一并生效)。
+(自包含 net40 reference assemblies, 无需装 .NET 4.0 Developer Pack; 其 build targets 自动解析
+FrameworkPathOverride / 禁用 FrameworkPathOverride / 显式引用 mscorlib, 沿 ProjectReference
+transitively 传遍 vendored s4pi 工程)。
 
 依赖: s4pi 源码已 vendored 到 `vendor/s4pi/` (固定 commit fff1936, GPL v3,
 见 vendor/s4pi/README-S4PI-VENDOR.md), Windows git clone/pull 即可获得, 无需任何手动寻找。
 
-⚠️ 用默认 Debug 配置 (不要加 /p:Configuration=Release): 上游 s4pi 的 PreBuildEvent
-硬编码 `bin\Debug\CreateAssemblyVersion` (生成 Properties\AssemblyVersion.cs),
-仅在 Debug 下可命中; Release 会因找不到该 exe 而失败。Debug 对构建工具已足够。
-先 restore 再 build, 两步:
+⚠️ 用 Debug 配置 (勿用 Release): 上游 s4pi 的 PreBuildEvent 硬编码
+`bin\Debug\CreateAssemblyVersion` (生成 Properties\AssemblyVersion.cs), 仅 Debug 可命中;
+Release 会因找不到该 exe 而失败。Debug 对构建工具已足够。
+
+### 一键构建脚本 (固化, 无需手动传参)
+```
+cd D:\projects\sims4_trans
+```
+```
+git pull
+```
+```
+powershell -ExecutionPolicy Bypass -File sidecar_builder\build_sidecar_builder.ps1
+```
+脚本内部固定: Configuration=Debug, Platform=AnyCPU, SolutionDir=<repo>\vendor\;
+FrameworkPathOverride 交给 NuGet 包自动解析 (不硬编码机器相关缓存路径)。
+产物: `sidecar_builder\bin\Debug\SidecarBuilder.exe`
+
+### 手动两步 (等价, 不推荐)
 ```
 cd D:\projects\sims4_trans\sidecar_builder
 ```
 ```
-msbuild SidecarBuilder.csproj /t:Restore
+msbuild SidecarBuilder.csproj /t:Restore /p:SolutionDir=D:\projects\sims4_trans\vendor\
 ```
 ```
-msbuild SidecarBuilder.csproj
+msbuild SidecarBuilder.csproj /p:SolutionDir=D:\projects\sims4_trans\vendor\
 ```
-产物: `bin\Debug\SidecarBuilder.exe`
-
-运行 (建单 STBL 包 + 重开核对; ⚠️ 仅为 serializer smoke test):
-```
-bin\Debug\SidecarBuilder.exe -out out.package -type 0x220557DA -group 0x80000000 -inst 0x014EACCF17C8B091 -k FDD36EF2:左 -k 552CC77A:相拥
-```
-验收 (Step③ 第一关):
-1. Windows 能编译
-2. 能创建只含 1 个 STBL 的 package
-3. 重新打开能核对 TGI + entries
-通过后才进入 1包 -> 10包 -> 50包 -> 659包。
 
 ---
 
-## ⚠️ -k 模式 = TEST ONLY (serializer smoke test), 严禁进生产
-上面与下方所有 `-k key:value` 用法都是【新建空 STBL、只添加命令行传入的 key】, 即
-**partial STBL**。这与已锁定的 Sidecar 规则 (same TGI override = 覆盖整张原始 CHS STBL) 不符。
+## 生产 writer 接口 (COMPLETE-STBL, 已实现)
+`SidecarBuilder.exe` 现为【正式完整 STBL writer】: 以整张原始 CHS STBL 为基线,
+只替换精确批准的 key value, 其余全量保留, 生成独立 override 包。
 
-- 仅用于在 Windows 验证 s4pi 序列化链路能跑通 (建包 / SaveAs / reopen / 核对 TGI+entries)。
-- 严禁用于生产 pipeline, 严禁把 partial STBL 包放进游戏。
-- 生产 writer 必须是下方“生产 writer 接口”的完整 STBL 基线模式。
-
-## 生产 writer 接口 (Windows build 验证通过后实现; 本阶段不改)  
-最终输入 (至少):
+输入:
 ```
-SidecarBuilder.exe \
+bin\Debug\SidecarBuilder.exe \
   -source  <source_package>      # 原 mod 只读打开
-  -type    0x220557DA            # 目标 STBL 的精确 Type
-  -group   0x80000000            # 目标 STBL 的精确 Group
-  -inst    0x...                 # 目标 STBL 的精确 Instance (即唯一 TGI 锁定)
-  -locale  0x01                  # 必须为 CHS_CN (0x01 高字节)
   -out     <output_path>         # !<mod>_CHS.package
-  -m       KEYHASH:EXPECTED:VALUE   # 可多次: 替换 key, 校验当前文本==EXPECTED, 改为 VALUE
+  -type    0x220557DA            # 目标 STBL 精确 Type
+  -group   0x80000000            # 目标 STBL 精确 Group
+  -inst    0x...                 # 目标 STBL 精确 Instance (唯一 TGI 锁定)
+  -locale  0x01                  # 可选: 校验 instance 高字节==0x01 (CHS_CN), 不符 fail
+  -m       KEYHASH:EXPECTED:VALUE   # 可多次: 仅当该 key 当前文本==EXPECTED 时改为 VALUE
 ```
-> 说明: exact TGI 用于唯一锁定目标 STBL。若包内该 TGI 不存在或非 locale 0x01 → fail。
-> 提供 `-locale 0x01` 参数以满足“显式约定中文 locale”, 与 exact-instance 锁定互为双重校验。
+> exact TGI 用于唯一锁定目标资源 (找不到/多个 → fail)。`-locale` 与 exact-instance 双重校验。
 
-### Writer 流程 (11 步, 锁定)
-1. 只读打开 source_package
-2. 按精确 Type/Group/Instance 找到唯一目标 STBL (找不到/多个 → fail)
-3. 读取完整 STBL, 记录全部 entries (如 Tibo131 必须是 54 entries)
-4. 对每个 modification:
-   - key 必须存在
-   - 当前文本必须 == expected_source
-   - 任一不符 → 立即 fail, 不写包
-5. 只替换被批准的 key value
-6. 其他所有 key / value / flags 原样保留
-7. 新建独立 DBPF
-8. 只加入这一张修改后的完整 STBL (非 partial)
-9. SaveAs
-10. reopen
-11. 验证:
-   - resource_count = 1
-   - TGI exact
-   - entry_count == source entry_count
-   - modified keys == expected translated values
-   - 所有 untouched keys == source
+### Writer 流程 (12 步, 已实现于 Program.cs)
+1. 只读打开 source_package (`Package.OpenPackage(1, path, readwrite:false)`)
+2. GetResourceList 中按精确 Type/Group/Instance 找唯一目标 STBL (≠1 → fail)
+3. `((APackage)src).GetResource(targetEntry)` 取原始 STBL stream
+4. `StblResource.StblResource` 解析完整 STBL
+5. 记录 source: Version / IsCompressed / Reserved / Entries.Count / 每项 KeyHash/Flags/StringValue
+6. 对每个 modification: key 必须唯一存在, StringValue 必须 == expected_source, 否则 fail-fast 不写包
+7. 仅修改已有 StringEntry.StringValue; 不 new/delete/reorder entry, 不改 KeyHash, 不改 Flags
+8. 新建 Package, 只加入修改后的完整 STBL (非 partial), TGI 与 source 完全一致
+9. SaveAs output
+10. reopen output
+11. verify: resource_count==1, TGI exact, Version 同, entry_count 同, KeyHash 集合/顺序同,
+    Flags 全同, modified values==target, untouched values==source
+12. 输出 manifest / 验证摘要 (VERIFY=PASS/FAIL; 失败 return 2)
+
+### API 依据 (已核 vendored 源码, 未猜):
+- `StblResource.StblResource` 嵌套 `public class StringEntry`/`StringEntryList`; 完整类型
+  `StblResource.StblResource.StringEntry` (namespace.StblResource class.StringEntry)
+- `IPackage` 无 `GetResource`; `GetResource(IResourceIndexEntry)` 是 `APackage` 抽象成员
+  → 需 `((APackage)src).GetResource(e)` 调用
+- `IPackage` 有 `GetResourceList`(List<IResourceIndexEntry>) 与 `AddResource(IResourceKey,Stream,bool)`
+- `TGIBlock(int,EventHandler,uint type,uint group,ulong instance)` 实现 IResourceKey
+- `AResource.Stream` 在 dirty 时重跑 `UnParse()`; `StringValue` setter 触发 OnElementChanged
+  → 改完值后 `stbl.Stream` 返回重新序列化的完整 STBL
+
+---
+
+## ⚠️ 已淘汰: -k partial 模式 (serializer smoke test)
+旧版 `-k key:value` 是【新建空 STBL、只加命令行传入 key】的 partial STBL, 已从生产路径淘汰。
+严禁用于生产 pipeline / 严禁进游戏。/ 如需验证 s4pi 序列化链路, 请改用上面的正式输入
+(以任意含 CHS STBL 的 source 跑一遍并通过 VERIFY)。
 
 ### 硬性禁止
 - 禁止根据文本扫描决定修改
