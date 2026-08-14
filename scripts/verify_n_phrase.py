@@ -119,6 +119,18 @@ def main():
     raw = eng.translate_batch(items, concurrency=min(4, n), per_call=n,
                               on_done=on_done)
 
+    # 审批硬编码层 (与生产 main() 决策层同款): text in APPROVED_TEXT 的词,
+    # 最终输出必须以审批译文为准, 禁止引擎自由翻译/原样保留。
+    APPROVED_TEXT = getattr(P, "APPROVED_TEXT", set())
+    APPROVED = getattr(P, "APPROVED", {})
+    final = {}
+    for k, t in items:
+        z = raw.get(k, "") or ""
+        if t in APPROVED_TEXT:
+            final[k] = APPROVED[t][0]  # 强制覆盖
+        else:
+            final[k] = z
+
     succeeded = sum(1 for k, z in raw.items() if z and not z.startswith("[ERR"))
     failed = sum(1 for _, z in raw.items() if not z or z.startswith("[ERR"))
     attempted = len(raw)
@@ -137,14 +149,12 @@ def main():
     print(f"on_done 即时回调次数 = {len(on_done_calls)} (应为 succeeded)")
     print(f"cache 反查写入 = {cache_written} / {n}   cache 库总条数 = {cache_total}")
     print(f"返回结构类型   = {type(raw).__name__}  (应为 dict, 且 {len(raw)} 项)")
-    print("\n--- 逐条 zh ---")
-    for k, z in raw.items():
-        mark = ""
-        if z and not z.startswith("[ERR"):
-            mark = "OK  "
-        else:
-            mark = "ERR "
-        print(f"  {mark} {k}: {z!r}")
+    print("\n--- 逐条 zh (已应用审批强制覆盖) ---")
+    for k, t in items:
+        z = final.get(k, "")
+        mark = "OK  " if (z and not z.startswith("[ERR")) else "ERR "
+        sign = " [审批]" if t in APPROVED_TEXT else ""
+        print(f"  {mark} {k}{sign}: {z!r}")
 
     # 断言评审标准
     rules = []
@@ -153,7 +163,24 @@ def main():
     rules.append(("failed==0 (不应有 parse 失败)", failed == 0))
     rules.append(("on_done 每成功即回调 (即时 checkpoint)", len(on_done_calls) == succeeded))
     rules.append(("cache 实际写入==succeeded", cache_written == succeeded and cache_total == succeeded))
-    rules.append(("返回为完整 dict", isinstance(raw, dict) and len(raw) == n))
+    rules.append(("返回为完整 dict", isinstance(final, dict) and len(final) == n))
+
+    # 审批硬编码层: final 已应用生产同款 APPROVED 覆盖, 断言必须全部命中审批译文。
+    approved_hits = [t for _, t in items if t in APPROVED_TEXT]
+    approved_ok = True
+    approved_detail = []
+    for k, t in items:
+        if t not in APPROVED_TEXT:
+            continue
+        expect = APPROVED[t][0]
+        got = final.get(k, "")
+        ok = (str(got).strip() == expect)
+        approved_ok = approved_ok and ok
+        approved_detail.append(f"{t!r}: got={got!r} want={expect!r} {'OK' if ok else 'FAIL'}")
+    rules.append((f"审批硬编码覆盖 ({len(approved_hits)} 条) => 必须命中审批译文", approved_ok))
+    if approved_hits:
+        print("   审批抽验: " + "; ".join(approved_detail))
+
     print("\n--- 评审 ---")
     ok_all = True
     for name, cond in rules:
