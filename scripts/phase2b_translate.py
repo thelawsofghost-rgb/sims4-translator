@@ -70,6 +70,18 @@ def _flag_val(name, default=None):
 ONLY_CHANGED = "--only-changed" in ARGS      # 只重翻 todo 里 source_hash 变化的行(cache 指纹已保证天然幂等, 此标志主要用于"感知")
 FORCE = "--force" in ARGS                    # 忽略 cache, 强制重翻
 ONLY_ID = _flag_val("--id")                  # 只处理指定 translation_id (逗号分隔可多个)
+ID_FROM_FILE = _flag_val("--id-from-file")   # 从纯文本文件读 tid 列表 (每行一个, 或逗号分隔) → 自动并入 ONLY_ID
+if ID_FROM_FILE:
+    _ids = []
+    for _line in Path(ID_FROM_FILE).read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if not _line:
+            continue
+        _ids.extend(x.strip() for x in _line.split(",") if x.strip())
+    _ids = [x for x in _ids if x]
+    ONLY_ID = ",".join(_ids) if _ids else ONLY_ID
+    if ONLY_ID:
+        print(f"[--id-from-file] 读取 {len(_ids)} 个 tid")
 ONLY_REGEX = _flag_val("--regex")            # 只处理 source_text 匹配该正则的行
 ONLY_CATEGORY = _flag_val("--category")      # 只处理 decision/category 等于该值的行
 CONCURRENCY = int(_flag_val("--concurrency", "8"))
