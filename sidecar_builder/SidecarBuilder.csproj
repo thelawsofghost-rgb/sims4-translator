@@ -22,6 +22,22 @@
     <DefineConstants>TRACE</DefineConstants>
     <PlatformTarget>AnyCPU</PlatformTarget>
   </PropertyGroup>
+  <!-- MSB3644 修复 (不装旧 .NET 4.0 Developer Pack): 通过 NuGet 官方包
+       Microsoft.NETFramework.ReferenceAssemblies 自包含 net40 reference assemblies。
+       仅 Windows 端执行 restore -> build。
+       该包在 build 时设置 FrameworkPathOverride 到包内 net40 ref 目录,
+       该全局属性会沿 ProjectReference 传递给 s4pi 工程, 一并解决它们的 MSB3644。
+       保持 TargetFrameworkVersion=v4.0, 不 retarget 到 4.8。
+       RestoreProjectStyle=PackageReference: 让现代 msbuild 对旧式 csproj 走
+       PackageReference restore (而非 packages.config 模式), 否则 restore 会失败。 -->
+  <PropertyGroup>
+    <RestoreProjectStyle>PackageReference</RestoreProjectStyle>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
   <ItemGroup>
     <Reference Include="System" />
   </ItemGroup>
