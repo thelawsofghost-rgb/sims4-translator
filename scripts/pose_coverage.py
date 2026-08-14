@@ -352,7 +352,13 @@ def _classify(row: dict) -> dict:
         return row
     if row["exact_structural_translate_count"] == 0 and row["keep_count"] == 0:
         row["status"] = "SKIP_MAPPING_UNCERTAIN"
-        row["reason"] = "无任何结构证据引用 STBL key (全部 UNMAPPED)"
+        # 语义确认 (2026-08-15): unmapped_uncertain_count>0 本身【不】触发本状态。
+        # 本状态仅当: 结构上【没有任何】 player-visible 引用能解析到 CHS STBL key
+        # (translate==0 且 keep==0, 即玩家可见字段引用完全无法 join) 时触发。
+        # 普通 orphan/旧 STBL/无 XML 引用 key 只记 unmapped_uncertain_count, 不阻塞写入
+        # 例: Tibo131 translate=36/keep=1/unmapped=17 -> 仍 ELIGIBLE (17 unmapped 全 untouched)
+        row["reason"] = ("无任何已解析的 player-visible 结构引用 (translate=0 且 keep=0); "
+                          "unmapped/orphan key 不阻塞写入")
         return row
     row["status"] = "ELIGIBLE_EXISTING_CHS"
     row["reason"] = "存在唯一 0x01 CHS 目标且结构映射可精确 join"
