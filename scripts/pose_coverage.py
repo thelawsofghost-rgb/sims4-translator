@@ -150,6 +150,24 @@ def _classify_field(fname):
     return "OTHER"
 
 
+def pv_category(nl):
+    """exact 字段名 -> player-visible 分类 (单一真源, 用于 pv_refs 与 TRANSLATE keys 共用)。
+
+    只认三个明确字段名(== 精确匹配, 非 substring):
+      PACK_TITLE        <- display_name
+      PACK_DESCRIPTION  <- description (仅有效非0 hash, 由 parse_display_hash=None 前置过滤)
+      POSE_DISPLAY_NAME <- pose_display_name
+    其余 (pose_name / sort_name / pose_description / internal ...) 一律不翻 -> 返回 None。
+    """
+    if nl in PV_PACK_TITLE:
+        return "TRANSLATE"
+    if nl in PV_PACK_DESC:
+        return "TRANSLATE"
+    if nl in PV_POSE_DISPLAY:
+        return "TRANSLATE"
+    return None
+
+
 def is_hash_like(s):
     s = (s or "").strip()
     if not s:
@@ -162,13 +180,24 @@ def is_hash_like(s):
 
 
 def parse_display_hash(s):
+    """规范化解析 XML 引用值为 32-bit key hash。
+
+    规则(2026-08-15): 先规范化解析成整数, 再判断有效性。
+      - 无法解析 -> None (非 0x 或非法)
+      - 解析为 0 / 0x0 / 0x00000000 (canonical zero sentinel) -> None, 表示“无引用”: 不得计入任何 ref count, 也不得成为 unresolved。
+    不依赖“字符串是否以0x开头”来判断有效性。
+    """
     s = (s or "").strip()
     if not s:
         return None
     try:
-        return int(s, 16) if s.lower().startswith("0x") else int(s, 0)
+        v = int(s, 16) if s.lower().startswith("0x") else int(s, 0)
     except ValueError:
         return None
+    # canonical zero sentinel = 无引用
+    if v == 0:
+        return None
+    return v
 
 
 def is_pose_pack_root(root):
@@ -209,6 +238,9 @@ def scan_package(path: str) -> dict:
         "unique_player_visible_ref_count": 0,
         "resolved_player_visible_ref_count": 0,
         "unresolved_player_visible_ref_count": 0,
+        "translate_set_complete": 0,
+        "resolved_pv_key_set_size": 0,
+        "translate_key_set_size": 0,
         "STBL_version": "",
         "compression_state": "",
         "non_ascii_source_present": 0,
@@ -277,7 +309,9 @@ def scan_package(path: str) -> dict:
     row["PosePackInstance_count"] = len(posexmls)
 
     struct_ref = {}    # kh -> [(field, cls, xml_inst_id)]
-    pv_refs = []       # player-visible refs: (field, hash|None, cls, xml_inst_id)
+    translate_ref_keys = set()   # 播放器可见 TRANSLATE 字段引用的 key hash 集合 (单一真源)
+    keep_ref_keys = set()        # AUTHORISH (creator/author) 引用的 key hash 集合
+    pv_refs = []       # player-visible refs: (field, hash|None, cls|pvc, xml_inst_id)
     ref_pv_packtitle = 0
     ref_pv_packdesc = 0
     ref_pv_posedisplay = 0
@@ -293,17 +327,27 @@ def scan_package(path: str) -> dict:
             if not val:
                 continue
             cls = _classify_field(n)
-            h = parse_display_hash(val) if is_hash_like(val) else None
+            h = parse_display_hash(val)   # None 代表无效或 zero sentinel (0/0x0/0x00000000)
             nl = n.lower()
-            # 精确字段名计数: 用 == 而非 substring, 避免 pose_display_name 误吞 display_name
-            if nl in PV_PACK_TITLE: ref_pv_packtitle += 1
-            if nl in PV_PACK_DESC: ref_pv_packdesc += 1
-            if nl in PV_POSE_DISPLAY: ref_pv_posedisplay += 1
+            pvc = pv_category(nl)          # 仅 3 个 exact 字段名 -> "TRANSLATE", 其余 None
+            # 精确字段名计数 (== 而非 substring, 避免 pose_display_name 误吞 display_name);
+            # zero sentinel (h is None) 的字段不计入任何 ref count。
+            if h is not None:
+                if nl in PV_PACK_TITLE: ref_pv_packtitle += 1
+                if nl in PV_PACK_DESC: ref_pv_packdesc += 1
+                if nl in PV_POSE_DISPLAY: ref_pv_posedisplay += 1
             if h is not None:
                 struct_ref.setdefault(h, []).append((n, cls, xinst_id))
-            # player-visible ref 单独记录 (PACK_TITLE / PACK_DESCRIPTION / POSE_DISPLAY_NAME)
-            if nl in PV_PACK_TITLE or nl in PV_PACK_DESC or nl in PV_POSE_DISPLAY:
-                pv_refs.append((n, h, cls, xinst_id))
+            # player-visible ref 单独记录: 只用 pv_category 判定 (与 TRANSLATE keys 同一套定义);
+            # zero sentinel (h is None) 的字段【不计入】pv_refs, 也不计 unresolved。
+            if pvc is not None and h is not None:
+                pv_refs.append((n, h, pvc, xinst_id))
+            # 结构引用证据 (不含 zero sentinel): 用于 key 分类 (translate/keep)
+            if h is not None:
+                if pvc is not None:
+                    translate_ref_keys.add(h)          # 该 key 属于 player-visible TRANSLATE 集合
+                elif cls == "AUTHORISH":
+                    keep_ref_keys.add(h)               # creator/author 等 -> KEEP
     row["pack_title_ref_count"] = ref_pv_packtitle
     row["pack_description_ref_count"] = ref_pv_packdesc
     row["pose_display_name_ref_count"] = ref_pv_posedisplay
@@ -313,19 +357,18 @@ def scan_package(path: str) -> dict:
     # 做三分法。多 target / 无 target 时计数一律置 0, 避免把其他 STBL/locale/orphan
     # 的 key 混进 target 统计 (修复: [Kritical]BrainwashingMachineAtropos1c 64 vs 2)。
     translate = keep = unmapped = 0
+    target_key_set = set()   # exact CHS target STBL 的 key hash 全集
     if row["CHS_target_STBL_count"] == 1:
         chs_inst, chs_ver, chs_comp, chs_kvs = chs[0]
         target_keys = {kh: (fl, txt) for kh, fl, txt in chs_kvs}  # 仅该 exact STBL 的 key
-        for kh, (fl, txt) in target_keys.items():
-            refs = struct_ref.get(kh, [])       # XML 结构引用 (hash 命中)
-            disp = [r for r in refs if r[1] == "DISPLAY"]
-            auth = [r for r in refs if r[1] == "AUTHORISH"]
-            if disp:
-                translate += 1
-            elif auth:
-                keep += 1
-            else:
-                unmapped += 1                  # 该 key 在 target STBL 内但无结构引用 (orphan)
+        target_key_set = set(target_keys.keys())
+        # TRANSLATE keys: 只取【exact 3 字段 allowlist】引用的 key (单一真源 pv_category),
+        # 与 pv_refs 用同一套定义 —— 绝不用宽泛 DISPLAY substring (修: pose_description 等被吞)。
+        tset = translate_ref_keys & target_key_set
+        kset = keep_ref_keys & target_key_set
+        translate = len(tset)
+        keep = len(kset)
+        unmapped = len(target_key_set - tset - kset)  # target 内无任何结构引用的 orphan
     row["exact_structural_translate_count"] = translate
     row["keep_count"] = keep
     row["unmapped_uncertain_count"] = unmapped
@@ -338,6 +381,24 @@ def scan_package(path: str) -> dict:
         row["invariant_ok"] = 1 if inv == row["CHS_entry_count"] else 0
     else:
         row["invariant_ok"] = 0
+
+    # ---- set-level invariant: TRANSLATE_KEY_SET == RESOLVED_PLAYER_VISIBLE_KEY_SET ----
+    # 收集 pv_refs 与生成 TRANSLATE keys 必须同源 (pv_category); 重复 XML ref 去重后比 key set。
+    # 即: 所有 resolve 成功的 player-visible key 集合 == 实际标成 TRANSLATE 的 key 集合。
+    # KEEP (creator) 单独检查, 不混入本式。
+    if row["CHS_target_STBL_count"] == 1:
+        resolved_pv_keys = {h for _, h, _, _ in pv_refs if h is not None and h in target_key_set}
+        translate_key_set = translate_ref_keys & target_key_set
+        if resolved_pv_keys == translate_key_set:
+            row["translate_set_complete"] = 1
+        else:
+            row["translate_set_complete"] = 0
+        row["resolved_pv_key_set_size"] = len(resolved_pv_keys)
+        row["translate_key_set_size"] = len(translate_key_set)
+    else:
+        row["translate_set_complete"] = 0
+        row["resolved_pv_key_set_size"] = 0
+        row["translate_key_set_size"] = 0
 
     # ---- structural-ref resolution completeness (反向: XML ref -> target STBL) ----
     # 只统计 player-visible refs (PACK_TITLE / PACK_DESCRIPTION / POSE_DISPLAY_NAME)。
@@ -426,6 +487,16 @@ def _classify(row: dict) -> dict:
                           f"unresolved={row['unresolved_player_visible_ref_count']} / "
                           f"resolved={row['resolved_player_visible_ref_count']} "
                           f"(total={row['player_visible_structural_ref_count']})")
+        return row
+    if row["translate_set_complete"] == 0:
+        row["status"] = "SKIP_MAPPING_UNCERTAIN"
+        # set-level invariant: 收集 pv_refs 与生成 TRANSLATE keys 必须同源 (同一字段定义)。
+        # TRANSLATE_KEY_SET != RESOLVED_PLAYER_VISIBLE_KEY_SET => 分类逻辑与收集逻辑脱节,
+        # 或存在被旧 DISPLAY 分类吞掉的额外字段 (如 pose_description), 不允许 ELIGIBLE。
+        row["reason"] = (f"TRANSLATE key set != resolved player-visible key set: "
+                          f"TRANSLATE_SET={row['translate_key_set_size']} vs "
+                          f"RESOLVED_PV_SET={row['resolved_pv_key_set_size']} "
+                          f"(分类与 pv_refs 不同源或有额外字段被吞)")
         return row
     if row["exact_structural_translate_count"] == 0 and row["keep_count"] == 0:
         row["status"] = "SKIP_MAPPING_UNCERTAIN"
@@ -671,6 +742,7 @@ _COLS = ["package_path", "file_size", "PosePackInstance_count", "STBL_count_tota
          "invariant_ok",
          "player_visible_structural_ref_count", "unique_player_visible_ref_count",
          "resolved_player_visible_ref_count", "unresolved_player_visible_ref_count",
+         "translate_set_complete", "resolved_pv_key_set_size", "translate_key_set_size",
          "STBL_version", "compression_state",
          "non_ascii_source_present", "long_string_present", "repeated_source_text_present",
          "multiple_target_STBL_families", "status", "reason"]
