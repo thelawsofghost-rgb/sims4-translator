@@ -69,6 +69,29 @@ python scripts\audit_sidecar.py "D:\projects\sims4_trans\Mods_sample"
 - 先出 审计结果 + writer 方案, 给 Dorothy, 获批准后再继续
 
 ## 5. 下一步 (待批准后)
-1. Windows 跑 `audit_sidecar.py` 审计真实汉化包 → 确认 TGI 对应规则
-2. (若走 P3) S4S 手动出 1 个 sidecar -> MVP 实机验收
-3. (并行) 我写 `sidecar_builder/` C# 工程 (P1 自动化)
+1. ~~Windows 跑 `audit_sidecar.py` 审计~~ -> 已完成, sidecar 模式确认
+2. ~~S4S 手工 sidecar MVP~~ -> 已完成, 实机 PASS
+3. (进行中) P1 C# helper `sidecar_builder/` 自动化
+
+## 6. P1 C# helper — Windows 编译与运行 (最小工程)
+工程: `sidecar_builder/` (Program.cs + SidecarBuilder.csproj)
+复用: 仓库 `lib/s4pi_src` (s4pi 源码工程, 成熟 writer; 序列化零手写)
+依赖闭包: SidecarBuilder -> Package + StblResource -> Interfaces + Settings + CS System Classes
+(CS System Classes 产出 System.Custom.dll; 各 ProjectGuid 已按真实 csproj 核对)
+
+编译 (Windows, .NET Framework 4.0):
+```
+cd D:\projects\sims4_trans\sidecar_builder
+msbuild SidecarBuilder.csproj /p:Configuration=Release
+```
+产物: `bin\Release\SidecarBuilder.exe`
+
+运行 (建单 STBL 包 + 重开核对):
+```
+SidecarBuilder.exe -out out.package -type 0x220557DA -group 0x80000000 -inst 0x014EACCF17C8B091 -k FDD36EF2:左 -k 552CC77A:相拥
+```
+验收 (Step③ 第一关):
+1. Windows 能编译
+2. 能创建只含 1 个 STBL 的 package
+3. 重新打开能核对 TGI + entries
+通过后才进入 1包 -> 10包 -> 50包 -> 659包。
