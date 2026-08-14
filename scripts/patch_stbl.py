@@ -202,6 +202,53 @@ def main() -> int:
             print(f"  0x{kh:08X}  T_{kh:08x}_g1  {txt!r}")
         return 0
 
+    if len(sys.argv) >= 2 and sys.argv[1] == "--diag":
+        """只读结构诊断: dump header/index entry 原始字节 + body 头部十六进制,
+        运行在原包与输出包上, 用于定位游戏拒绝加载的结构差异。"""
+        for p in sys.argv[2:]:
+            if not Path(p).exists():
+                print(f"[ERROR] 不存在: {p}"); continue
+            print(f"==== {p} ====")
+            raw = open(p, "rb").read()
+            print(f"文件大小: {len(raw)} bytes")
+            if raw[0:4] != b"DBPF":
+                print("[SKIP] 非 DBPF magic"); continue
+            import struct as _st
+            major, minor = _st.unpack("<II", raw[0x04:0x0C])
+            flags = raw[0x0C:0x10].hex()
+            entry_count = _st.unpack("<I", raw[0x24:0x28])[0]
+            index_size = _st.unpack("<I", raw[0x2C:0x30])[0]
+            index_offset = _st.unpack("<I", raw[0x40:0x44])[0]
+            compflag = raw[0x3C:0x40].hex()
+            is_rel = index_offset + index_size > len(raw) + 4
+            print(f"major={major} minor={minor} flags@0x0C={flags}"
+                  f" count@0x24={entry_count} index_size@0x2C={index_size}"
+                  f" index_offset@0x40={index_offset} (rel? {is_rel}) range={index_offset}..{index_offset+index_size}"
+                  f" comp_flag@0x3C={compflag}")
+            # 重算 index 实际位置: rel -> len-index_offset
+            io = index_offset if not is_rel else (len(raw) - index_offset)
+            print(f"  index 实际绝对偏移={io}")
+            if io + 4 + entry_count * 32 > len(raw) + 4:
+                print("  [WARN] index 区超 file")
+            for i in range(entry_count):
+                base = io + 4 + i * 32
+                e = raw[base:base + 32]
+                if len(e) < 32:
+                    print(f"  [i={i}] entry 不完整"); break
+                tid, gid, hi, lo, off, sz, fl, rs = _st.unpack("<IIIIIIII", e)
+                comp = bool(off & 0x80000000)
+                b_off = off & 0x7FFFFFFF
+                b_sz = sz & 0x7FFFFFFF
+                body_hdr = raw[b_off:b_off + 8].hex()
+                tag = "STBL" if tid == STBL_TID else "    "
+                loc = ((hi << 32 | lo) >> 56) & 0xFF if tid == STBL_TID else 0
+                print(f"  [i={i}] {tag} tid=0x{tid:08X} group=0x{gid:08X}"
+                      f" inst=0x{(hi<<32)|lo:016X}"
+                      f" offset={b_off} size={b_sz} comp={comp}"
+                      f" rawFlags=0x{fl:08X} rawReserved=0x{rs:08X}"
+                      f" body8={body_hdr}" + (f" locale=0x{loc:02X}" if tid == STBL_TID else ""))
+        return 0
+
     if len(sys.argv) != 4:
         print("用法: python patch_stbl.py input.package output.package mapping.csv")
         print("  mapping.csv 列: translation_id (T_<hash>_g1) + new_text")
