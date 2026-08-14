@@ -79,9 +79,45 @@ python scripts\audit_sidecar.py "D:\projects\sims4_trans\Mods_sample"
 依赖闭包: SidecarBuilder -> Package + StblResource -> Interfaces + Settings + CS System Classes
 (CS System Classes 产出 System.Custom.dll; 各 ProjectGuid 已按真实 csproj 核对)
 
+## 7. 生成 sidecar 前最后一道准确率验证 — Tibo131 单包精确映射
+脚本: `scripts/audit_tibo_exact_map.py` (只读, 不生成任何包)
+
+功能: 把 Tibo131 PosePackInstance XML 的玩家可见字段【精确 join】到包内全部 STBL key,
+      逐 key 输出 TRANSLATE / KEEP / UNMAPPED_UNCERTAIN 三类判定。
+铁律: 【不】按 STBL 文本长相直接判 TRANSLATE —— 判定只来自 XML 结构引用
+      (pose_display_name 等 DISPLAY 类字段哈希引用 → TRANSLATE;
+       creator/pose_name 等 AUTHORISH 类 → KEEP; 无引用 → UNMAPPED_UNCERTAIN 绝不猜)。
+
+Windows 跑 (先 git pull):
+```
+cd D:\projects\sims4_trans
+```
+```
+git pull
+```
+```
+python .\scripts\audit_tibo_exact_map.py --dump-xml "<Tibo131_PosePack 2.package 完整路径>"
+```
+人工保护/作者 key 可加 --keep (当 XML 无结构引用但已知该 key 属作者/包标题时):
+```
+python .\scripts\audit_tibo_exact_map.py --dump-xml --keep 0xXXXX:作者Tibo131 "<包>"
+```
+输出: 终端 + `output\tibo131_exact_map.csv`。
+
+特别核对项 (用户在生成前要求):
+- Tibo131 (作者) → 应 KEEP
+- "Tibo131 Standing Pose Pack #2" → 查是否 PACK_TITLE (XML 结构里 pack_title 字段, 通常为明文非哈希)
+- Pose 1/2/... → 查是否 pose_display_name 哈希引用 → TRANSLATE
+- J → 无结构证据不得翻 (UNMAPPED/UNCERTAIN)
+
+fixture 回归: `scripts/_tibo_fixture.py` 生成含作者+包标题+3个 pose 显示名的测试包,
+  已本地验证: pose_display_name→TRANSLATE, 作者/包标题→KEEP(override), 孤立 J→UNMAPPED。
+
 编译 (Windows, .NET Framework 4.0):
 ```
 cd D:\projects\sims4_trans\sidecar_builder
+```
+```
 msbuild SidecarBuilder.csproj /p:Configuration=Release
 ```
 产物: `bin\Release\SidecarBuilder.exe`
