@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
-"""Phase 3B MVP: 单条 STBL patch 工具 — 外科手术式 copy-on-write (不覆盖原文件)
+"""Phase 3B MVP: 单条 STBL patch 工具 — 正确的 DBPF 重排 write (不覆盖原文件)
 
 输入:
   python patch_stbl.py input.package output.package mapping.csv
   python patch_stbl.py --inspect input.package        (只读列出 locale 0x01 keys)
+  python patch_stbl.py --diag input.package ...       (只读结构诊断)
 
-设计 (v2, 修复游戏"文件损坏"问题 — 不再重建整个 package):
-  上一版 build_dbpf 把整个 DBPF 重排 (重写 header/index/重排 body/置零 flags),
-  破坏了 Sims4 结构 -> 游戏报文件损坏。v2 改为**原位外科手术**:
+设计 (v3, 修复游戏"文件损坏"):
+  根因诊断 (2026-08-14, 真包 diag + 复现):
+    本包 STBL 存储为 **raw (未压缩)**, size=130, 5 keys。
+    v2 用 stbl_surgical_edit 把短文本 (左=3B) 写进原槽 (Left=4B) 并把长度字段改成 3
+    -> STBL 解析器按 7+len 推进下一条目 (7+3=10), 但物理槽是 7+4=11
+    -> 后续 key 全部错位 -> STBL 结构损坏 -> 游戏报文件损坏。
+    我的 VERI 只检查目标 key 所以漏过; 复现测试确认解码失败。
 
-  1. 把原文件字节整体读入 (1:1 复制, 任何字节不改动)
-  2. 只覆盖**目标 STBL 的 body 区** [entry.offset, entry.offset+entry.size)
-     - 必须满足: 新压缩体积 <= 原体积 (原位缩短, 剩余区补 0)
-     - 若不满足 -> 抛错拒写, 绝不移动 index / 不重排 body / 不改 header
-  3. 其余一切 (header, index, 其他 resource, 压缩标记, padding) 逐字节原样
-  4. **字节级 self-check**: 目标区之外必须与原文件逐字节一致, 否则 FAIL
-     (机械地保证"除了目标 STBL resource 外, 其他 resource 保持一致")
-
-这样生成的新包 = 原包 + 仅目标 STBL 那一段被改写, 结构零改动, Sims4 可正常加载。
+  v3 改为:**重建整个目标 STBL** (结构正确, 其余 key/flags 原样) +
+    **正确的 DBPF relayout**:
+      - header 原样复制 (仅 index_offset@0x40 重算)
+      - 每个未编辑 resource 的 body 原字节逐字节复制 (不重压缩/不改内容)
+      - 仅目标 STBL 的新 body 替换;
+        目标之后的 body 顺移 delta, index entry offset 同步 +delta
+      - index entry 保留原始 32 字节 (type/group/inst/flags/reserved 原样),
+        只改受影响 offset 与被编辑 STBL 的 size
+      - comp_flag@0x3C / entry flags(压缩类型) 原样保留
+      - 绝对 index (文件末尾), index_offset 重算
+  验证:
+    [B-DIFF] 未编辑 resource 的 body 内容+metadata 逐字节一致
+    [VERI]   回读解码 — 目标 key 新文本, 未命中 key 原样
 
 映射列 (与 translation 输出一致):
   translation_id (形如 T_<hash>_g1) | new_text
@@ -119,33 +128,100 @@ def is_compressed(entry) -> bool:
     return bool(getattr(entry, "is_compressed", False))
 
 
-def surgical_patch(in_bytes: bytes, entry, new_stored: bytes):
-    """原位覆盖目标 STBL 区 [entry.offset, entry.offset+entry.size)。
-    约束: len(new_stored) <= entry.size, 否则抛错 (不重排)。"""
-    if len(new_stored) > entry.size:
-        raise ValueError(
-            f"新 STBL 压缩体积 {len(new_stored)} > 原 {entry.size}。"
-            f"MVP 仅支持原位缩短 (不移动 index/不重排)。换更短的文本或改用扩展模式。")
-    data = bytearray(in_bytes)
-    s = entry.offset
-    e = s + len(new_stored)
-    data[s:e] = new_stored
-    for i in range(e, s + entry.size):   # 变短部分补 0, 保持字节数/offset 不动
-        data[i] = 0
-    return bytes(data)
+def build_dbpf_relayout(raw: bytes, entries: list, edit_instance: int, new_body: bytes):
+    """正确的 DBPF 重排 (v3): 保留所有头部/index/metadata 原字节,
+    仅重排 body 区以容纳目标 STBL 的新长度。
+
+    原则:
+      - header 0x44 原样复制 (仅最后改 index_offset@0x40)
+      - 每个未编辑 resource 的 body **原字节逐字节复制** (不重压缩/不改内容)
+      - 被编辑的 STBL 用 new_body 替换
+      - 目标 STBL 之后的所有 body 顺移 delta; 其 index entry 的 offset 同步 +delta
+      - index entry 保留原始 32 字节 (type/group/inst/flags/reserved 原样),
+        只改受影响的 offset (段内字段) 与被编辑 STBL 的 size
+      - comp_flag@0x3C / 各 entry flags(压缩类型) 原样保留
+      - 绝对 index (在文件末尾), index_offset 重算
+
+    返回 (new_file_bytes, new_off_by_inst) 或抛错。"""
+    import struct as _st
+    # 原 index 位置 (绝对)
+    io = _st.unpack("<I", raw[0x40:0x44])[0]
+    cnt = _st.unpack("<I", raw[0x24:0x28])[0]
+    assert cnt == len(entries), "index count 与解析不一致"
+    # 读取每条 entry 的原始 32 字节 (按 index 顺序)
+    raw_entries = [raw[io + 4 + i * 32: io + 4 + i * 32 + 32] for i in range(cnt)]
+    for re in raw_entries:
+        if len(re) != 32:
+            raise ValueError("index entry 越界")
+    # body: 原 offset 排序 (保证 body 区按物理位置重排)
+    body_order = sorted(range(cnt), key=lambda i: entries[i].offset)
+    tgt_idx = next((i for i, e in enumerate(entries) if e.instance_id == edit_instance), None)
+    if tgt_idx is None:
+        raise ValueError("编辑目标 STBL 不在索引中")
+    first_off = min(e.offset for e in entries)
+    # header + pre-body 区 ([0, first_off)) 原样复制 (含 header, 使 len(out) 即真实 body 偏移)
+    out = bytearray(raw[:first_off])
+    orig_tgt_off = entries[tgt_idx].offset
+    new_off_by_inst = {}
+    for i in body_order:
+        e = entries[i]
+        if i == tgt_idx:
+            new_off_by_inst[e.instance_id] = (len(out), len(new_body))
+            out += new_body
+        else:
+            body = raw[e.offset:e.offset + e.size]
+            if len(body) != e.size:
+                raise ValueError(f"resource 0x{e.instance_id:016X} body 越界")
+            new_off_by_inst[e.instance_id] = (len(out), e.size)
+            out += body
+    new_index_off = len(out)
+    # 重建 index: 保留原始 32 字节, 更新受影响 offset/size
+    new_index = bytearray(4)  # 索引区 padding
+    for i in range(cnt):
+        re = bytearray(raw_entries[i])
+        # offset 字段的压缩标记 = 该 u32 的最高位 (bit31) = 第4字节(byte19) 的 bit7
+        highbit = raw_entries[i][19] & 0x80
+        ho, _ = new_off_by_inst[entries[i].instance_id]
+        _st.pack_into("<I", re, 16, (ho & 0x7FFFFFFF) | (highbit << 24))
+        if entries[i].instance_id == edit_instance:
+            _st.pack_into("<I", re, 20, len(new_body))
+        new_index += re
+    # 更新 header index_offset (out 已含 header @[0x44))
+    struct.pack_into("<I", out, 0x40, new_index_off)
+    return bytes(out) + bytes(new_index), new_off_by_inst
 
 
-def byte_diff_verify(orig: bytes, new: bytes, entry) -> bool:
-    """除目标 STBL body 区外, 其余必须逐字节一致。"""
-    if len(orig) != len(new):
-        return False
-    s, e = entry.offset, entry.offset + entry.size
-    for i in range(len(orig)):
-        if s <= i < e:
+def byte_diff_verify_resources(orig: bytes, new: bytes, edit_instance: int):
+    """v3 验证: 未编辑 resource 的 body 内容必须逐字节一致。
+    位置可偏移 (relayout), 但内容字节必须完全相同; 实例集合必须一致。"""
+    import struct as _st
+    def bodies_of(raw):
+        io = _st.unpack("<I", raw[0x40:0x44])[0]
+        cnt = _st.unpack("<I", raw[0x24:0x28])[0]
+        res = {}
+        for i in range(cnt):
+            base = io + 4 + i * 32
+            e = raw[base:base + 32]
+            if len(e) < 24:
+                continue
+            tid, gid, hi, lo, off, sz = _st.unpack("<IIIIII", e[:24])
+            b_off = off & 0x7FFFFFFF
+            b_sz = sz & 0x7FFFFFFF
+            inst = (hi << 32) | lo
+            res[inst] = (raw[b_off:b_off + b_sz], tid, gid, off & 0x80000000, sz & 0x80000000)
+        return res
+    bo = bodies_of(orig); bn = bodies_of(new)
+    if set(bn.keys()) != set(bo.keys()):
+        return False, f"inst 集合不一致: orig {len(bo)} vs new {len(bn)}"
+    for inst, (b, tid, gid, ch, sh) in bo.items():
+        if inst == edit_instance:
             continue
-        if orig[i] != new[i]:
-            return False
-    return True
+        nb, nptid, npid, nch, nsh = bn[inst]
+        if nb != b:
+            return False, f"resource 0x{inst:016X} body 内容不一致"
+        if (nptid, npid) != (tid, gid) or nch != ch or nsh != sh:
+            return False, f"resource 0x{inst:016X} metadata (tid/group/comp位) 变化"
+    return True, None
 
 
 # ---------- mapping ----------
@@ -300,65 +376,91 @@ def main() -> int:
     if len(to_patch) > 1:
         print(f"[WARN] MVP 预期单条, 实际命中 {len(to_patch)} 条 — 将全部应用")
 
-    # 应用
-    new_recs, applied = [], 0
+    # 命中 key (只需一个; 逐 key 原位手术)
+    hash_to_tid = {}
+    for tid in mapping:
+        h = tid_to_hash(tid)
+        if h is not None:
+            hash_to_tid.setdefault(h, []).append(tid)
+    existing = {kh for kh, _, _, _ in recs}
+    to_patch = [kh for kh in hash_to_tid if kh in existing]
+    if not to_patch:
+        print("[ERROR] mapping 无 key 命中 CHS STBL 现存 keyHash")
+        print(f"        现存 {len(existing)} 个 key 样例: " +
+              ", ".join(f"0x{h:08X}" for h in list(existing)[:5]))
+        return 1
+    print(f"[HIT ] 将修改 {len(to_patch)} 个 key: " +
+          ", ".join(f"0x{h:08X}" for h in to_patch))
+
+    # 重建整个 CHS STBL (全量, 正确的 STBL 结构; 其余 key 原样保留)
+    # 对每个命中 key 应用翻译, 未命中 key 保留原文本/flags
+    new_recs = []
+    applied = 0
     for kh, txt, flags, _ in recs:
         if kh in hash_to_tid:
-            new_txt = mapping[hash_to_tid[kh][0]]
-            if new_txt != txt:
+            nt = mapping[hash_to_tid[kh][0]]
+            if nt != txt:
                 applied += 1
+            new_recs.append((kh, nt, flags))
         else:
-            new_txt = txt
-        new_recs.append((kh, new_txt, flags))
+            new_recs.append((kh, txt, flags))
     if applied == 0:
         print("[ERROR] mapping 命中但文本与现有一致 (无实际变更)"); return 1
-
-        # 重建 STBL body; 压缩方式跟随原 STBL (保 compression 一致)
-    new_stbl_body = stbl_encode(new_recs)
-    if orig_compressed:
-        # 取最小 zlib 体积 (试 1..9), 尽量 <= 原体积以便原位写入
-        cands = sorted((zlib.compress(new_stbl_body, lv) for lv in range(1, 10)), key=len)
-        new_stored = cands[0]
-    else:
-        new_stored = new_stbl_body
-    # 原位写入要求新压缩体积 <= 原体积 (剩余区补 0)
-    if len(new_stored) > chs.size:
-        print(f"[ERROR] 新 STBL 最小体积 {len(new_stored)}B > 原 {chs.size}B, 无法原位写入。")
-        print(f"        请换更短的译文 (需压缩后 <= {chs.size}B), 或确认该 key 在新包中文本更短。")
-        return 1
-    # 补齐到原体积 (尾部 0 填充, zlib 解压容忍尾部数据) → 保持长度/offset 不变
-    new_stored = new_stored + b"\x00" * (chs.size - len(new_stored))
-    print(f"[OK  ] STBL 重建: {len(recs)} keys, 应用 {applied} 条, 压缩后 {len(new_stored)}B(=原 {chs.size}B, 已原位对齐)")
-
-    # 外科手术写入 (长度约束 + 不重排)
     try:
-        new_file = surgical_patch(raw, chs, new_stored)
+        new_body_stored = stbl_encode(new_recs)
     except ValueError as e:
-        print(f"[ERROR] 外科手术长度约束不满足: {e}")
-        return 1
+        print(f"[ERROR] STBL 编码失败: {e}"); return 1
+    # 存储方式跟随原 STBL: 压缩->zlib, raw->raw (保持压缩表示一致)
+    if orig_compressed:
+        cands = sorted((zlib.compress(new_body_stored, lv) for lv in range(1, 10)), key=len)
+        new_body = cands[0]
+        print(f"[OK  ] STBL 重建: {len(new_recs)} keys, 应用 {applied} 条, "
+              f"解压后 {len(new_body_stored)}B / 存储(zlib) {len(new_body)}B (原 {chs.size}B)")
+    else:
+        new_body = new_body_stored
+        print(f"[OK  ] STBL 重建: {len(new_recs)} keys, 应用 {applied} 条, "
+              f"新 body(raw) {len(new_body)}B (原 {chs.size}B)")
+
+    # 正确的 DBPF 重排: 装下新长度 STBL, 其余 resource 原字节复制
+    try:
+        new_file, new_offs = build_dbpf_relayout(raw, entries, chs.instance_id, new_body)
+    except (ValueError, AssertionError) as e:
+        print(f"[ERROR] 重排失败: {e}"); return 1
 
     Path(out_path).write_bytes(new_file)
     print(f"[SAVE] 已写入: {out_path} ({len(new_file)} 字节)")
 
-    # 字节级 diff 验证: 目标区外必须逐字节一致
-    if not byte_diff_verify(raw, new_file, chs):
-        print("[B-DIFF] FAIL: 目标 STBL 区之外有字节被改动 — 结构被破坏, 拒发")
-        return 1
-    print(f"[B-DIFF] PASS: 除目标 STBL 区 [{chs.offset}, {chs.offset + chs.size}) 外, "
-          f"其余 {len(raw) - chs.size} 字节与原文件逐字节一致")
+    # 验证1: 未编辑 resource 的 body 内容逐字节一致 + metadata(comp位)一致
+    ok, why = byte_diff_verify_resources(raw, new_file, chs.instance_id)
+    if not ok:
+        print(f"[B-DIFF] FAIL: {why} — 结构被破坏, 拒发"); return 1
+    print(f"[B-DIFF] PASS: 除目标 STBL 外, 其余 {len(entries)-1} 个 resource 的 body 内容/元数据逐字节一致")
 
-    # 回读验证
+    # 验证2: 回读解码确认
     try:
         vraw, vidx = read_index_only(out_path)
         vchs = find_chs_stbl(vidx.entries)
-        if vchs:
-            vrecs = stbl_decode(_z_or_raw(body_of(vraw, vchs)))
-            n_patched = sum(1 for kh, txt, _, _ in vrecs if kh in hash_to_tid)
-            print(f"[VERI] 回读: CHS STBL keys={len(vrecs) if vrecs else 0}, patched={n_patched}")
-            if not vrecs or n_patched == 0:
-                print("[VERI] FAIL: 回读未发现修改"); return 1
-        else:
+        if not vchs:
             print("[VERI] FAIL: 回读未找到 CHS STBL"); return 1
+        vrecs = stbl_decode(_z_or_raw(body_of(vraw, vchs)))
+        if not vrecs:
+            print("[VERI] FAIL: 回读 STBL 无法解码"); return 1
+        vmap = {kh: t for kh, t, _, _ in vrecs}
+        ok_all = True
+        for kh in to_patch:
+            expect = mapping[hash_to_tid[kh][0]]
+            got = vmap.get(kh)
+            ok = (got == expect)
+            ok_all &= ok
+            print(f"     {('OK ' if ok else 'FAIL')} 0x{kh:08X}: {got!r} (期望 {expect!r})")
+        # 未命中 key 也必须原样
+        for kh, txt, _, _ in recs:
+            if kh not in hash_to_tid and vmap.get(kh) != txt:
+                ok_all = False
+                print(f"     FAIL 未命中 key 0x{kh:08X} 被改动: {vmap.get(kh)!r} != {txt!r}")
+        if not ok_all:
+            print("[VERI] FAIL"); return 1
+        print(f"[VERI] PASS: 回读 {len(vrecs)} keys, 改造 key 已写入, 未命中 key 原样")
     except Exception as e:
         print(f"[VERI] 回读异常: {e}"); return 1
 
