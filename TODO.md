@@ -78,7 +78,14 @@ offset 高位/相邻字段有关联, 需根据核实后的布局填上 size。
 - [x] `scripts/patch_stbl.py` MVP 已开发 + fixture 回归通过
       (CHS locale 0x01 只改目标 key; EN locale 0x00 / 其他 resource 原样; copy-on-write)
 - [x] `--inspect` 只读模式 (列出 locale 0x01 STBL 全部 keyHash + TID)
-- [ ] Windows 真包单条测试: Embracing Faces 改 1 字符串 → 游戏加载 + 显示中文
+- [x] Windows 真包单条测试 #1: `Left->左` 生成 CHS_test.package → **游戏报“文件损坏”**
+      → 根因: v1 build_dbpf 重建整个 package 破坏结构 (置零 index flags/reserved、
+        剥掉压缩标记(从 offset>>31 读恒0, 实应读 entry.is_compressed)、移除 body padding、
+        重算绝对 index offset 可能破坏相对 index)
+- [x] patch_stbl **v2 修复**: 改原位外科手术 copy-on-write — 1:1 复制原文件字节,
+      仅原位覆盖目标 STBL body 区 (新压缩试 zlib1..9 取最小, pad 到 == 原体积,
+      offset/size/index 全不动); [B-DIFF] 机械保证目标区外逐字节一致; fixture 全过
+- [ ] Windows 真包单条测试 #2: 用 v2 重新生成 CHS_test.package → 游戏加载显示中文
 - [ ] 保留: 原包备份 / 未修改 resource / 其他 locale STBL (已验证)
 - [ ] 暂不做: 全量 1968 / 全扫 Mods / 批处理
 - [ ] 已知限制: DBPF index entry flags/reserved MVP 重建置 0 (原通常为 0)
