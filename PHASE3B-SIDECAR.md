@@ -126,7 +126,7 @@ transitively 传遍 vendored s4pi 工程)。
 `bin\Debug\CreateAssemblyVersion` (生成 Properties\AssemblyVersion.cs), 仅 Debug 可命中;
 Release 会因找不到该 exe 而失败。Debug 对构建工具已足够。
 
-### 一键构建脚本 (固化, 无需手动传参)
+### 一键构建脚本 (固化; 唯一需要的命令)
 ```
 cd D:\projects\sims4_trans
 ```
@@ -136,20 +136,17 @@ git pull
 ```
 powershell -ExecutionPolicy Bypass -File sidecar_builder\build_sidecar_builder.ps1
 ```
-脚本内部固定: Configuration=Debug, Platform=AnyCPU, SolutionDir=<repo>\vendor\;
-FrameworkPathOverride 交给 NuGet 包自动解析 (不硬编码机器相关缓存路径)。
+脚本自动完成 (Windows MSBuild 18.4 实测):
+1. 用 vswhere 定位最新带 Microsoft.Component.MSBuild 的 MSBuild (不在 PATH 也能找到; 找不到明确 fail)
+2. Restore (恢复 SidecarBuilder 的 PackageReference)
+3. 动态解析 net40 reference assemblies:
+   `%USERPROFILE%\.nuget\packages\microsoft.netframework.referenceassemblies.net40\1.0.3\build\.NETFramework\v4.0`
+   (遵守 NUGET_PACKAGES; 不硬编码用户名/本机绝对路径)
+4. 把 `FrameworkPathOverride=<net40路径>` 作为【全局 MSBuild property】与 SolutionDir 一起传给 Build → 传播到所有 vendored ProjectReference child (旧式 csproj 不靠 PackageReference 自动传播, 必须全局传)
+5. 自动编 CreateAssemblyVersion (Debug/AnyCPU/FrameworkPathOverride) → 自动编 5 个 vendored s4pi 工程 → 自动编 SidecarBuilder
 产物: `sidecar_builder\bin\Debug\SidecarBuilder.exe`
 
-### 手动两步 (等价, 不推荐)
-```
-cd D:\projects\sims4_trans\sidecar_builder
-```
-```
-msbuild SidecarBuilder.csproj /t:Restore /p:SolutionDir=D:\projects\sims4_trans\vendor\
-```
-```
-msbuild SidecarBuilder.csproj /p:SolutionDir=D:\projects\sims4_trans\vendor\
-```
+> 不需要用户: 手工设 PATH / 手工传 FrameworkPathOverride / 手工传 SolutionDir / 手工先编 CreateAssemblyVersion。
 
 ---
 
