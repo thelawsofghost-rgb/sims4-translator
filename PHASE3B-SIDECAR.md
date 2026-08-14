@@ -114,8 +114,14 @@ fixture 回归: `scripts/_tibo_fixture.py` 生成含作者+包标题+3个 pose �
   已本地验证: pose_display_name→TRANSLATE, 作者/包标题→KEEP(override), 孤立 J→UNMAPPED。
 
 编译 (Windows, .NET Framework 4.0):
+已内建 MSB3644 修复: 工程引用 Microsoft.NETFramework.ReferenceAssemblies 1.0.3
+(自包含 net40 reference assemblies, 无需装 .NET 4.0 Developer Pack; FrameworkPathOverride
+沿 ProjectReference 传给 s4pi 工程一并生效)。先 restore 再 build, 两步:
 ```
 cd D:\projects\sims4_trans\sidecar_builder
+```
+```
+msbuild SidecarBuilder.csproj /t:Restore /p:Configuration=Release
 ```
 ```
 msbuild SidecarBuilder.csproj /p:Configuration=Release
