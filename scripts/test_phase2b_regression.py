@@ -326,6 +326,27 @@ def count_miss_hit(rows, cache):
     return n_miss, n_hit
 
 
+def test_normalize_model_output():
+    """normalize_model_output(): 只剥行首 Target: 前缀, 不做全局删除。"""
+    print("\n== 9. normalize_model_output() 行首 Target 前缀清洗 ==")
+    n = P.normalize_model_output
+    cases = [
+        ("Target: 坐姿", "坐姿"),
+        ("Target：抽烟", "抽烟"),
+        ("target: 看向上方", "看向上方"),
+        ("TARGET：待机", "待机"),  # case-insensitive
+        ("My Target: Pose", "My Target: Pose"),  # 非开头 -> 不误删
+        ("TargetPractice", "TargetPractice"),  # 非独立词 -> 不误删
+        ("   Target: 前导空格", "前导空格"),  # 前导空白 \s* 也剥
+        ("", ""),
+        (None, None),
+    ]
+    for src, want in cases:
+        got = n(src)
+        check(f"normalize({src!r}) -> {want!r}", got == want,
+              f"got={got!r}")
+
+
 # ---------------- 入口 ----------------
 def main():
     print("Phase 2B regression + cache/resume 验证")
@@ -338,6 +359,7 @@ def main():
     test_cache_resume()
     test_100phrase_simulation()
     test_ollama_client_no_proxy()
+    test_normalize_model_output()
     print(f"\n==== 结果: PASS={len(PASS)}  FAIL={len(FAIL)} ====")
     if FAIL:
         print("失败项:", *FAIL, sep="\n  - ")

@@ -334,6 +334,22 @@ def rebuild(segs: list, resolved: dict):
     return "".join(out)
 
 
+# 行首 "Target:" 前缀剥离 (确定性后处理, 不调 LLM)。
+# Ollama 在 JSON Schema 输出时偶把 prompt 里的 "Target: <原文>" 语义带进 zh 值前,
+# 这里只匹配译文开头, 允许大小写不敏感 + 全/半角冒号, 不允许全局删除 (只剥开头)。
+_TARGET_PREFIX_RE = re.compile(r"^\s*target\s*[:：]\s*", re.IGNORECASE)
+
+
+def normalize_model_output(text):
+    """清洗模型输出/缓存译文: 剥掉行首 Target:/Target：/target:/target： 前缀。
+
+    仅匹配译文开头, 不碰正文里的 "Target" 词 (如 "My Target: Pose" 不应被误删)。
+    """
+    if not text:
+        return text
+    return _TARGET_PREFIX_RE.sub("", str(text))
+
+
 def materialize_from_cache(text: str, mode: str, cache) -> (str, str):
     """从 cache 物化一行 PARTIAL/FULL 的完整译文 (materialized output)。
 
@@ -357,7 +373,8 @@ def materialize_from_cache(text: str, mode: str, cache) -> (str, str):
         hit = cache.get(fp)
         if not hit:
             return None, "PENDING"
-        resolved[p["key"]] = hit["translation"]
+        # 确定性后处理: 剥离行首 Target: 前缀 (缓存里可能存了脏值, 0 LLM 重新清洗)
+        resolved[p["key"]] = normalize_model_output(hit["translation"])
     translation = rebuild(segs, resolved)
     translation = restore_protected(segs, translation)
     if translation.strip():
@@ -705,7 +722,8 @@ class OllamaTranslator(Translator):
             if isinstance(item, dict) and item.get("id") is not None:
                 by_id[str(item.get("id"))] = str(item.get("zh") or "").strip()
         keys = [k for k, _ in items]
-        zhs = [by_id.get(str(k), "") for k, _ in items]
+        # 确定性后处理: 剥离行首 Target: 前缀, 再写 cache (fresh model result)
+        zhs = [normalize_model_output(by_id.get(str(k), "")) for k, _ in items]
         # 空/缺太多 -> malformed (交由上层 retry 该批)
         if sum(1 for z in zhs if z) < len(zhs) * 0.5:
             return keys, zhs, "malformed"
