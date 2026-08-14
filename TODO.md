@@ -42,6 +42,48 @@ offset 高位/相邻字段有关联, 需根据核实后的布局填上 size。
 - [ ] translation_cache.json
 - [ ] 翻译报告
 
+## Phase 3A: 中文 STBL locale 取证台账 (READ-ONLY, 不写 package)
+
+### HARD FACT (已二进制/实测锁定, 不可推翻)
+0. **Sims4 locale byte 官方确认 (CHS/CHT)**: `0x01 = 简体中文 CHS`, `0x02 = 繁体中文 CHT`
+   (Dorothy 官方确认, 与 WW CHS 包 `0x01`/`0x02` 交叉验证一致)
+   → 中文写回 = 修改 **locale 0x01** 的现有 STBL 实例 (Pose 包已预置全套 locale 变体):
+   **已升级为 HARD FACT** (原 LIKELY: 已存在 18 变体 → 改现有而非新增)
+1. **canonical STBL v5 parser** (`scripts/map_pose_texts.py::parse_stbl`) 已确认无 off-by-one;
+   自写 probe 版本 off-by-one (offset 8 vs 7) 已删除, probe 改为复用 canonical。
+   WW 权威验证: count 读 `<Q`@offset7 = 0x1A64 = **6756**。fail-fast 全过。
+2. **WW CHS** (`WickedWhims_LP_CHS_*.package`):
+   - locale `0x01` / `0x02` 两实例
+   - 各 **6756 keys**, payload/内容 **identical** (均为中文)
+   - inst: `012E440D74EB747B` / `022E440D74EB747B`
+3. **Embracing Faces** 18 个 STBL locale 变体, 各 **5 keys**, 内容 identical (纯英文占位):
+   locales = `0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x0B,0x0C,0x0D,0x0E,0x0F,0x11,0x12,0x13,0x15`
+   共享字符串块 `4EACCF17C8B091` (仅最高字节不同)
+4. **simkatu** 18 个 STBL locale 变体, 各 **52 keys**, 内容 identical (纯英文占位), 共享块 `C53AB22366DA6C`
+5. **Phase 3A 全程 READ-ONLY** — 不写 package, 不修改 Pose, 不硬编码 locale
+6. STBL locale 码 = instance_id **最高 1 字节** (bits 56-63), 其余 56 位 = 共享字符串块 hash
+   (`scripts/map_pose_texts.py::locale_of_stbl` 实测)
+7. `LOCALE_BYTE_KNOWN` 保留为空 — 宁 UNKNOWN 不臆测语言名
+
+### LIKELY (待官方 locale 映射确认后升级为 HARD FACT)
+- 若官方 CHS locale byte **已存在**于 18 个 Pose STBL 变体中,
+  则写回应**修改对应现有 STBL**, 而非新增资源。
+  等官方 locale 映射确认后升级为 HARD FACT。
+
+### PENDING (进行中, READ-ONLY)
+- [ ] ~~扫描官方 Strings_CHS_CN/Strings_CHT_CN 包做交叉验证~~
+      **已由 Dorothy 官方确认 locale 映射 (0x01=CHS, 0x02=CHT), 无需再扫描官包**
+
+### Phase 3B (写回, 单条 MVP, 进行中)
+- [ ] `scripts/patch_stbl.py` MVP:
+      输入 package 路径 + output 路径 + mapping.csv
+      打开 DBPF → 找 STBL → locale 0x01 → 读 key → 按 mapping 改文本 → 另存新包 (不覆盖)
+- [ ] 保留: 原包备份 / 未修改 resource / 其他 locale STBL
+- [ ] 单条测试: Embracing Faces 只改 1 字符串 → 验证游戏加载 + 显示中文
+- [ ] 暂不做: 全量 1968 / 全扫 Mods / 批处理
+
+---
+
 ## P4: Phase 3 (写回)
 
 - [ ] package 备份
