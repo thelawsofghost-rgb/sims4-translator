@@ -348,14 +348,16 @@ def rebuild(segs: list, resolved: dict):
 
 # 行首 "Target:" 前缀剥离 (确定性后处理, 不调 LLM)。
 # Ollama 在 JSON Schema 输出时偶把 prompt 里的 "Target: <原文>" 语义带进 zh 值前,
-# 这里只匹配译文开头, 允许大小写不敏感 + 全/半角冒号, 不允许全局删除 (只剥开头)。
-_TARGET_PREFIX_RE = re.compile(r"^\s*target\s*[:：]\s*", re.IGNORECASE)
+# 模型也可能输出中文 "目标：<原文>"。这里只匹配译文开头 (仅剥前缀, 不全局删除),
+# 允许 target|目标 + 大小写不敏感 + 全/半角冒号。
+_TARGET_PREFIX_RE = re.compile(r"^\s*(?:target|目标)\s*[:：]\s*", re.IGNORECASE)
 
 
 def normalize_model_output(text):
-    """清洗模型输出/缓存译文: 剥掉行首 Target:/Target：/target:/target： 前缀。
+    """清洗模型输出/缓存译文: 剥掉行首 target:/目标： 前缀 (含全/半角冒号)。
 
-    仅匹配译文开头, 不碰正文里的 "Target" 词 (如 "My Target: Pose" 不应被误删)。
+    仅匹配译文开头, 不碰正文里的 "Target" 词 (如 "My Target: Pose" 不应被误删),
+    也不碰正文里的"目标"词 (如 "目标管理" 不应被误删)。
     """
     if not text:
         return text

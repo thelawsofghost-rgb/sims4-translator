@@ -335,8 +335,13 @@ def test_normalize_model_output():
         ("Target：抽烟", "抽烟"),
         ("target: 看向上方", "看向上方"),
         ("TARGET：待机", "待机"),  # case-insensitive
+        ("目标：sim smoking", "sim smoking"),  # 中文 Target 前缀也剥
+        ("目标: 抽烟", "抽烟"),  # 中文 + 半角冒号
+        ("目标:抽烟", "抽烟"),  # 中文无空格
+        ("Target: 坐姿", "坐姿"),
         ("My Target: Pose", "My Target: Pose"),  # 非开头 -> 不误删
         ("TargetPractice", "TargetPractice"),  # 非独立词 -> 不误删
+        ("目标管理", "目标管理"),  # 正文"目标"词 -> 不误删
         ("   Target: 前导空格", "前导空格"),  # 前导空白 \s* 也剥
         ("", ""),
         (None, None),
