@@ -211,3 +211,40 @@ bin\Debug\SidecarBuilder.exe \
 - KEEP 1 不动
 - UNMAPPED_UNCERTAIN 17 不动
 
+
+---
+
+## 🔬 Forensic: 为什么 s4pi SaveAs 产物游戏拒收 (证据链, 2026-08-15)
+
+**现状**: 自动 s4pi COMPLETE-STBL sidecar — VERIFY=PASS + 独立 AUDIT=PASS, 但游戏加载 FAIL;
+人工 S4S sidecar 游戏加载 OK。翻译文本不同(raw payload 不必相同); 差异在 container/index/metadata。
+
+**工具**: `scripts/dbpf_forensic.py` (只读) 输出 raw-byte/header/index/STBL 层逐字段六进制对照,
+分类 [PAYLOAD]/[CONTAINER]/[S4S-WROTE]/[S4SPI-WROTE]。用法见 %HEAD%。
+
+### 已核 vendored s4pi `Package.SaveAs` 行为 (root cause 候选, 非猜测):
+- 先 `w.Write(header)` 整体写 96-byte header (来自 source 打开时拷贝), 再只 patch:
+  - count @0x24 (setIndexcount: 写 pos 36)
+  - index_size @0x2C (setIndexsize: 写 pos 44)
+  - index_offset @0x40 (setIndexposition: 先写 0 到 pos 40(0x28), 再写 indexpos 到 pos 64(0x40))
+  - unused4 @0x3C 强制 = 3 (setUnused4)
+- **indexType 自动判并 = 对单 STBL 包恒为 0x07**:
+  `(InstHigh 唯一<=1 ? 0x04) | (Group 唯一<=1 ? 0x02) | (Type 唯一<=1 ? 0x01)` → 0x07
+- `PackageIndex.Save` 对置位字段做【类型去重】(值写一次到 index header, 每 entry 行省略该字段,
+  只写剩余字段: inst_low + Chunkoffset + Filesize + Memsize 等 16B/entry)
+- 压缩标记: 只当 `value.Length < Memsize` 才置 `Compressed=0x5A42`(ZB/zlib), Filesize=压缩长;
+  未压缩则 `Compressed=0x0000, Filesize=Memsize`
+
+### 头号嫌疑 (待 forensic 原始字节证实):
+**s4pi 输出 indexType=0x07 的 type-bit 去重索引 (s3pi 遗留格式), 而 TS4 游戏 loader 与 S4S
+期望 flat 32B/entry 索引 (indextype=0x0000)。** dbpf_fast (canonical TS4 parser) 读 flat 索引。
+若 forensic 的 INDEX_TYPE 显示 A(S4S)=0x00000000 flat 而 B(s4pi)=0x00000007 去重 → 实锤。
+
+另两个待核疑点:
+1. unused4 被 s4pi 强制 =3, S4S 的 golden 若为不同值 → CONTAINER 差异
+2. minor 被 s4pi 归一为 1 (CheckHeader 要求), S4S 若写其它 minor → 差异
+
+### 决策门 (用户锁定):
+**forensic 若不能给出有证据的、明确字段级修复 → 不再维护自制 s4pi writer。**
+下一主线 = S4S-compatible serializer (复用 S4S 自身 Save 程序集/API/DLL, 或调用其 serializer)。
+冻结: Tibo / 10/50/659 / Animation / s4pi 参数猜测 / 翻译与 mapping 层不动 (mapping+COMPLETE-STBL 保留)。

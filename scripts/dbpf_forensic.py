@@ -127,6 +127,19 @@ def dump_pkg(tag, p, cfg):
     # index
     icount, ioff, isize, iraw = read_index_raw(p)
     print(f"INDEX count={icount} offset=0x{ioff:X} size={isize}")
+    # index 首个 uint32 = indextype; 位 1/2/4 表示 Type/Group/InstHigh 去重 (s3pi 遗留 type-bit 格式)
+    if isize >= 4:
+        indextype = struct.unpack_from("<I", iraw, 0)[0]
+        dedup = []
+        if indextype & 0x01: dedup.append("Type")
+        if indextype & 0x02: dedup.append("Group")
+        if indextype & 0x04: dedup.append("InstHigh")
+        dedup_label = "|".join(dedup) if dedup else ""
+        if dedup:
+            print(f"INDEX_TYPE = 0x{indextype:08X} (去重: {dedup_label})")
+        else:
+            print(f"INDEX_TYPE = 0x{indextype:08X} (flat, 无去重)")
+        print(f"INDEX_HEADER_RAW = {iraw[:min(16,isize)].hex(' ')}")
     ents = parse_entries(iraw, icount)
     print(f"RESOURCE_COUNT = {len(ents)}")
     for i, e in enumerate(ents):
