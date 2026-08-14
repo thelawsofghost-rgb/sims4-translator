@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """只读诊断: 定位全量后模型阶段失败的 phrase / translation_id。
 
-原理 (与生产一致):
-  - 失败 phrase 在 _on_done 里被拒 (空或 [ERR 开头) -> 不写 cache、不写 phrase_res。
-  - 所以对每行, "需要的全部需模型 phrase" - "cache 里该行已存的 phrase" = 失败 phrase。
-  - 用 cache 反查: fingerprint(source_phrase) 是否命中, 命中的是成功项。
+原理 (与生产完全一致):
+  - 失败 phrase 在 _on_done 里被拒 (空或 [ERR 开头) -> 不写 cache。
+  - fingerprint 由 (source_phrase, glossary_hint, context) 决定; 生产用
+    load_contexts() 构造行级 ctx, 复用生产同名函数保证 fingerprint 一致。
+  - 对每个 FULL/PARTIAL 行的需模型 phrase: cache.get(fp) miss -> 失败。
 
-不改任何 correctness 代码, 只读 output 的 done.csv + cache。
+不改任何 correctness 代码, 只读 output 的 done.csv + contexts.csv + cache。
 
 用法:
   python scripts/diag_failed.py D:\projects\sims4_trans\output
 
 输出:
   - 失败 phrase 总数
-  - 每个失败: translation_id | source phrase | 所属行 source_text 片段
+  - 每个失败: translation_id | source phrase | 所在行前 60 字
 """
 import sys
 import csv
@@ -33,42 +34,51 @@ def main():
         print(f"[FATAL] 未找到 {done_path}")
         return 1
 
+    # 生产同款 ctx 聚合 (复用 load_contexts)
+    ctx_map = P.load_contexts(out_dir)
+
     rows = []
     with open(done_path, encoding="utf-8-sig", newline="") as f:
         for r in csv.DictReader(f):
             rows.append(r)
 
     cache = PhraseCache(out_dir)
-
     failed = []  # (tid, source_phrase, src_text)
+    needcheck = 0
     for r in rows:
-        mode = (r.get("translate_mode") or r.get("decision") or "")
-        # 只扫描实际进引擎的行 (FULL/PARTIAL); KEEP/APPROVED 不进引擎, 其 phrase 不写库
+        mode = (r.get("translate_mode") or r.get("decision") or "").strip()
         if mode not in ("FULL_TRANSLATE", "PARTIAL_TRANSLATE"):
-            continue
+            continue  # KEEP/APPROVED 不进引擎, 其 phrase 不写库
         tid = r.get("translation_id", "")
         text = P.norm_text(r.get("source_text", ""))
+        ctx = ctx_map.get(tid, [])
+        ctx_str = " | ".join(ctx[:3]) if ctx else ""
         segs, sem = P.split_semantic_spans(text)
         gloss, pending = P.glossary_resolve(segs)
         for p in pending:
             sp = p["t"].strip()
             if not sp:
                 continue
-            fp = build_fingerprint(source_phrase=sp)
+            needcheck += 1
+            fp = build_fingerprint(
+                source_phrase=sp,
+                glossary_hint=p.get("gloss_hint", ""),
+                context=ctx_str,
+            )
             if not cache.get(fp):
-                # 该 phrase 无 cache 项 -> 成功时必写库, 未写则失败
                 failed.append((tid, sp, text))
-
     cache.close()
 
-    print(f"[done] 总行 {len(rows)}, 识别失败 phrase = {len(failed)}")
+    print(f"[done] 总行 {len(rows)}, 需模型 phrase 检查 {needcheck}, 识别失败 phrase = {len(failed)}")
     print("\n=== 失败 phrase 明细 (tid | failed source phrase | 所在行前60字) ===")
     for tid, sp, src in failed:
         print(f"- {tid:14s} | {sp!r}")
         print(f"    src: {src[:60]!r}")
     print(f"\n失败 phrase 合计 = {len(failed)}")
-    if failed:
-        print("\n[需处理] 这些 phrase 未写入 cache, 需单独重翻(可忽略 --force 单独跑这少数几行)。")
+    if failed == 0:
+        print("\n[OK] 无失败 phrase, cache 完整, 可进 QA。")
+    else:
+        print("\n[需处理] 这些 phrase 未写入 cache。可用 --only-id <真实tid> 单独重翻(见 --only-id 支持)。")
     return 0
 
 
