@@ -12,9 +12,10 @@
 - inplace 尾部补零           -> 游戏拒绝 (STRUCT PASS 但 loader 不接受)
 - test5 strict 等长(零补零零重排) -> 游戏仍拒绝
 
-**test5 是"纯 4 字节原位 hex 编辑"**: 原包 vs test5 输出,除 CHS STBL `Left`->`左␣`
+**test5 是"纯 4 字节原位 hex 编辑"**: 原包 vs test5 输出,除 CHS STBL `Left`->`左␣`(左+空格)
 的字节 47-50 (4c656674 -> e5b7a620) 外,其余逐字节一致 (文件大小 644=644, index_offset 512=512,
 所有 entry offset/size/flags/reserved 不变)。游戏仍无法启动。
+⚠️ golden 阶段测试文本改用 `左A`(等长 4B,避免 s4pe 对尾空格 trim 的不确定性)。
 => 结论: 问题不在 DBPF 书签/offset/体积/补零。必然在 STBL 资源本身的某种语义/元数据,
    或包内存在配套的校验/哈希资源 (real 包有 8 个非 STBL 资源,需重点核查)。
 
@@ -22,11 +23,13 @@
 1. 用 s4pe GUI(或 s4pi CLI)对原始包副本做同一次修改:
    - package: `Embracing Faces Meme Pose by t0nischwartz.package`
    - target : STBL locale=0x01, instance=0x014EACCF17C8B091, key=0xFDD36EF2
-   - edit   : `Left` -> `左 `(左+ASCII空格, 与 test5 完全一致)
+   - edit   : `Left` -> `左A` (左+ASCII 'A', 4 字节 UTF-8, 与原始 Left 等长;
+              不用'左+空格'以避免 s4pe GUI 可能 trim 尾空格的不确定性)
    - 输出 golden package
-2. 第一关: golden 单独放 Mods,看 Sims4 能否启动。
-   - golden 也不能启动 => 问题可能在 STBL/key 修改方式或资源语义/测试假设,不在我们的 writer。
-   - golden 能启动     => 我们的 writer 必然漏了某个结构/元数据。
+2. 第一关 (先于一切 diff): golden 单独放 Mods,看 Sims4 能否启动。
+   - golden 不能启动 => 问题在 STBL/key 修改方式或资源语义/测试假设,不在我们的 writer。
+     → 转查修改 locale=0x01 STBL / 该资源本身的加载语义 (含 8 个非 STBL 资源是否配套校验/哈希)。
+   - golden 能启动     => 我们的 writer 必然漏了某个结构/元数据,再逐字段/逐字节对照。
 3. 若 golden 能启动: original vs golden、test5 vs golden 完整二进制/结构比较
    (header/index/body size 之外,把 s4pi 保存后实际变化的所有字段全部列出)。
 
