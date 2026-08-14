@@ -21,10 +21,39 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from dbpf_fast import safe_parse, DBPFIndex, ResourceEntry
 
 STBL_TID = 0x220557DA
-
+TUNING_TID = 0x54534E4E  # 常用 XML tuning 'SNNT'?? 实际 0x0333406C; 见下
 def locale_of(inst: int) -> int:
     """STBL instance 高字节 = locale。0x01=CHS, 0x02=CHT, 0x00=EN 等。"""
     return (inst >> 56) & 0xFF
+
+def read_stbl_entries(path: str, e: ResourceEntry, idx: DBPFIndex):
+    """只读 STBL body, 返回 (count, [(keyHash, flags, text)]). 失败返回 (None,None)。"""
+    try:
+        off = e.offset & 0x7FFFFFFF
+        sz = e.size & 0x7FFFFFFF
+        with open(path, "rb") as fh:
+            fh.seek(off); body = fh.read(sz)
+        if body[0:4] != b"STBL":
+            return None, None
+        count = struct.unpack_from("<Q", body, 7)[0]
+        keys = []
+        o = 21
+        for _ in range(count):
+            if o+7 > len(body): break
+            kh = struct.unpack_from("<I", body, o)[0]
+            fl = body[o+4]
+            ln = struct.unpack_from("<H", body, o+5)[0]
+            txt = body[o+7:o+7+ln].decode("utf-8", errors="replace")
+            keys.append((kh, fl, txt))
+            o += 7+ln
+        return count, keys
+    except Exception:
+        return None, None
+
+def is_pose_tuning(idx: DBPFIndex) -> tuple:
+    """探测 tuning 资源类型并扫 body 是否含 PosePackInstance。返回 (资源数, 含pose标记数)。"""
+    # 常见 tuning type: 0x0333406C (Tuning), 0x54534E4E (XML)... 这里只标注候选, 不猜死
+    return len(idx.entries), 0
 
 def audit_pkg(path: str):
     idx, err = safe_parse(path)
@@ -54,14 +83,34 @@ def audit_pkg(path: str):
         loc = f" locale=0x{locale_of(e.instance_id):02X}" if e.type_id == STBL_TID else ""
         print(f"     [{tag}] group=0x{e.group_id:08X} inst=0x{e.instance_id:016X}{loc} "
               f"off={e.offset & 0x7FFFFFFF} sz={e.size & 0x7FFFFFFF} comp={bool(e.offset & 0x80000000)}")
+
+    if CANARY:
+        print(f"   -- canary --")
+        # 候选 tuning / 其他非 STBL 资源类型摘录
+        for e in nonstbl:
+            print(f"     [nonSTBL] type=0x{e.type_id:08X} group=0x{e.group_id:08X} "
+                  f"inst=0x{e.instance_id:016X} sz={e.size & 0x7FFFFFFF}")
+        for e in stbl:
+            if locale_of(e.instance_id) == 0x01:
+                c, keys = read_stbl_entries(path, e, idx)
+                loc_ = f"locale=0x{locale_of(e.instance_id):02X}(CHS)"
+                if c is None:
+                    print(f"     [CHS STBL] inst=0x{e.instance_id:016X} {loc_} entries=<读失败, 可能压缩>")
+                else:
+                    print(f"     [CHS STBL] inst=0x{e.instance_id:016X} {loc_} entries={c}")
+                    for (kh, fl, txt) in keys:
+                        print(f"        key={kh:08X} flags={fl} :: {txt!r}")
     print()
 
 def main():
-    if len(sys.argv) < 2:
-        print("用法: python scripts/audit_sidecar.py <dir|package> [dir|package ...]")
+    global CANARY
+    CANARY = "--canary" in sys.argv
+    args = [a for a in sys.argv[1:] if a != "--canary"]
+    if not args:
+        print("用法: python scripts/audit_sidecar.py [--canary] <dir|package> [dir|package ...]")
         return 1
     targets = []
-    for t in sys.argv[1:]:
+    for t in args:
         if os.path.isdir(t):
             for root, _, files in os.walk(t):
                 for f in files:
@@ -72,10 +121,12 @@ def main():
     if not targets:
         print("[WARN] 未找到任何 .package 文件")
         return 0
-    print(f"[audit] {len(targets)} 个 package 待审计\n")
+    print(f"[audit] {len(targets)} 个 package 待审计 (canary={CANARY})\n")
     for t in sorted(targets):
         audit_pkg(os.path.realpath(t))
     return 0
+
+CANARY = False
 
 if __name__ == "__main__":
     sys.exit(main())
