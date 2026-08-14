@@ -205,6 +205,10 @@ def scan_package(path: str) -> dict:
         "keep_count": 0,
         "unmapped_uncertain_count": 0,
         "invariant_ok": 0,
+        "player_visible_structural_ref_count": 0,
+        "unique_player_visible_ref_count": 0,
+        "resolved_player_visible_ref_count": 0,
+        "unresolved_player_visible_ref_count": 0,
         "STBL_version": "",
         "compression_state": "",
         "non_ascii_source_present": 0,
@@ -273,6 +277,7 @@ def scan_package(path: str) -> dict:
     row["PosePackInstance_count"] = len(posexmls)
 
     struct_ref = {}    # kh -> [(field, cls, xml_inst_id)]
+    pv_refs = []       # player-visible refs: (field, hash|None, cls, xml_inst_id)
     ref_pv_packtitle = 0
     ref_pv_packdesc = 0
     ref_pv_posedisplay = 0
@@ -296,6 +301,9 @@ def scan_package(path: str) -> dict:
             if nl in PV_POSE_DISPLAY: ref_pv_posedisplay += 1
             if h is not None:
                 struct_ref.setdefault(h, []).append((n, cls, xinst_id))
+            # player-visible ref 单独记录 (PACK_TITLE / PACK_DESCRIPTION / POSE_DISPLAY_NAME)
+            if nl in PV_PACK_TITLE or nl in PV_PACK_DESC or nl in PV_POSE_DISPLAY:
+                pv_refs.append((n, h, cls, xinst_id))
     row["pack_title_ref_count"] = ref_pv_packtitle
     row["pack_description_ref_count"] = ref_pv_packdesc
     row["pose_display_name_ref_count"] = ref_pv_posedisplay
@@ -330,6 +338,42 @@ def scan_package(path: str) -> dict:
         row["invariant_ok"] = 1 if inv == row["CHS_entry_count"] else 0
     else:
         row["invariant_ok"] = 0
+
+    # ---- structural-ref resolution completeness (反向: XML ref -> target STBL) ----
+    # 只统计 player-visible refs (PACK_TITLE / PACK_DESCRIPTION / POSE_DISPLAY_NAME)。
+    # 每个 ref 检查: hash 有效 / 唯一解析 / 落到当前 exact CHS target TGI / 该 key 存在。
+    # 方向是 XML structural ref -> STBL; 普通 orphan / 旧 STBL key 不参与, 不计 unresolved。
+    pv_total = len(pv_refs)
+    pv_unique = len({h for _, h, _, _ in pv_refs if h is not None})
+    pv_resolved = 0
+    pv_unresolved = 0
+    unique_hashes = set()
+    if pv_refs:
+        if row["CHS_target_STBL_count"] == 1:
+            chs_inst2, _v, _c, chs_kvs2 = chs[0]
+            tkeys = {kh for kh, _, _ in chs_kvs2}
+        else:
+            chs_inst2, tkeys = None, set()
+        for fname, h, cls, xid in pv_refs:
+            if h is None:
+                pv_unresolved += 1          # hash 无效 (不是 0x... 或解析失败)
+                continue
+            if h in unique_hashes:
+                continue                    # 同一 hash 的重复 ref 只算一次
+            unique_hashes.add(h)
+            if chs_inst2 is None:
+                pv_unresolved += 1          # 无唯一 CHS target, 无法落到 exact TGI
+                continue
+            # 唯一解析: 该 hash 的 XML ref 不能同时伴随歧义 (这里按 hash 唯一计一次; 重复已跳过)
+            # 落到 exact CHS target TGI 且 key 存在于该 STBL
+            if h in tkeys:
+                pv_resolved += 1
+            else:
+                pv_unresolved += 1          # 该 ref hash 在 target CHS STBL 中不存在
+    row["player_visible_structural_ref_count"] = pv_total
+    row["unique_player_visible_ref_count"] = pv_unique
+    row["resolved_player_visible_ref_count"] = pv_resolved
+    row["unresolved_player_visible_ref_count"] = pv_unresolved
 
     # ---- 文本特征 (仅 target CHS STBL 文本, 与三分法同 scope) ----
     non_ascii = long_str = repeated = False
@@ -372,6 +416,17 @@ def _classify(row: dict) -> dict:
                           f"={_sum} != CHS_entry_count={row['CHS_entry_count']} "
                           f"(scope 串包: 其他 STBL/locale/orphan 混入)")
         return row
+    if row["unresolved_player_visible_ref_count"] != 0:
+        row["status"] = "SKIP_MAPPING_UNCERTAIN"
+        # structural-ref resolution completeness gate (XML ref -> target STBL):
+        # 只要还有 player-visible refs 未 exact resolve 到当前 CHS target STBL
+        # (hash 无效 / 无唯一 target / key 不存在于该 STBL), 就不能判 ELIGIBLE。
+        # 普通 orphan / 旧 STBL key 不是 unresolved (方向是 XML -> STBL)。
+        row["reason"] = (f"player-visible 结构引用未全部 exact resolve: "
+                          f"unresolved={row['unresolved_player_visible_ref_count']} / "
+                          f"resolved={row['resolved_player_visible_ref_count']} "
+                          f"(total={row['player_visible_structural_ref_count']})")
+        return row
     if row["exact_structural_translate_count"] == 0 and row["keep_count"] == 0:
         row["status"] = "SKIP_MAPPING_UNCERTAIN"
         # 语义确认 (2026-08-15): unmapped_uncertain_count>0 本身【不】触发本状态。
@@ -383,7 +438,8 @@ def _classify(row: dict) -> dict:
                           "(translate=0 且 keep=0); unmapped/orphan key 不阻塞写入")
         return row
     row["status"] = "ELIGIBLE_EXISTING_CHS"
-    row["reason"] = "存在唯一 0x01 CHS 目标, 三分法全量覆盖且 invariant 满足"
+    row["reason"] = ("存在唯一 0x01 CHS 目标, 三分法全量覆盖 + invariant 满足 + "
+                      "player-visible refs 全部 exact resolve")
     return row
 
 
@@ -448,7 +504,11 @@ def pick_cohort(rows):
     if elig:
         mid = sorted(r["CHS_entry_count"] for r in elig)
         med = mid[len(mid) // 2]
-        r = min((r for r in elig if r["package_path"] not in used),
+        unused3 = [r for r in elig if r["package_path"] not in used]
+        # 防御: 若全部 eligible 已被前几槽占用 (真实 659 不会, 但退化成小样本时防 min() 空崩)
+        if not unused3:
+            unused3 = [min(elig, key=lambda r: r["package_path"])]
+        r = min(unused3,
                 key=lambda r: (abs(r["CHS_entry_count"] - med), r["package_path"]))
         place(3, "普通中等规模 (接近 median entry)", r)
     else:
@@ -609,6 +669,8 @@ _COLS = ["package_path", "file_size", "PosePackInstance_count", "STBL_count_tota
          "pack_title_ref_count", "pack_description_ref_count", "pose_display_name_ref_count",
          "exact_structural_translate_count", "keep_count", "unmapped_uncertain_count",
          "invariant_ok",
+         "player_visible_structural_ref_count", "unique_player_visible_ref_count",
+         "resolved_player_visible_ref_count", "unresolved_player_visible_ref_count",
          "STBL_version", "compression_state",
          "non_ascii_source_present", "long_string_present", "repeated_source_text_present",
          "multiple_target_STBL_families", "status", "reason"]
