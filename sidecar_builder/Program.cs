@@ -69,6 +69,8 @@ class Program
                 case "-group":  group = ParseHexU32(args[++i]); hasTgi = true; break;
                 case "-inst":   inst = ParseHexU64(args[++i]); hasTgi = true; break;
                 case "-locale": locale = ParseHexU32(args[++i]); break;
+                case "--selfcheck":
+                    return SelfCheck();
                 case "-m":
                     {
                         string raw = args[++i];
@@ -116,13 +118,15 @@ class Program
         }
         IResourceIndexEntry target = hits[0];
 
-        // 可选 locale 校验: instance 高 8 位用于编码 locale (0x01=CHS)。仅当显式给 -locale 时校验。
+        // 可选 locale 校验: 64-bit Instance 的最高 8 bits (bits 56-63) 编码 locale
+        // (0x01=CHS_CN, 0x02=CHT)。例 0x014EACCF17C8B091 字节序 01 4E AC CF 17 C8 B0 91,
+        // 最高 byte = 0x01。仅当显式给 -locale 时校验。
         if (locale.HasValue)
         {
-            uint hi = (uint)((inst >> 32) & 0xFF);
+            uint hi = (uint)((inst >> 56) & 0xFF);
             if (hi != locale.Value)
             {
-                Fail(string.Format("locale check failed: instance high byte 0x{0:X2} != expected -locale 0x{1:X2}",
+                Fail(string.Format("locale check failed: instance top byte 0x{0:X2} != expected -locale 0x{1:X2}",
                     hi, locale.Value));
                 src.Dispose(); return 1;
             }
@@ -286,4 +290,30 @@ class Program
 
     static uint ParseHexU32(string s) { return Convert.ToUInt32(s.StartsWith("0x") ? s.Substring(2) : s, 16); }
     static ulong ParseHexU64(string s) { return Convert.ToUInt64(s.StartsWith("0x") ? s.Substring(2) : s, 16); }
+
+    // 64-bit Instance 的最高 8 bits (bits 56-63) 编码 locale (0x01=CHS_CN, 0x02=CHT)。
+    // 例 0x014EACCF17C8B091 字节序 [01 4E AC CF 17 C8 B0 91], 最高 byte = 0x01。
+    static byte LocaleTopByte(ulong inst) { return (byte)((inst >> 56) & 0xFF); }
+
+    // Regression self-check: --selfcheck
+    // 验证 locale 顶层字节取位 (必须为 >>56, 而非 >>32)。
+    static int SelfCheck()
+    {
+        var cases = new[] {
+            new { Inst = 0x014EACCF17C8B091UL, Want = (byte)0x01 },
+            new { Inst = 0x024EACCF17C8B091UL, Want = (byte)0x02 },
+            new { Inst = 0x004EACCF17C8B091UL, Want = (byte)0x00 },
+        };
+        bool allOk = true;
+        foreach (var c in cases)
+        {
+            byte got = LocaleTopByte(c.Inst);
+            bool ok = (got == c.Want);
+            allOk &= ok;
+            Console.WriteLine(string.Format("locale(0x{0:X16}) => 0x{1:X2} expecting 0x{2:X2} : {3}",
+                c.Inst, got, c.Want, ok ? "PASS" : "FAIL"));
+        }
+        Console.WriteLine(allOk ? "SELFCHECK=PASS" : "SELFCHECK=FAIL");
+        return allOk ? 0 : 1;
+    }
 }
