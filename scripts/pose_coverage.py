@@ -616,103 +616,196 @@ def load_packages(list_path=None) -> list:
 
 
 # ---------------------------------------------------------------- cohort
-def pick_cohort(rows):
-    """按类别覆盖程序化挑选代表性 10 包 (确定性 tie-break, 非随机/非人工名字)。
+def _cohort_detail(row):
+    """cohort 层只读补算 (不触碰 frozen coverage):
 
-    返回: [(slot, why, row), ...]   slot 为 1..N; 某类缺则标 NOT_PRESENT_IN_CORPUS。
+    target_STBL_compression_state   <exact CHS 目标 STBL> 自己的压缩态
+    package_has_compressed_resources 包内任意资源被压缩
+
+    这两个字段在 frozen scan_package 里被合并成 compression_state;
+    此处仅对进入 roster 的少数候选 (≤10) 重新只读解析以拆分, 不写任何东西。
+    """
+    d = dict(row)
+    d["target_STBL_compression_state"] = "UNKNOWN"
+    d["package_has_compressed_resources"] = "UNKNOWN"
+    p = row.get("package_path")
+    if not p or not os.path.exists(p):
+        return d
+    try:
+        idx, err = safe_parse(p)
+        if err or idx is None:
+            return d
+        backend = get_backend("readonly").open(p)
+        num = len(idx.entries)
+        d["package_has_compressed_resources"] = \
+            "YES" if any(e.is_compressed for e in idx.entries) else "NO"
+        # 唯一 CHS 目标 STBL (ELIGIBLE 保证 CHS_target_STBL_count==1)
+        target = None
+        for e in idx.entries:
+            if e.type_id == STBL_TID and ((e.instance_id >> 56) & 0xFF) == LOCALE_CHS:
+                target = e
+                break
+        if target is not None:
+            comp = 0
+            try:
+                data = backend.read_small_resource(target, max_bytes=2 * 1024 * 1024)
+            except Exception:
+                data = None
+            pr = parse_stbl(data) if data else None
+            if pr:
+                comp = pr[1]
+            # is_compressed (资源 offset 高位) 或 header comp 字节非 0 (zlib 'ZB'=0x5A42 亦视为压缩)
+            if target.is_compressed or comp or comp == 0x5A42:
+                d["target_STBL_compression_state"] = "COMPRESSED"
+            else:
+                d["target_STBL_compression_state"] = "UNCOMPRESSED"
+        backend.close()
+    except Exception:
+        pass
+    return d
+
+
+def _pick_best(avail, keyfn, label, used):
+    """确定性: 从 avail (未被 used 占用) 中按 keyfn 取最优, 平手取路径字典序最小。"""
+    cand = [r for r in avail if r["package_path"] not in used]
+    if not cand:
+        return None
+    return min(cand, key=lambda r: (keyfn(r), r["package_path"]))
+
+
+def pick_cohort(rows):
+    """确定性地选出恰好 10 个【不同】真实 ELIGIBLE_EXISTING_CHS 包 (无 N/A 槽)。
+
+    优先级顺序 (风险维度覆盖):
+      1. target CHS entry count 最小
+      2. target CHS entry count 最大
+      3. median-ish (普通规模)
+      4. PACK_TITLE + PACK_DESCRIPTION 都在
+      5. 只有 pose_display_name, 无 pack title/description
+      6. non_ascii_source_present = 1
+      7. long_string_present = 1
+      8. repeated_source_text_present = 1
+      9. unmapped_uncertain_count 较高但仍 ELIGIBLE
+     10. compression 风险样本
+
+    每个 slot 都从「剩余未用」的 ELIGIBLE 里确定性挑选; 若某优先级无可选
+    (真实 448 基本不可能), 则用后续优先级 + 剩余候选按顺序补齐, 始终保证
+    恰好 min(10, len(eligible)) 个不同真实包。不产生 N/A、不重复、非 ELIGIBLE 不进。
+
+    额外风险维度备注 (不占槽, 仅记录):
+      multi-PPI (PosePackInstance_count>1) 是否存在于 ELIGIBLE;
+      multiple-target-STBL-family 在 ELIGIBLE 中永不存在 (因 ELIGIBLE 要求
+        CHS_target_STBL_count==1) -> 记为 PRESENT_BUT_UNSUPPORTED。
+
+    返回: (picks, notes)  picks=[(slot, why, row), ...], notes=[str, ...]
     """
     elig = [r for r in rows if r["status"] == "ELIGIBLE_EXISTING_CHS"]
-    eligible = set(r["package_path"] for r in elig)
+    notes = []
 
-    def pick(fn, eligible_set):
-        cand = [r for r in rows if r["package_path"] in eligible_set and fn(r)]
-        if not cand:
-            return None
-        # 确定性: 文件路径字典序最小
-        return min(cand, key=lambda r: r["package_path"])
+    # ---- 额外风险维度存在性备注 (不占槽) ----
+    multi_ppi = [r for r in elig if r["PosePackInstance_count"] > 1]
+    if multi_ppi:
+        notes.append(f"multi-PPI (PosePackInstance_count>1) 存在于 ELIGIBLE: {len(multi_ppi)} 个 "
+                     f"(作为额外风险维度可被选入)")
+    else:
+        notes.append("multi-PPI (PosePackInstance_count>1): NOT_PRESENT_AMONG_ELIGIBLE")
+    multi_fam = [r for r in elig
+                 if r["multiple_target_STBL_families"] or r["CHS_target_STBL_count"] > 1]
+    if multi_fam:
+        notes.append(f"multiple-target-STBL-family 存在于 ELIGIBLE: {len(multi_fam)} 个")
+    else:
+        # ELIGIBLE 强制 CHS_target_STBL_count==1, 故多 target family 不会进 ELIGIBLE
+        present_all = any(r["multiple_target_STBL_families"] for r in rows)
+        if present_all:
+            notes.append("multiple-target-STBL-family: PRESENT_BUT_UNSUPPORTED "
+                         "(corpus 存在但仅限 SKIP_AMBIGUOUS_TGI, 不进 ELIGIBLE/roster)")
+        else:
+            notes.append("multiple-target-STBL-family: NOT_PRESENT_IN_CORPUS")
 
-    picks = []          # (slot, why, row|None)
     used = set()
+    picks = []
+    slot = 0
 
-    def place(slot, why, r):
-        picks.append((slot, why, r))
+    def place(label, r):
+        nonlocal slot
+        slot += 1
+        picks.append((slot, label, r))
         if r is not None:
             used.add(r["package_path"])
 
-    # 1) 最小 CHS STBL / entry 最少
-    if elig:
-        r = min(elig, key=lambda r: (r["CHS_entry_count"], r["package_path"]))
-        place(1, "最小 CHS STBL / entry 最少", r)
-    else:
-        place(1, "最小 CHS STBL", None)
+    # ---- 优先级槽 (每槽从剩余 eligible 确定性挑选) ----
+    # 1) 最小 CHS entry
+    r = _pick_best(elig, lambda r: r["CHS_entry_count"], None, used)
+    place("target CHS entry count 最小 (极小 target 风险)", r)
 
-    # 2) 最大 CHS STBL / entry 很多
-    if elig:
-        r = max(elig, key=lambda r: (r["CHS_entry_count"], r["package_path"]))
-        place(2, "最大 CHS STBL / entry 很多", r)
-    else:
-        place(2, "最大 CHS STBL", None)
+    # 2) 最大 CHS entry
+    r = _pick_best(elig, lambda r: -r["CHS_entry_count"], None, used)
+    place("target CHS entry count 最大 (极大 target 风险)", r)
 
-    # 3) 普通中等规模 (中位 entry 数, 未被选)
+    # 3) median-ish
     if elig:
-        mid = sorted(r["CHS_entry_count"] for r in elig)
+        mid = sorted(x["CHS_entry_count"] for x in elig)
         med = mid[len(mid) // 2]
-        unused3 = [r for r in elig if r["package_path"] not in used]
-        # 防御: 若全部 eligible 已被前几槽占用 (真实 659 不会, 但退化成小样本时防 min() 空崩)
-        if not unused3:
-            unused3 = [min(elig, key=lambda r: r["package_path"])]
-        r = min(unused3,
-                key=lambda r: (abs(r["CHS_entry_count"] - med), r["package_path"]))
-        place(3, "普通中等规模 (接近 median entry)", r)
+        r = _pick_best(elig, lambda r: abs(r["CHS_entry_count"] - med), None, used)
     else:
-        place(3, "普通中等规模", None)
+        r = None
+    place("median 附近 CHS entry (普通规模)", r)
 
-    # 4) 多个 PosePackInstance
-    r = pick(lambda r: r["PosePackInstance_count"] > 1, eligible - used)
-    if r: place(4, "多个 PosePackInstance", r)
-    else: place(4, "多个 PosePackInstance", None)
+    # 4) pack title + description 都在
+    r = _pick_best(elig, lambda r: not (r["pack_title_ref_count"] > 0 and r["pack_description_ref_count"] > 0),
+                   None, used)
+    if r is None:
+        r = _pick_best(elig, lambda r: 0, None, used)
+    place("PACK_TITLE + PACK_DESCRIPTION 都在", r)
 
-    # 5) 多个 STBL family / 多 target STBL
-    r = pick(lambda r: r["multiple_target_STBL_families"] or r["CHS_target_STBL_count"] > 1,
-             eligible - used)
-    if r: place(5, "多个 STBL family / 多 target STBL", r)
-    else: place(5, "多个 STBL family", None)
+    # 5) 只有 pose_display_name, 无 pack title/description
+    r = _pick_best(elig,
+                   lambda r: not (r["pose_display_name_ref_count"] > 0
+                                  and r["pack_title_ref_count"] == 0
+                                  and r["pack_description_ref_count"] == 0),
+                   None, used)
+    if r is None:
+        r = _pick_best(elig, lambda r: 0, None, used)
+    place("只有 pose_display_name, 无 pack title/description", r)
 
-    # 6) pack title + description 都存在
-    r = pick(lambda r: r["pack_title_ref_count"] > 0 and r["pack_description_ref_count"] > 0,
-             eligible - used)
-    if r: place(6, "pack title + description 都存在", r)
-    else: place(6, "pack title + description", None)
+    # 6) non_ascii
+    r = _pick_best(elig, lambda r: 0 if r["non_ascii_source_present"] == 1 else 1, None, used)
+    place("non_ascii_source_present = 1", r)
 
-    # 7) 只有 pose_display_name, 无 description
-    r = pick(lambda r: r["pose_display_name_ref_count"] > 0 and r["pack_description_ref_count"] == 0,
-             eligible - used)
-    if r: place(7, "只有 pose_display_name, 无 description", r)
-    else: place(7, "只有 pose_display_name", None)
+    # 7) long_string
+    r = _pick_best(elig, lambda r: 0 if r["long_string_present"] == 1 else 1, None, used)
+    place("long_string_present = 1", r)
 
-    # 8) source 含非 ASCII / 特殊字符
-    r = pick(lambda r: r["non_ascii_source_present"], eligible - used)
-    if r: place(8, "source 含非 ASCII / 特殊字符", r)
-    else: place(8, "source 非 ASCII", None)
+    # 8) repeated
+    r = _pick_best(elig, lambda r: 0 if r["repeated_source_text_present"] == 1 else 1, None, used)
+    place("repeated_source_text_present = 1", r)
 
-    # 9) 长字符串
-    r = pick(lambda r: r["long_string_present"], eligible - used)
-    if r: place(9, "长字符串", r)
-    else: place(9, "长字符串", None)
+    # 9) unmapped_uncertain 较高但仍 ELIGIBLE
+    r = _pick_best(elig, lambda r: -r["unmapped_uncertain_count"], None, used)
+    place("unmapped_uncertain_count 较高但仍 ELIGIBLE", r)
 
-    # 10) repeated source / protected token 较多
-    r = pick(lambda r: r["repeated_source_text_present"], eligible - used)
-    if r: place(10, "repeated source / protected token", r)
-    else: place(10, "repeated source", None)
+    # 10) compression 风险样本 (目标 CHS STBL 压缩优先; 其次包内任意压缩)
+    if elig:
+        def comp_key(r):
+            d = _cohort_detail(r)
+            t = d["target_STBL_compression_state"]
+            pkg = d["package_has_compressed_resources"]
+            return (0 if t == "COMPRESSED" else 1, 0 if pkg == "YES" else 1)
+        r = _pick_best(elig, comp_key, None, used)
+    else:
+        r = None
+    place("compression 风险样本 (target-STBL 压缩优先)", r)
 
-    # 附加: compressed STBL/package (若 corpus 存在则优先补 1)
-    compressed_exist = any("COMPRESSED" in r["compression_state"] for r in rows)
-    if compressed_exist:
-        r = pick(lambda r: "COMPRESSED" in r["compression_state"], eligible - used)
-        if r:
-            picks.append((11, "compressed STBL/package (corpus 存在, 优先纳入)", r))
+    # ---- 若某些槽未选出 (小样本退化), 用剩余候选按顺序补齐到 min(10, len(eligible)) ----
+    i = 0
+    while len(picks) < 10 and len(eligible_pool := [x for x in elig if x["package_path"] not in used]):
+        r = _pick_best(elig, lambda r: (r["CHS_entry_count"], i), None, used)
+        if r is None:
+            break
+        place(f"补齐 (剩余候选, 确定性顺序)", r)
+        i += 1
 
-    return picks
+    return picks, notes
 
 
 # ---------------------------------------------------------------- main
@@ -770,26 +863,33 @@ def main():
         print(f"  {s}: {sc.get(s, 0)}")
 
     # ---- cohort ----
-    picks = pick_cohort(rows)
+    picks, coh_notes = pick_cohort(rows)
     coh_csv = out_dir / "cohort_selection.csv"
+    _COH_COLS = ["cohort_slot", "selection_reason", "package_path", "status",
+                 "CHS_target_TGI", "CHS_entry_count", "CHS_unique_key_hash_count",
+                 "exact_structural_translate_count", "keep_count", "unmapped_uncertain_count",
+                 "pack_title_ref_count", "pack_description_ref_count", "pose_display_name_ref_count",
+                 "non_ascii_source_present", "long_string_present", "repeated_source_text_present",
+                 "target_STBL_compression_state", "package_has_compressed_resources",
+                 "PosePackInstance_count", "multiple_target_STBL_families"]
     with open(coh_csv, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["slot", "why", "package_path", "CHS_target_TGI", "CHS_entry_count",
-                    "PosePackInstance_count", "structural_TRANSLATE", "KEEP", "UNMAPPED",
-                    "pack_title_ref", "pack_description_ref", "pose_display_name_ref",
-                    "STBL_version", "compression_state", "status"])
+        w.writerow(_COH_COLS)
         for slot, why, r in picks:
-            if r is None:
-                w.writerow([slot, why + " = NOT_PRESENT_IN_CORPUS", "N/A", "", "", "", "", "", "", "", "", "", "", "", ""])
-            else:
-                w.writerow([slot, why, r["package_path"], r["CHS_target_TGI(s)"],
-                            r["CHS_entry_count"], r["PosePackInstance_count"],
-                            r["exact_structural_translate_count"], r["keep_count"],
-                            r["unmapped_uncertain_count"],
-                            r["pack_title_ref_count"], r["pack_description_ref_count"],
-                            r["pose_display_name_ref_count"],
-                            r["STBL_version"], r["compression_state"], r["status"]])
-    print(f"cohort: {coh_csv} ({len(picks)} 行)")
+            # 仅 ELIGIBLE 真实包 (roster 无 N/A、无重复、路径必存在)
+            d = _cohort_detail(r)
+            w.writerow([slot, why, d["package_path"], d["status"],
+                        d["CHS_target_TGI(s)"], d["CHS_entry_count"], d["CHS_unique_key_hash_count"],
+                        d["exact_structural_translate_count"], d["keep_count"], d["unmapped_uncertain_count"],
+                        d["pack_title_ref_count"], d["pack_description_ref_count"], d["pose_display_name_ref_count"],
+                        d["non_ascii_source_present"], d["long_string_present"], d["repeated_source_text_present"],
+                        d["target_STBL_compression_state"], d["package_has_compressed_resources"],
+                        d["PosePackInstance_count"], d["multiple_target_STBL_families"]])
+    _paths = [r["package_path"] for _, _, r in picks]
+    _dcount = len(set(_paths))
+    print(f"cohort: {coh_csv} ({len(picks)} 行)   distinct 包={_dcount}  "
+          f"全 ELIGIBLE={all(r['status']=='ELIGIBLE_EXISTING_CHS' for _,_,r in picks)}  "
+          f"全存在={all(os.path.exists(p) for p in _paths)}")
 
     # ---- markdown report ----
     rep = out_dir / "coverage_report.md"
@@ -800,17 +900,22 @@ def main():
                   "SKIP_MAPPING_UNCERTAIN", "SKIP_DUPLICATE_KEYHASH",
                   "SKIP_MISSING_FILE", "ERROR", "ERROR_COVERAGE_INVARIANT"):
             f.write(f"- {s}: {sc.get(s, 0)}\n")
-        f.write("\n## 代表性 10-cohort (程序化选择, 非随机/非人工)\n\n")
-        f.write("| slot | why | package | CHS TGI | CHS entries | TRANSLATE | KEEP | UNMAPPED |\n")
-        f.write("|---|---|---|---|---|---|---|---|\n")
+        f.write("\n## cohort 风险维度备注\n\n")
+        for n in coh_notes:
+            f.write(f"- {n}\n")
+        f.write("\n## 代表性 10-cohort (程序化选择, 非随机/非人工; 均为 ELIGIBLE 真实包)\n\n")
+        f.write("| slot | why | package | status | CHS TGI | CHS entries | unique | TRANSLATE | KEEP | UNMAPPED |"
+                " title | desc | pdn | non_a | long | rep | tgt_comp | pkg_comp | PPI | multi_fam |\n")
+        f.write("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
         for slot, why, r in picks:
-            if r is None:
-                f.write(f"| {slot} | {why} **NOT_PRESENT_IN_CORPUS** | - | - | - | - | - | - |\n")
-            else:
-                f.write(f"| {slot} | {why} | {Path(r['package_path']).name} | "
-                        f"{r['CHS_target_TGI(s)']} | {r['CHS_entry_count']} | "
-                        f"{r['exact_structural_translate_count']} | {r['keep_count']} | "
-                        f"{r['unmapped_uncertain_count']} |\n")
+            d = _cohort_detail(r)
+            f.write(f"| {slot} | {why} | {Path(d['package_path']).name} | {d['status']} | "
+                    f"{d['CHS_target_TGI(s)']} | {d['CHS_entry_count']} | {d['CHS_unique_key_hash_count']} | "
+                    f"{d['exact_structural_translate_count']} | {d['keep_count']} | {d['unmapped_uncertain_count']} | "
+                    f"{d['pack_title_ref_count']} | {d['pack_description_ref_count']} | {d['pose_display_name_ref_count']} | "
+                    f"{d['non_ascii_source_present']} | {d['long_string_present']} | {d['repeated_source_text_present']} | "
+                    f"{d['target_STBL_compression_state']} | {d['package_has_compressed_resources']} | "
+                    f"{d['PosePackInstance_count']} | {d['multiple_target_STBL_families']} |\n")
         # compressed 存在性记录
         any_comp = any("COMPRESSED" in r["compression_state"] for r in rows)
         f.write(f"\ncompressed STBL/package 在 659 中: "
