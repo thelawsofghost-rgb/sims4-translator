@@ -352,6 +352,86 @@ def test_normalize_model_output():
               f"got={got!r}")
 
 
+# ---------------- 人工 override 机制 ----------------
+def _make_override_todo(path):
+    cols = ["translation_id", "source_text", "decision", "reason",
+            "detected_language", "translation", "status", "source_hash"]
+    rows = [
+        ["T_o1", "ALL-IN-ONE", "TRANSLATE", "", "en", "", "PENDING", A.source_hash("ALL-IN-ONE")],
+        ["T_o2", "Smh", "TRANSLATE", "", "en", "", "PENDING", A.source_hash("Smh")],
+        ["T_o3", "loop-obj", "TRANSLATE", "", "en", "", "PENDING", A.source_hash("loop-obj")],
+        ["T_n1", "walk near desk", "TRANSLATE", "", "en", "", "PENDING", A.source_hash("walk near desk")],
+    ]
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f); w.writerow(cols); w.writerows(rows)
+
+
+def _make_override_csv(path):
+    # 覆盖 3 条: 2 TRANSLATE + 1 KEEP; 另加 1 条故意 (tid,source_text) 不匹配的, 应被忽略
+    cols = ["translation_id", "source_text", "translation", "action", "reason", "notes"]
+    rows = [
+        ["T_o1", "ALL-IN-ONE", "整合版", "TRANSLATE", "glossary", ""],
+        ["T_o2", "Smh", "", "KEEP", "缩写", ""],
+        # 故意 (tid,source_text) 不匹配: source_text 与 todo 里的 "loop-obj" 不一致
+        ["T_o3", "loop_object_wrong", "循环物体(错)", "TRANSLATE", "故意错位, 应不命中", ""],
+        ["T_oX", "W R O N G", "x", "TRANSLATE", "tid 不匹配 todo, 无影响", ""],
+    ]
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f); w.writerow(cols); w.writerows(rows)
+
+
+def test_override():
+    print("\n== 10. 人工 override (translation_overrides.csv) ==")
+    d = OUT / "override_test"
+    d.mkdir(parents=True, exist_ok=True)
+    for f in ("translation_done.csv", "translation_cache.db", "translations_todo.csv", "translation_overrides.csv"):
+        fp = d / f
+        if fp.exists():
+            fp.unlink()
+    _make_override_todo(d / "translations_todo.csv")
+    _make_override_csv(d / "translation_overrides.csv")
+
+    # 预填 cache: 给 T_n1 (普通行) 一个可命中的译文, 保证 run 后它是 DONE 且不调模型
+    cache = PhraseCache(d, model="fake")
+    src_p = "walk near desk"
+    fp = build_fingerprint(source_phrase=src_p, glossary_hint="", context="")
+    cache.put(fingerprint=fp, translation_id="T_n1", segment_index="0",
+              source_phrase=src_p, source_hash=A.source_hash(src_p),
+              translation="桌边行走", now="2026-08-14 00:00:00")
+    cache.close()
+
+    run_once(d)  # 触发 main (Fake 引擎, 0 真实 LLM)
+
+    done = {r["translation_id"]: r for r in csv.DictReader(open(d / "translation_done.csv", encoding="utf-8-sig"))}
+    # ① TRANSLATE override: 译文 + 终态 DONE
+    r1 = done["T_o1"]
+    check("TRANSLATE override 译文", r1["translation"] == "整合版", f"got={r1['translation']!r}")
+    check("TRANSLATE override 终态 DONE", r1["status"] == "DONE", f"status={r1['status']!r}")
+    # ② KEEP override: 空译文 + 明确终态 KEEP
+    r2 = done["T_o2"]
+    check("KEEP override 空译文", r2["translation"] == "", f"got={r2['translation']!r}")
+    check("KEEP override 终态 KEEP(非PENDING)", r2["status"] == "KEEP", f"status={r2['status']!r}")
+    # ③ 错位 source_text 不命中: loop-obj 应走正常流程 (此例被 Fake 翻译)
+    r3 = done["T_o3"]
+    check("错位 source_text 不命中 override (走后端)", r3["status"] in ("DONE", "PENDING"), f"status={r3['status']!r} translation={r3['translation']!r}")
+    # ④ 普通行不受影响: 从 cache 物化
+    rn = done["T_n1"]
+    check("普通行 cache 物化不受 override 影响", rn["translation"] == "桌边行走" and rn["status"] == "DONE", f"got={rn['translation']!r}")
+    # ⑤ override 不写 phrase cache: override 行 (T_o1/T_o2) 不得新增缓存条目;
+    #    非 override 行 (T_o3) 走后端可合法写缓存。校验: 缓存里没有来源于 override 行的译文。
+    cache2 = PhraseCache(d, model="fake")
+    leak = cache2._conn.execute(
+        "SELECT COUNT(*) FROM phrase_cache WHERE translation_id IN ('T_o1','T_o2')"
+    ).fetchone()[0]
+    check("override 不写 phrase cache (override 行零新增条目)", leak == 0, f"override行泄漏={leak}")
+    cache2.close()
+
+    # ⑥ QA: KEEP override 应为 PASS (明确终态, 不算未完成)
+    from phase2b_qa import classify as qa_classify
+    q_pass = qa_classify(dict(translation_id="T_o2", source_text="Smh", translation="", status="KEEP", translate_mode="OVERRIDE_K", protected_spans=""))
+    check("QA 识别 KEEP override 为 PASS 终态", q_pass[0] == "PASS", f"got={q_pass!r}")
+
+
 # ---------------- 入口 ----------------
 def main():
     print("Phase 2B regression + cache/resume 验证")
@@ -365,6 +445,7 @@ def main():
     test_100phrase_simulation()
     test_ollama_client_no_proxy()
     test_normalize_model_output()
+    test_override()
     print(f"\n==== 结果: PASS={len(PASS)}  FAIL={len(FAIL)} ====")
     if FAIL:
         print("失败项:", *FAIL, sep="\n  - ")

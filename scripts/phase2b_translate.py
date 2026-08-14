@@ -10,9 +10,12 @@
       translation_id, source_text, decision, translate_mode, detection, detected_language,
       translation, status, source_hash
       其中:
-        translate_mode = FULL_TRANSLATE | PARTIAL_TRANSLATE | KEEP
+        translate_mode = FULL_TRANSLATE | PARTIAL_TRANSLATE | KEEP | OVERRIDE_T | OVERRIDE_K
         decision       = TRANSLATE | REVIEW (7 条人工审批后写 TRANSLATE)
-        status         = APPROVED (7 条人工审批) | DONE (翻译完成) | DONE_SKIP (KEEP)
+        status         = APPROVED (7 条人工审批) | DONE (翻译完成) | DONE_SKIP (KEEP) | KEEP (override 终态)
+  output/translation_overrides.csv  人工终态覆盖 (可选, 优先级最高, 不写 cache/不写 .package):
+      translation_id, source_text, translation, action(TRANSLATE|KEEP|REVIEW), reason, notes
+      TRANSLATE -> status=DONE ; KEEP -> status=KEEP (QA 视为明确终态 PASS)
   (可选, 传 --sample N 时) output/translation_sample_zh.csv  分层抽样 N 行含译文, 供人工抽查
 
 翻译层三档 (用户 2026-08-13 拍板):
@@ -403,6 +406,60 @@ def materialize_from_cache(tid: str, text: str, mode: str, cache, ctx_map=None) 
     if translation.strip():
         return translation, "DONE"
     return None, "PENDING"
+
+
+# ---------------- 人工 override (translation_overrides.csv) ----------------
+# 用户 2026-08-14 拍板: 22 条 ERROR 全部 final 定案, 走 override 而非改 phrase cache。
+# override 优先级 > cache > LLM; 永不写 phrase cache; 不写 .package。
+#
+# 列: translation_id, source_text, translation, action, reason, notes
+#   action=TRANSLATE : 人工译文, 终态 DONE (translation 必填非空)
+#   action=KEEP      : 保留英文, 终态 KEEP (translation 留空, QA 视为明确终态而非未完成)
+#   action=REVIEW    : 显式挂起, 不改写该行 (走正常流程)
+# 校验: 必须 translation_id + source_text 两者同时匹配才允许 override;
+#       缺列/非法 action/(tid,source_text) 不一致 -> 告警并跳过该条。
+OVER_FILE = out_dir / "translation_overrides.csv"
+_OVERRIDE_ACTIONS = {"TRANSLATE", "KEEP", "REVIEW"}
+
+
+def load_overrides(out_dir_) -> dict:
+    """读 translation_overrides.csv, 返回 {(tid, source_text): override_row}。
+
+    校验 (translation_id, source_text) 组合; 不一致或缺关键列的条目跳过并告警。
+    文件不存在 -> 空 dict (机制可逆: 删文件即回退到纯 cache/LLM 流程)。
+    """
+    p = Path(out_dir_) / "translation_overrides.csv"
+    ovr = {}
+    if not p.exists():
+        return ovr
+    with open(p, encoding="utf-8-sig") as f:
+        for i, r in enumerate(csv.DictReader(f), start=2):
+            tid = (r.get("translation_id") or "").strip()
+            src = (r.get("source_text") or "").strip()
+            act = (r.get("action") or "").strip().upper()
+            if not tid or not src:
+                print(f"[override] 第 {i} 行: 缺 translation_id/source_text, 跳过", file=sys.stderr)
+                continue
+            if act not in _OVERRIDE_ACTIONS:
+                print(f"[override] 第 {i} 行: action={act!r} 非法, 跳过", file=sys.stderr)
+                continue
+            key = (tid, src)
+            if key in ovr:
+                print(f"[override] 第 {i} 行: 重复 (tid,source_text), 后者覆盖", file=sys.stderr)
+            ovr[key] = {"translation_id": tid, "source_text": src,
+                        "translation": (r.get("translation") or "").strip(),
+                        "action": act,
+                        "reason": (r.get("reason") or "").strip(),
+                        "notes": (r.get("notes") or "").strip()}
+    return ovr
+
+
+def override_for(ovr: dict, tid, text) -> dict | None:
+    """查 (tid, source_text) 的 override(需两者同时匹配); 无则 None。"""
+    if not ovr:
+        return None
+    key = (tid, (text or "").strip())
+    return ovr.get(key)
 
 
 def restore_protected(segs: list, translation: str):
@@ -843,6 +900,12 @@ def main():
     nbr_ok = sum(1 for r in todo if r.get("translation_id") in ctx_map)
     print(f"[上下文] translation_contexts.csv 关联 TODO {nbr_ok}/{len(todo)} 行 (仅辅助, 不写回)")
 
+    # 人工 override (优先级最高; 不写 cache; 不写 .package)
+    ovr = load_overrides(out_dir)
+    if ovr:
+        n_o = sum(1 for r in todo if override_for(ovr, r.get("translation_id"), norm_text(r.get("source_text"))))
+        print(f"[override] 加载 {len(ovr)} 条 translation_overrides.csv, 命中 todo {n_o} 行 (TRANSLATE/KEEP 终态, REVIEW 挂起)")
+
     # 逐行翻译层决策
     decided = []
     for r in todo:
@@ -850,6 +913,19 @@ def main():
         tid = r.get("translation_id")
         dec = r.get("decision")
         lang = r.get("detected_language")
+        # override 优先于 APPROVED/cache/LLM
+        o = override_for(ovr, tid, text)
+        if o and o["action"] in ("TRANSLATE", "KEEP"):
+            if o["action"] == "TRANSLATE":
+                if not o["translation"]:
+                    # TRANSLATE 缺少译文: 视为无效, 走正常流程
+                    print(f"[override] {tid} {text!r}: TRANSLATE 缺 translation, 走正常流程", file=sys.stderr)
+                else:
+                    decided.append((r, "OVERRIDE_T", o["translation"], "DONE", lang))
+                    continue
+            else:  # KEEP
+                decided.append((r, "OVERRIDE_K", "", "KEEP", lang))
+                continue
         if text in APPROVED_TEXT:
             zh, alang = APPROVED[text]
             mode, sem, toks = "APPROVED", [text], []
@@ -1058,7 +1134,13 @@ def main():
     try:
         for r, mode, zh, status, lang in decided:
             text = norm_text(r.get("source_text"))
-            if mode == "APPROVED":
+            if mode in ("OVERRIDE_T", "OVERRIDE_K"):
+                # 人工 override 终态 (不写 cache, 不写 .package)
+                if mode == "OVERRIDE_T":
+                    translation = zh; status = "DONE"
+                else:  # OVERRIDE_K
+                    translation = ""; status = "KEEP"
+            elif mode == "APPROVED":
                 translation = zh
             elif mode == "KEEP":
                 translation = ""

@@ -1,0 +1,23 @@
+translation_id,source_text,translation,action,reason,notes
+T_07652ccc1af4_g1,ALL-IN-ONE,整合版,TRANSLATE,glossary固定术语 all in one=整合版,用户2026-08-14定案
+T_0ace98f736ee_g1,12 - Sass,12 - 嚣张,TRANSLATE,SamsSims Anger包语义=顶嘴/嚣张,用户定案选嚣张
+T_1078b3ca4d4a_g1,sim smoking,模拟市民抽烟,TRANSLATE,sim=模拟市民语义 非KEEP,用户定案
+T_2563956cdac8_g1,bar6 [Animated],bar6 [动画],TRANSLATE,barN是序列标签保护 仅译[Animated],用户定案
+T_2e33b284eed8_g1,bar5 [Animated],bar5 [动画],TRANSLATE,barN是序列标签保护 仅译[Animated],用户定案
+T_37fdb2d0d954_g1,Smh,,KEEP,网络缩写 摇头无语,用户定案KEEP
+T_655ec0d7e2ec_g1,loop-obj,,KEEP,技术标签 循环物体,用户定案KEEP
+T_6ac05c6ecd78_g1,Bend It Ova,俯身,TRANSLATE,邻居 Face Down/It All There=弯腰撅臀,用户定案选俯身
+T_9dae3832bfe7_g1,Skyler,,KEEP,人名,用户定案KEEP
+T_9faa092d879a_g1,all in one_x,整合版_x,TRANSLATE,glossary all in one=整合版 _x变体标签保护,用户定案
+T_a3bb23c780a6_g1,bar4 [Animated],bar4 [动画],TRANSLATE,barN是序列标签保护 仅译[Animated],用户定案
+T_ab9d1455f3e5_g1,door b,门 b,TRANSLATE,邻居 door a/container 1..4=门姿态 b变体保留,用户定案
+T_ac59e8a8e584_g1,10 - Uncomfortable,10 - 不适,TRANSLATE,SamsSims恐惧包编号保留,用户定案
+T_ac65df480fa2_g1,kiss hands m,吻手 m,TRANSLATE,教堂私奔包 吻手背(男) m变体保留,用户定案
+T_c21c5afa0d42_g1,ALL IN ONE MALE,整合版 男性,TRANSLATE,glossary all in one=整合版 MALE=男性,用户定案
+T_c253bdac9e79_g1,2 - Lean Forward Hand Over Mouth,2 - 前倾，手捂嘴,TRANSLATE,SamsSims恐惧包编号保留,用户定案
+T_c284ff67ceb8_g1,11 - Hand on Forehead,11 - 手扶额头,TRANSLATE,编号保留,用户定案
+T_c2dd5c04630b_g1,on the way m,在路上 m,TRANSLATE,教堂私奔包 路上(男) m变体保留,用户定案
+T_cf459558046b_g1,AIO: M,整合版: M,TRANSLATE,AIO=all in one整合版,用户定案
+T_d3498fa320d0_g1,11 - Figet,11 - 坐立不安,TRANSLATE,Figet=fidget坐立不安 编号保留,用户定案
+T_dfafe955a064_g1,AIO: F,整合版: F,TRANSLATE,AIO=all in one整合版,用户定案
+T_edebda541982_g1,Zenned Out,放空,TRANSLATE,邻居 Dead Inside/Catastrophizing=焦虑放空,用户定案选放空

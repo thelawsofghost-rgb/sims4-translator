@@ -118,6 +118,10 @@ def classify(row: dict) -> (str, str):
     notes = []
 
     # 1) 状态非 DONE/APPROVED
+    # KEEP 是人工 override 的明确终态 (translation_overrides.csv, action=KEEP):
+    # 保留英文 + 明确终态, 不算未完成, 也不再因 translation="" 被记为未完成。
+    if status == "KEEP":
+        return "PASS", "KEEP override (人工终态)"
     if status not in ("DONE", "APPROVED"):
         return "REVIEW", f"状态={status} (非终态)"
 
