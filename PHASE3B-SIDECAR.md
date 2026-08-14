@@ -335,14 +335,19 @@ pose_list 兜底); main() 产出 3 文件; cohort 类别缺则 NOT_PRESENT (不�
 - 逐 approved key: 引用 hash 必须在 exact CHS target STBL key 全集内 (否则 unresolved fail-fast);
   target STBL 含重复 KeyHash 一律 fail-fast; source_text 取 target STBL 现值
 - 译文解析优先级: `translation_overrides.csv`(T_<hash>_g1) -> `translation_done.csv` -> `translation_cache.db`
-  ; KEEP / 缺失 -> fail-fast (approved 玩家可见 key 不 guess、不 ship English)
+  ; TRANSLATE -> 有效译文, 进 SidecarBuilder `-m`, translated_key_count+1;
+    KEEP -> 合法终态 (已审核决定保持原文), 不传 `-m`, COMPLETE-STBL 原样保留, keep_key_count+1, 不报错;
+    MISSING / unresolved REVIEW / source mismatch -> fail-fast (不生成该包)
+  ; 不变式: translated_key_count + keep_key_count == approved_key_count; 且 modified_key_count == translated_key_count
+- output-dir 防 stale: 目标 out-dir 已存在且非空 -> refuse/fail-fast (rc=2, 不自动删旧文件)
 - 调 `SidecarBuilder.exe` (COMPLETE-STBL writer, 含 UTF8 EntrySize backport):
   `-m KEYHASH:SOURCE:TRANSLATION` 每 approved key 一条; writer 内部做 expected-source 校验
 - 每个 sidecar 必须: writer VERIFY=PASS + `audit_canary_pair.py` AUDIT=PASS
   (独立只读二次审计: exact TGI / resource_count=1 / version·count·order·flags preserved /
    only approved keys changed / untouched 等价 / STRING_LENGTH==Σ(UTF8+1))
 - 输出: `<out_dir>/<slot>_<basename>_CHS.package` (每 source 一个) +
-  `<out_dir>/cohort_sidecar_manifest.csv` (slot/source/output/target_TGI/modified_key_count/
+  `<out_dir>/cohort_sidecar_manifest.csv` (slot/source/output/target_TGI/
+  approved_key_count/translated_key_count/keep_key_count/modified_key_count/
   writer_verify/audit_result/error)
 
 用法 (Windows, 短路径, 先 cd 仓库根):
@@ -351,7 +356,8 @@ python scripts\gen_cohort_sidecars.py --cohort output\cohort_selection.csv --out
 ```
 
 白盒验证 (合成 corpus, 本机): approved_pv_refs 三类别齐全 + 唯一 CHS target; TranslationResolver
-OVERRIDE/KEEP/MISSING 优先级正确; run_one 编排 writer+PASS+audit PASS+4 keys 无 error;
-fail-fast (缺译文) 不生成 sidecar; main() 端到端 10 包全 PASS + manifest 10 行 (audit -m 重复传正确)。
+OVERRIDE/KEEP/MISSING 优先级正确; mixed(TRANSLATE+KEEP) 只改 translated keys → PASS;
+all-KEEP → 不因 KEEP 报 missing → PASS; 真 MISSING → FAIL 不生成; stale 非空 out-dir → FAIL(rc=2)
+不自动删旧文件; main() 端到端混合+全KEEP 2 包全 PASS + manifest 3 新增列 + 不变式成立。
 
 **验证要求 (汇报)**: 10 个 sidecar 文件名 / 每包修改 key 数 / writer verify / independent audit / 是否全部 PASS。

@@ -67,6 +67,7 @@ _GROUP = 0x80000000
 
 _MAN_COLS = [
     "cohort_slot", "source_package", "output_sidecar", "target_TGI",
+    "approved_key_count", "translated_key_count", "keep_key_count",
     "modified_key_count", "writer_verify", "audit_result", "error",
 ]
 
@@ -118,10 +119,11 @@ class TranslationResolver:
             return None
 
     def resolve(self, source_text):
-        """返回 (translation, source_tag) 或 (None, tag)。
-           KEEP 类 -> (None, 'KEEP') —— 上层据此 fail-fast (approved 玩家可见 key 不应被 KEEP)。"""
+        """返回 (translation, source_tag)。
+           KEEP 类 -> (None, 'KEEP') —— 合法终态 (已审核决定保持原文), 上层不报错。
+           MISSING / unresolved -> (None, 'MISSING') —— 上层 fail-fast。"""
         if not source_text or not source_text.strip():
-            return None, "EMPTY"
+            return None, "MISSING"
         tid = make_translation_id(source_hash(norm_text(source_text)), 1)
         if tid in self.overrides:
             tr, act = self.overrides[tid]
@@ -244,25 +246,36 @@ def approved_pv_refs(pkg_path):
 
 
 def resolve_all_approved(pv_list, resolver, overrides_path):
-    """为每 approved key 解析译文。返回 (mods, errors)。
-    mods = [(kh, source_text, translation, source_tag)]"""
+    """为每 approved unique key 解析译文。
+
+    返回 (mods, keeps, errors):
+      mods  : [(kh, source_text, translation, source_tag)]  TRANSLATE, 进 -m
+      keeps : [(kh, source_text)]                            KEEP, 合法, 不进 -m (COMPLETE-STBL 原样保留)
+      errors: [str]  MISSING / unresolved REVIEW / source mismatch —— fail-fast
+
+    approved 内同一 key 只出现一次 (上游已按 (cat,kh) 去重)。"""
     mods = []
+    keeps = []
     errors = []
     for cat, kh, src in pv_list:
         tr, tag = resolver.resolve(src)
+        if tag == "KEEP":
+            keeps.append((kh, src))
+            continue
         if tr is None:
-            errors.append(f"{cat} key 0x{kh:08X} (source={src!r}) 译文缺失/被KEEP (tag={tag})")
+            errors.append(f"{cat} key 0x{kh:08X} (source={src!r}) 缺译文/unresolved (tag={tag})")
             continue
         mods.append((kh, src, tr, tag))
-    return mods, errors
+    return mods, keeps, errors
 
 
 # ---------------------------------------------------------------- 编排
 def run_one(slot, src_path, out_dir, writer_exe, resolver, overrides_path):
-    """生成单个 sidecar。返回 manifest row dict。"""
+    """生成单个 sidecar。返回 manifest row dict。
+
+    out_dir 已由 main() 校验为干净 (不存在或为空) 后才调用本函数。"""
     src = Path(src_path)
     out_dir = Path(out_dir) if not isinstance(out_dir, Path) else out_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
     base = src.stem
     out_sidecar = out_dir / f"{slot:02d}_{base}_CHS.package"
 
@@ -281,12 +294,22 @@ def run_one(slot, src_path, out_dir, writer_exe, resolver, overrides_path):
         row["error"] = "; ".join(errs)
         return row
     row["target_TGI"] = target_tgi
+    row["approved_key_count"] = str(len(approved))
 
-    # ---- 2) 译文解析 (fail-fast) ----
-    mods, errs = resolve_all_approved(approved, resolver, overrides_path)
+    # ---- 2) 译文解析: TRANSLATE -> -m; KEEP -> 原样保留; MISSING/unresolved -> fail-fast ----
+    mods, keeps, errs = resolve_all_approved(approved, resolver, overrides_path)
     if errs:
         row["error"] = "; ".join(errs)
         return row
+    row["translated_key_count"] = str(len(mods))
+    row["keep_key_count"] = str(len(keeps))
+
+    # 不变式: translated + keep == approved (approved unique resolved player-visible keys)
+    if len(mods) + len(keeps) != len(approved):
+        row["error"] = (f"不变式违背: translated({len(mods)}) + keep({len(keeps)}) "
+                         f"!= approved({len(approved)})")
+        return row
+    # modified_key_count == translated_key_count
     row["modified_key_count"] = str(len(mods))
 
     # ---- 3) writer CLI ----
@@ -367,6 +390,12 @@ def main():
 
     cohort = Path(a.cohort)
     out_dir = Path(a.out_dir)
+
+    # ---- 防 stale: 目标 out-dir 已存在且非空 -> refuse / fail-fast (不自动删旧文件) ----
+    if out_dir.exists() and any(out_dir.iterdir()):
+        print(f"[FAIL-FAST] 目标 out-dir 非空: {out_dir}")
+        print("   已存在文件/子目录, refuse —— 不会自动删除。请手动清空或换 --out-dir 后重试。")
+        return 2
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
@@ -387,8 +416,9 @@ def main():
         results.append(mr)
         # 终端逐包 summary
         status = "✔" if (mr["writer_verify"] == "PASS" and mr["audit_result"] == "PASS") else "✘"
-        print(f"[{status}] slot={mr['cohort_slot']:>2} {Path(path).name:<40} "
-              f"keys={mr['modified_key_count'] or '-'} writer={mr['writer_verify'] or '-'} "
+        print(f"[{status}] slot={mr['cohort_slot']:>2} {Path(path).name:<36} "
+              f"A={mr['approved_key_count'] or '-'} T={mr['translated_key_count'] or '-'} "
+              f"K={mr['keep_key_count'] or '-'} writer={mr['writer_verify'] or '-'} "
               f"audit={mr['audit_result'] or '-'}" +
               (f"  ERR={mr['error']}" if mr.get("error") else ""))
 
