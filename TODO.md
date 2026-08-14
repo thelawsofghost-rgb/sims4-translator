@@ -75,12 +75,13 @@ offset 高位/相邻字段有关联, 需根据核实后的布局填上 size。
       **已由 Dorothy 官方确认 locale 映射 (0x01=CHS, 0x02=CHT), 无需再扫描官包**
 
 ### Phase 3B (写回, 单条 MVP, 进行中)
-- [ ] `scripts/patch_stbl.py` MVP:
-      输入 package 路径 + output 路径 + mapping.csv
-      打开 DBPF → 找 STBL → locale 0x01 → 读 key → 按 mapping 改文本 → 另存新包 (不覆盖)
-- [ ] 保留: 原包备份 / 未修改 resource / 其他 locale STBL
-- [ ] 单条测试: Embracing Faces 只改 1 字符串 → 验证游戏加载 + 显示中文
+- [x] `scripts/patch_stbl.py` MVP 已开发 + fixture 回归通过
+      (CHS locale 0x01 只改目标 key; EN locale 0x00 / 其他 resource 原样; copy-on-write)
+- [x] `--inspect` 只读模式 (列出 locale 0x01 STBL 全部 keyHash + TID)
+- [ ] Windows 真包单条测试: Embracing Faces 改 1 字符串 → 游戏加载 + 显示中文
+- [ ] 保留: 原包备份 / 未修改 resource / 其他 locale STBL (已验证)
 - [ ] 暂不做: 全量 1968 / 全扫 Mods / 批处理
+- [ ] 已知限制: DBPF index entry flags/reserved MVP 重建置 0 (原通常为 0)
 
 ---
 
