@@ -42,6 +42,13 @@ new_rows = [
     ("T_2a2ce211e44a_g1", "sofa_footrest", "", "KEEP", "NON_SEMANTIC_TAG / TECHNICAL"),
 ]
 
+# ---- final3 增批 (Dorothy 拍板 3 条) - BASE 应为 final2 ----
+FINAL3_NEW = [
+    ("T_544cbac95162_g1", "All In One Right", "整合版 右", "TRANSLATE", "Dorothy 修正"),
+    ("T_ebd4ffe75547_g1", "All In One left", "整合版 左", "TRANSLATE", "Dorothy 修正"),
+    ("T_b79128b4364c_g1", "Looking Left", "向左看", "TRANSLATE", "Dorothy 修正"),
+]
+
 COLS = ["translation_id", "source_text", "translation", "action", "reason", "notes"]
 
 def load(path):
@@ -121,5 +128,64 @@ def main():
     print("全部通过 ✓")
     return 0
 
+
+def mode_final3():
+    """final3: BASE=final2(111), 仅新增 Dorothy 拍板 3 条 -> final3(应114)"""
+    base_path = OUT / "translation_overrides.final2.csv"
+    if not base_path.exists():
+        print(f"[!] 缺 BASE final2: {base_path}"); sys.exit(2)
+    base = load(base_path)
+    idx = {}
+    for r in base:
+        k = (r["translation_id"].strip(), r["source_text"].strip())
+        if k in idx:
+            print(f"[!] final2 重复 key: {k}"); sys.exit(2)
+        idx[k] = r
+    print(f"old_count(BASE final2)   : {len(base)}")
+
+    added = 0; dup = []; src_mm = []
+    for tid, src, zh, act, why in FINAL3_NEW:
+        if tid in {r["translation_id"].strip() for r in base}:
+            ex = [r for r in base if r["translation_id"].strip() == tid][0]
+            e_src = (ex.get("source_text") or "").strip()
+            if e_src != src:
+                src_mm.append((tid, e_src, src))
+        k = (tid, src)
+        if k in idx:
+            dup.append(k); continue
+        idx[k] = None
+        base.append({"translation_id": tid, "source_text": src, "translation": zh,
+                     "action": act, "reason": why, "notes": "final3 batch"})
+        added += 1
+    print(f"new_keys                 : {added}")
+    print(f"duplicate_key (跳过)     : {len(dup)}")
+    for k in dup: print("    ", k)
+    print(f"source_text_mismatch     : {len(src_mm)}")
+    for a, b, c in src_mm: print(f"     {a}: final2='{b}' vs batch='{c}'")
+
+    final = []; seen = set()
+    for r in base:
+        k = (r["translation_id"].strip(), r["source_text"].strip())
+        if k in seen: continue
+        seen.add(k); final.append(r)
+    print(f"final_count              : {len(final)}")
+
+    ok = (len(dup) == 0 and len(src_mm) == 0)
+    print(f"conflict/异常            : {'无' if ok else '有, 见上'}")
+    if not ok:
+        print("=> BLOCKED, 不写 final3"); sys.exit(2)
+
+    dest = OUT / "translation_overrides.final3.csv"
+    with open(dest, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=COLS); w.writeheader()
+        for r in final: w.writerow({c: r.get(c, "") for c in COLS})
+    print(f"\n[写出] {dest}  (未覆盖 production translation_overrides.csv)")
+    print("全部通过 ✓")
+    return 0
+
+
 if __name__ == "__main__":
+    mode = sys.argv[2] if len(sys.argv) >= 3 else "final2"
+    if mode == "final3":
+        sys.exit(mode_final3())
     sys.exit(main())
