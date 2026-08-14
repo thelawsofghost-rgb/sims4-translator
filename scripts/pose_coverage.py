@@ -27,7 +27,9 @@ pose_coverage.py — 659 CONFIRMED_POSE 只读 coverage 扫描 + 代表性 10-co
   SKIP_NO_CHS             缺 0x01 CHS (不自行创建)
   SKIP_AMBIGUOUS_TGI      CHS 目标 STBL >1 或多 target family, 无法唯一确定
   SKIP_MAPPING_UNCERTAIN  无结构证据 / pack 级字段引不到 STBL
+  SKIP_DUPLICATE_KEYHASH  (唯一 target) 含重复 KeyHash, 保守跳过, 不进 ELIGIBLE
   ERROR                   DBPF 解析失败等异常
+  ERROR_COVERAGE_INVARIANT target 三分法不满足 invariant (计量单位/scope 异常)
 
 铁律:
   * 不根据 STBL 文本“看起来像英文”判 TRANSLATE; 只认 XML 结构引用。
@@ -236,6 +238,10 @@ def scan_package(path: str) -> dict:
         "CHS_target_STBL_count": 0,
         "CHS_target_TGI(s)": "",
         "CHS_entry_count": 0,
+        "CHS_unique_key_hash_count": 0,
+        "duplicate_key_hash_count": 0,
+        "duplicate_extra_occurrences": 0,
+        "duplicate_writable_key_count": 0,
         "pack_title_ref_count": 0,
         "pack_description_ref_count": 0,
         "pose_display_name_ref_count": 0,
@@ -377,16 +383,27 @@ def scan_package(path: str) -> dict:
     # 做三分法。多 target / 无 target 时计数一律置 0, 避免把其他 STBL/locale/orphan
     # 的 key 混进 target 统计 (修复: [Kritical]BrainwashingMachineAtropos1c 64 vs 2)。
     translate = keep = unmapped = 0
-    target_key_set = set()   # exact CHS target STBL 的 key hash 全集
+    target_key_set = set()   # exact CHS target STBL 的 key hash 全集 (unique)
     if row["CHS_target_STBL_count"] == 1:
         chs_inst, chs_ver, chs_comp, chs_kvs = chs[0]
-        target_keys = {kh: (fl, txt) for kh, fl, txt in chs_kvs}  # 仅该 exact STBL 的 key
+        # CHS_entry_count = 物理 entry 数 (含重复 KeyHash)。
+        # 但 TRANSLATE/KEEP/UNMAPPED 是基于 unique key hash 集计数的,
+        # 因此目标分类 invariant 必须用同一计量单位 —— CHS_unique_key_hash_count。
+        phys_khs = [kh for kh, _, _ in chs_kvs]
+        row["CHS_unique_key_hash_count"] = len(set(phys_khs))
+        phys_cnt = Counter(phys_khs)
+        dup_hashes = {kh for kh, c in phys_cnt.items() if c > 1}
+        row["duplicate_key_hash_count"] = len(dup_hashes)
+        row["duplicate_extra_occurrences"] = len(phys_khs) - len(set(phys_khs))
+        target_keys = {kh: (fl, txt) for kh, fl, txt in chs_kvs}  # 仅该 exact STBL 的 key (unique)
         target_key_set = set(target_keys.keys())
-        # TRANSLATE keys: 只取【结构位置门控后的 exact 3 字段】引用的 key (与 pv_refs 同一套
-        # 定义+位置: PosePackInstance-level display_name/description + pose_list 内 pose_display_name),
-        # 与 pv_refs 用同一套定义 —— 绝不用宽泛 DISPLAY substring (修: pose_description 等被吞)。
+        # duplicate_writable_key_count: 重复 KeyHash 中有多少落在 TRANSLATE/KEEP
+        # (即会被 writer 写到的 key); 当前阶段不据此放宽, 只是报告。
+        # 落在 UNMAPPED 的重复不额外写 (writer 只写 T/K), 但一律保守跳过 (见 _classify)。
         tset = translate_ref_keys & target_key_set
         kset = keep_ref_keys & target_key_set
+        writable = tset | kset
+        row["duplicate_writable_key_count"] = len(dup_hashes & writable)
         translate = len(tset)
         keep = len(kset)
         unmapped = len(target_key_set - tset - kset)  # target 内无任何结构引用的 orphan
@@ -394,12 +411,13 @@ def scan_package(path: str) -> dict:
     row["keep_count"] = keep
     row["unmapped_uncertain_count"] = unmapped
 
-    # ---- 硬 invariant: target STBL 三分法全量覆盖 ----
-    # TRANSLATE + KEEP + UNMAPPED 必须 == CHS_entry_count (exact target STBL key 总数)。
-    # 不满足 -> 计数串了 scope, 绝不判 ELIGIBLE。
+    # ---- 硬 invariant: target STBL 三分法全量覆盖 (同一计量单位: unique key hash) ----
+    # TRANSLATE + KEEP + UNMAPPED 必须 == CHS_unique_key_hash_count (exact target STBL 的
+    # unique key 总数)。不满足 -> 计数串了 scope 或计量单位不一致, 绝不判 ELIGIBLE。
+    # 注: CHS_entry_count 是物理数(含重复), 只作报告, 不用于三分法 invariant(避免被 duplicate 干扰)。
     if row["CHS_target_STBL_count"] == 1:
         inv = translate + keep + unmapped
-        row["invariant_ok"] = 1 if inv == row["CHS_entry_count"] else 0
+        row["invariant_ok"] = 1 if inv == row["CHS_unique_key_hash_count"] else 0
     else:
         row["invariant_ok"] = 0
 
@@ -485,18 +503,29 @@ def _classify(row: dict) -> dict:
         row["status"] = "SKIP_AMBIGUOUS_TGI"
         row["reason"] = f"CHS 目标 STBL 数 {row['CHS_target_STBL_count']} != 1 (多 target / 多 family)"
         return row
-    # 硬 invariant: target STBL 三分法必须全量覆盖。
-    # TRANSLATE + KEEP + UNMAPPED == CHS_entry_count (即 exact CHS target STBL key 总数)。
-    # 不满足 => 计数串了 scope (把其他 STBL/locale/orphan key 混进 target), 绝不判 ELIGIBLE。
+    # (唯一 target) 含重复 KeyHash — 保守跳过, 不进 ELIGIBLE。
+    # 即使重复只落在 UNMAPPED, 当前阶段一律不区分, 全部跳过 (写 sidecar 需逐 key 精确
+    # 反查 + 原文保留, 重复 hash 使“唯一 key→唯一文本”映射失效, 无法保证 writer 只动目标 key)。
+    if row["duplicate_key_hash_count"] > 0:
+        row["status"] = "SKIP_DUPLICATE_KEYHASH"
+        row["reason"] = (
+            "target CHS contains duplicate KeyHash: "
+            f"physical={row['CHS_entry_count']}, unique={row['CHS_unique_key_hash_count']}, "
+            f"duplicate_hashes={row['duplicate_key_hash_count']}, "
+            f"extra_occurrences={row['duplicate_extra_occurrences']}")
+        return row
+    # 硬 invariant: target STBL 三分法必须全量覆盖 (同一计量单位: unique key hash)。
+    # TRANSLATE + KEEP + UNMAPPED == CHS_unique_key_hash_count (exact CHS target STBL 的
+    # unique key 总数)。不满足 => 计数串了 scope / 计量单位不一致, 绝不判 ELIGIBLE。
     _sum = (row["exact_structural_translate_count"]
             + row["keep_count"] + row["unmapped_uncertain_count"])
-    if _sum != row["CHS_entry_count"]:
+    if _sum != row["CHS_unique_key_hash_count"]:
         row["status"] = "ERROR_COVERAGE_INVARIANT"
-        row["reason"] = (f"target 三分法不满足 invariant: "
+        row["reason"] = (f"target 三分法不满足 invariant (按 unique key hash 计量): "
                           f"TRANSLATE+{row['exact_structural_translate_count']} "
                           f"+KEEP+{row['keep_count']} +UNMAPPED+{row['unmapped_uncertain_count']} "
-                          f"={_sum} != CHS_entry_count={row['CHS_entry_count']} "
-                          f"(scope 串包: 其他 STBL/locale/orphan 混入)")
+                          f"={_sum} != CHS_unique_key_hash_count={row['CHS_unique_key_hash_count']} "
+                          f"(scope 串包或计量单位不一致: 其他 STBL/locale/orphan 混入)")
         return row
     if row["unresolved_player_visible_ref_count"] != 0:
         row["status"] = "SKIP_MAPPING_UNCERTAIN"
@@ -530,7 +559,7 @@ def _classify(row: dict) -> dict:
                           "(translate=0 且 keep=0); unmapped/orphan key 不阻塞写入")
         return row
     row["status"] = "ELIGIBLE_EXISTING_CHS"
-    row["reason"] = ("存在唯一 0x01 CHS 目标, 三分法全量覆盖 + invariant 满足 + "
+    row["reason"] = ("存在唯一 0x01 CHS 目标, 无重复 KeyHash, 三分法全量覆盖 + invariant 满足 + "
                       "player-visible refs 全部 exact resolve")
     return row
 
@@ -704,7 +733,8 @@ def main():
     sc = Counter(r["status"] for r in rows)
     print("\n--- status 数量 ---")
     for s in ("ELIGIBLE_EXISTING_CHS", "SKIP_NO_CHS", "SKIP_AMBIGUOUS_TGI",
-              "SKIP_MAPPING_UNCERTAIN", "ERROR", "ERROR_COVERAGE_INVARIANT"):
+              "SKIP_MAPPING_UNCERTAIN", "SKIP_DUPLICATE_KEYHASH",
+              "ERROR", "ERROR_COVERAGE_INVARIANT"):
         print(f"  {s}: {sc.get(s, 0)}")
 
     # ---- cohort ----
@@ -735,7 +765,8 @@ def main():
         f.write("# 659 CONFIRMED_POSE coverage 报告 (只读)\n\n")
         f.write(f"扫描包数: {len(rows)}\n\n## status 数量\n\n")
         for s in ("ELIGIBLE_EXISTING_CHS", "SKIP_NO_CHS", "SKIP_AMBIGUOUS_TGI",
-                  "SKIP_MAPPING_UNCERTAIN", "ERROR", "ERROR_COVERAGE_INVARIANT"):
+                  "SKIP_MAPPING_UNCERTAIN", "SKIP_DUPLICATE_KEYHASH",
+                  "ERROR", "ERROR_COVERAGE_INVARIANT"):
             f.write(f"- {s}: {sc.get(s, 0)}\n")
         f.write("\n## 代表性 10-cohort (程序化选择, 非随机/非人工)\n\n")
         f.write("| slot | why | package | CHS TGI | CHS entries | TRANSLATE | KEEP | UNMAPPED |\n")
@@ -758,6 +789,8 @@ def main():
 
 _COLS = ["package_path", "file_size", "PosePackInstance_count", "STBL_count_total",
          "CHS_0x01_exists", "CHS_target_STBL_count", "CHS_target_TGI(s)", "CHS_entry_count",
+         "CHS_unique_key_hash_count", "duplicate_key_hash_count",
+         "duplicate_extra_occurrences", "duplicate_writable_key_count",
          "pack_title_ref_count", "pack_description_ref_count", "pose_display_name_ref_count",
          "exact_structural_translate_count", "keep_count", "unmapped_uncertain_count",
          "invariant_ok",
