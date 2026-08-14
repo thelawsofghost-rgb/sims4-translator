@@ -85,11 +85,18 @@ offset 高位/相邻字段有关联, 需根据核实后的布局填上 size。
         stbl_surgical_edit 把短文本(左)写进原槽并改长度字段 -> 解析器按 7+len 推进
         但物理槽仍 7+old_len -> 后续 key 错位 -> STBL 结构损坏。
         (我的 VERI 只查目标 key 漏过; 本地复现确认解码失败)
-- [x] patch_stbl **v3 修复**: 重建整个目标 STBL + 正确的 DBPF relayout
-      (其余 resource body 原字节逐字节复制, index entry 保留原始 32 字节只改 offset/size,
-       压缩位=u32 bit31, comp_flag@0x3C/flags 原样; 被编辑 STBL 存储方式跟随原 raw/zlib)
-      fixture (raw STBL 同真实包形状 + zlib STBL) 全过; 已 push faad304
-- [ ] Windows 真包单条测试 #3: 用 v3 重新生成新包 → 游戏加载显示中文
+- [x] patch_stbl **v3 relayout 修复** (faad304): 重建整个 STBL + 正确 DBPF relayout;
+      fixture 全过, 但 Windows 真包测试 #3 仍失败: `de4e14f9...` 游戏拒绝启动
+      → 定位: relayout 压缩 CHS STBL 1B 后 index_offset 512->511 + 后续资源 offset 全 -1,
+        loader 对结构位移敏感。
+- [x] patch_stbl **首选方案 (a4a52fa): 保持原体积的 inplace 原位写入** — 不重排!
+      → 关键洞察: STBL 解析器按 count 顺序读满即停, 忽略最后一个 key 之后的尾部字节。
+        新 STBL 短了 1B, 在最后 key 之后补零到 == 原 size -> 存储体积不变 -> 
+        文件大小/index_offset/index_size/count/全部 index entry 均与原始逐字节一致;
+        仅目标 STBL body 区内容字节变 (Left->左 + 尾部补零), 等同手工 hex 编辑。
+        新增 [STRUCT] 验证: 结构性零改动。新增 scripts/cmp_pkg.py 全量对比诊断。
+        fixture (raw + zlib) 均 [STRUCT] PASS + [VERI] PASS。
+- [ ] Windows 真包单条测试 #4: 用 inplace 方案重新生成 → 游戏加载显示中文
 - [ ] 保留: 原包备份 / 未修改 resource / 其他 locale STBL (已验证)
 - [ ] 暂不做: 全量 1968 / 全扫 Mods / 批处理
 - [ ] 已知限制: DBPF index entry flags/reserved MVP 重建置 0 (原通常为 0)
