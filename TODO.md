@@ -78,14 +78,18 @@ offset 高位/相邻字段有关联, 需根据核实后的布局填上 size。
 - [x] `scripts/patch_stbl.py` MVP 已开发 + fixture 回归通过
       (CHS locale 0x01 只改目标 key; EN locale 0x00 / 其他 resource 原样; copy-on-write)
 - [x] `--inspect` 只读模式 (列出 locale 0x01 STBL 全部 keyHash + TID)
-- [x] Windows 真包单条测试 #1: `Left->左` 生成 CHS_test.package → **游戏报“文件损坏”**
-      → 根因: v1 build_dbpf 重建整个 package 破坏结构 (置零 index flags/reserved、
-        剥掉压缩标记(从 offset>>31 读恒0, 实应读 entry.is_compressed)、移除 body padding、
-        重算绝对 index offset 可能破坏相对 index)
-- [x] patch_stbl **v2 修复**: 改原位外科手术 copy-on-write — 1:1 复制原文件字节,
-      仅原位覆盖目标 STBL body 区 (新压缩试 zlib1..9 取最小, pad 到 == 原体积,
-      offset/size/index 全不动); [B-DIFF] 机械保证目标区外逐字节一致; fixture 全过
-- [ ] Windows 真包单条测试 #2: 用 v2 重新生成 CHS_test.package → 游戏加载显示中文
+- [x] Windows 真包单条测试 #1: `Left->左` → **游戏报“文件损坏”** (v1 build_dbpf 重建破坏结构)
+      → v1 根因: 置零 index flags/reserved、剥压缩标记、移除 body padding、重算绝对 index offset
+- [x] Windows 真包单条测试 #2 (v2 原位外科手术): 生成 CHS_test2 → **游戏无法启动**
+      → v2 根因 (真包 diag 确诊): 本系列 pose 包 STBL 是 **raw 存储** (size=130, 5 keys)。
+        stbl_surgical_edit 把短文本(左)写进原槽并改长度字段 -> 解析器按 7+len 推进
+        但物理槽仍 7+old_len -> 后续 key 错位 -> STBL 结构损坏。
+        (我的 VERI 只查目标 key 漏过; 本地复现确认解码失败)
+- [x] patch_stbl **v3 修复**: 重建整个目标 STBL + 正确的 DBPF relayout
+      (其余 resource body 原字节逐字节复制, index entry 保留原始 32 字节只改 offset/size,
+       压缩位=u32 bit31, comp_flag@0x3C/flags 原样; 被编辑 STBL 存储方式跟随原 raw/zlib)
+      fixture (raw STBL 同真实包形状 + zlib STBL) 全过; 已 push faad304
+- [ ] Windows 真包单条测试 #3: 用 v3 重新生成新包 → 游戏加载显示中文
 - [ ] 保留: 原包备份 / 未修改 resource / 其他 locale STBL (已验证)
 - [ ] 暂不做: 全量 1968 / 全扫 Mods / 批处理
 - [ ] 已知限制: DBPF index entry flags/reserved MVP 重建置 0 (原通常为 0)
