@@ -335,10 +335,19 @@ pose_list 兜底); main() 产出 3 文件; cohort 类别缺则 NOT_PRESENT (不�
 - 逐 approved key: 引用 hash 必须在 exact CHS target STBL key 全集内 (否则 unresolved fail-fast);
   target STBL 含重复 KeyHash 一律 fail-fast; source_text 取 target STBL 现值
 - 译文解析优先级: `translation_overrides.csv`(T_<hash>_g1) -> `translation_done.csv` -> `translation_cache.db`
+  ; 匹配键 = (translation_id, normalized source_text) 两者同时一致才命中 (与 frozen phase2b 一致);
+     tid 由 `source_hash(norm_text(source_text))` 派生 (源文本 hash, 非 STBL KeyHash);
   ; TRANSLATE -> 有效译文, 进 SidecarBuilder `-m`, translated_key_count+1;
     KEEP -> 合法终态 (已审核决定保持原文), 不传 `-m`, COMPLETE-STBL 原样保留, keep_key_count+1, 不报错;
-    MISSING / unresolved REVIEW / source mismatch -> fail-fast (不生成该包)
+    MISSING / unresolved REVIEW / SOURCE_MISMATCH -> fail-fast (不生成该包);
+    SOURCE_MISMATCH = tid 命中但 normalized source_text 不一致 (绝不静默取用错误译文);
   ; 不变式: translated_key_count + keep_key_count == approved_key_count; 且 modified_key_count == translated_key_count
+- 强 preflight (启动即 FAIL, 禁止静默空表): 显式指定的 overrides/done/cache 必须成功加载;
+    文件不存在 / 0 行 / schema 缺列 (overrides 需 translation_id,source_text,translation,action;
+    done 需 translation_id,source_text,translation,status; cache 需 phrase_cache 表 +
+    translation_id,source_phrase,translation 列) -> RuntimeError rc=2, 且在建 out-dir 之前执行。
+- cache.db 按 translation_id (stable ID) join + 校验 source_phrase 一致 (不再按全文 source_phrase 精确查,
+  因 cache 主键为 request_fingerprint 且存的是分段原子短语)。
 - output-dir 防 stale: 目标 out-dir 已存在且非空 -> refuse/fail-fast (rc=2, 不自动删旧文件)
 - 调 `SidecarBuilder.exe` (COMPLETE-STBL writer, 含 UTF8 EntrySize backport):
   `-m KEYHASH:SOURCE:TRANSLATION` 每 approved key 一条; writer 内部做 expected-source 校验
@@ -359,5 +368,17 @@ python scripts\gen_cohort_sidecars.py --cohort output\cohort_selection.csv --out
 OVERRIDE/KEEP/MISSING 优先级正确; mixed(TRANSLATE+KEEP) 只改 translated keys → PASS;
 all-KEEP → 不因 KEEP 报 missing → PASS; 真 MISSING → FAIL 不生成; stale 非空 out-dir → FAIL(rc=2)
 不自动删旧文件; main() 端到端混合+全KEEP 2 包全 PASS + manifest 3 新增列 + 不变式成立。
+加 (2026-08-15 诊断后): 强 preflight 5 项 (overrides/done 缺文件·0行·缺列 / cache 缺文件·缺列)
+全 PASS; (tid,norm_source) 精确匹配 + KEEP保留 + source mismatch→SOURCE_MISMATCH fail-fast +
+cache by translation_id 命中 全 PASS (白盒 12/12)。
+
+只读资产诊断工具 (Windows, 对真实 frozen asset):
+```
+python scripts\diag_resolver_assets.py --done output\translation_done.csv --cache output\translation_cache.db
+```
+输出 done.csv 的绝对路径/exists/大小/BOM/headers/总行数/resolver 载入行数 + 6 个稳定ID
+(T_b56169d01d20_g1 等) 的 exact lookup (row 是否存在/实际 source_text/norm/hash_ok/status/translation/
+resolver 接受或拒绝原因), 以及 cache.db 的表/schema/行数 + 6 ID 的 by-tid/by-source_hash/
+by-source_phrase 命中与 resolver 实际查询语义。只读, 不改 frozen data, 不生成 sidecar。
 
 **验证要求 (汇报)**: 10 个 sidecar 文件名 / 每包修改 key 数 / writer verify / independent audit / 是否全部 PASS。

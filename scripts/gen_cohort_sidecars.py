@@ -80,64 +80,147 @@ class TranslationResolver:
     """
 
     def __init__(self, overrides_path, done_path=None, cache_path=None):
-        self.overrides = {}     # translation_id -> (translation, action)
-        self.done = {}          # translation_id -> (translation, status)
+        """loaders 只读消费 frozen assets。
+
+        匹配语义与 frozen (phase2b) 一致: key = (translation_id, normalized source_text)
+        两者必须同时一致才命中 (source 不一致 -> source mismatch 而非静默取用)。
+
+        强 preflight: 显式指定的 overrides/done 必须成功加载, 加载失败 / 0 行 /
+        Schema 不兼容 -> raise RuntimeError (启动即 FAIL, 禁止静默空表后继续)。
+        """
+        self.overrides = {}     # (tid, norm_text) -> (translation, action)
+        self.done = {}          # (tid, norm_text) -> (translation, status)
+        self.overrides_loaded = 0
+        self.done_loaded = 0
+        self.overrides_total_rows = 0
+        self.done_total_rows = 0
         self.cache_db = str(cache_path) if cache_path and Path(cache_path).exists() else None
+        self.cache_schema_err = ""
 
         overrides_path = Path(overrides_path) if overrides_path else None
-        if overrides_path and overrides_path.exists():
-            with open(overrides_path, encoding="utf-8-sig") as f:
-                for r in csv.DictReader(f):
-                    tid = (r.get("translation_id") or "").strip()
-                    if not tid:
-                        continue
-                    self.overrides[tid] = (r.get("translation", "").strip(),
-                                           (r.get("action") or "").strip())
-        if done_path and Path(done_path).exists():
-            with open(done_path, encoding="utf-8-sig") as f:
-                for r in csv.DictReader(f):
-                    tid = (r.get("translation_id") or "").strip()
-                    if not tid:
-                        continue
-                    self.done[tid] = (r.get("translation", "").strip(),
-                                      (r.get("status") or "").strip())
+        if overrides_path is not None:
+            if not overrides_path.exists():
+                raise RuntimeError(f"preflight FAIL: overrides 显式指定但文件不存在: {overrides_path}")
+            self.overrides_total_rows, self.overrides_loaded = self._load_csv(
+                overrides_path, self.overrides, action_required=True,
+                label="overrides")
+            if self.overrides_loaded == 0:
+                raise RuntimeError(
+                    f"preflight FAIL: overrides 加载 0 行 (共 {self.overrides_total_rows}), 无法继续")
+        if overrides_path is None:
+            raise RuntimeError("preflight FAIL: 必须显式指定 --overrides (frozen override 层)")
 
-    def _cache_lookup(self, source_text):
+        if done_path is not None and str(done_path):
+            if not Path(done_path).exists():
+                raise RuntimeError(f"preflight FAIL: --done 显式指定但文件不存在: {done_path}")
+            self.done_total_rows, self.done_loaded = self._load_csv(
+                done_path, self.done, action_required=False, label="done")
+            if self.done_loaded == 0:
+                raise RuntimeError(
+                    f"preflight FAIL: done.csv 加载 0 行 (共 {self.done_total_rows}), 无法继续")
+
+        if cache_path is not None and str(cache_path):
+            if self.cache_db is None:
+                raise RuntimeError(f"preflight FAIL: --cache 显式指定但文件不存在: {cache_path}")
+            self._preflight_cache()
+
+    @staticmethod
+    def _load_csv(path, target, action_required, label):
+        """读 CSV 到 target[(tid, norm_text)] = (translation, status/action)。
+        返回 (总行数, 有效载入行数)。缺 key 列 -> schema 不兼容直接抛错。"""
+        total = 0
+        loaded = 0
+        with open(path, encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            hdr = list(reader.fieldnames or [])
+            for need in ("translation_id", "source_text", "translation"):
+                if need not in hdr:
+                    raise RuntimeError(f"preflight FAIL: {label} schema 缺列 {need!r}; 实际列={hdr}")
+            if action_required and "action" not in hdr:
+                raise RuntimeError(f"preflight FAIL: {label} schema 缺列 'action'; 实际列={hdr}")
+            if not action_required and "status" not in hdr:
+                raise RuntimeError(f"preflight FAIL: {label} schema 缺列 'status'; 实际列={hdr}")
+            for r in reader:
+                total += 1
+                tid = (r.get("translation_id") or "").strip()
+                stxt = (r.get("source_text") or "").strip()
+                tr = (r.get("translation") or "").strip()
+                if not tid or not stxt:
+                    continue
+                key = (tid, norm_text(stxt))
+                target[key] = (tr, (r.get("status" if not action_required else "action") or "").strip())
+                loaded += 1
+        return total, loaded
+
+    def _preflight_cache(self):
+        """校验 cache.db schema: 必须含 phrase_cache 表 + translation_id/source_phrase/translation 列。"""
+        try:
+            conn = sqlite3.connect(self.cache_db)
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='phrase_cache'")
+            if cur.fetchone() is None:
+                raise RuntimeError(f"cache.db 无 phrase_cache 表")
+            cur.execute("PRAGMA table_info(phrase_cache)")
+            cols = {r[1] for r in cur.fetchall()}
+            conn.close()
+            for need in ("translation_id", "source_phrase", "translation"):
+                if need not in cols:
+                    raise RuntimeError(
+                        f"cache.db phrase_cache schema 缺列 {need!r}; 实际列={sorted(cols)}")
+        except RuntimeError:
+            raise
+        except Exception as ex:
+            raise RuntimeError(f"cache.db 打开/校验失败: {ex}") from ex
+
+    def _cache_lookup(self, tid, source_text):
+        """按 translation_id(稳定ID) join, 并核对 normalized source_phrase 与输入一致。
+        返回 (translation, ok) ; 不一致 -> (None, False) 表示 source mismatch。"""
         if not self.cache_db:
-            return None
+            return None, True
         try:
             conn = sqlite3.connect(self.cache_db)
             cur = conn.cursor()
             cur.execute(
-                "SELECT translation FROM phrase_cache WHERE source_phrase=? "
-                "AND translation IS NOT NULL AND translation != '' LIMIT 1",
-                (source_text,))
+                "SELECT source_phrase, translation FROM phrase_cache "
+                "WHERE translation_id=? AND translation IS NOT NULL AND translation != '' "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (tid,))
             row = cur.fetchone()
             conn.close()
-            return row[0] if row else None
+            if row is None:
+                return None, True
+            if norm_text(row[0]) != norm_text(source_text):
+                return None, False        # source mismatch (tid 命中但文本不符)
+            return row[1], True
         except Exception:
-            return None
+            return None, True
 
     def resolve(self, source_text):
         """返回 (translation, source_tag)。
            KEEP 类 -> (None, 'KEEP') —— 合法终态 (已审核决定保持原文), 上层不报错。
-           MISSING / unresolved -> (None, 'MISSING') —— 上层 fail-fast。"""
+           MISSING / unresolved -> (None, 'MISSING') —— 上层 fail-fast。
+           SOURCE_MISMATCH -> (None, 'SOURCE_MISMATCH') —— tid 命中但 source_text 不符, fail-fast。"""
         if not source_text or not source_text.strip():
             return None, "MISSING"
         tid = make_translation_id(source_hash(norm_text(source_text)), 1)
-        if tid in self.overrides:
-            tr, act = self.overrides[tid]
+        key = (tid, norm_text(source_text))
+        hit = self.overrides.get(key)
+        if hit is not None:
+            tr, act = hit
             if act == "KEEP":
                 return None, "KEEP"
             if tr:
                 return tr, "OVERRIDE"
-        if tid in self.done:
-            tr, st = self.done[tid]
-            if st == "KEEP" or (st and "KEEP" in st.upper()):
+        hit = self.done.get(key)
+        if hit is not None:
+            tr, st = hit
+            if st and "KEEP" in st.upper():
                 return None, "KEEP"
             if tr:
                 return tr, "DONE"
-        c = self._cache_lookup(source_text)
+        c, cok = self._cache_lookup(tid, source_text)
+        if not cok:
+            return None, "SOURCE_MISMATCH"
         if c:
             return c, "CACHE"
         return None, "MISSING"
@@ -261,6 +344,9 @@ def resolve_all_approved(pv_list, resolver, overrides_path):
         tr, tag = resolver.resolve(src)
         if tag == "KEEP":
             keeps.append((kh, src))
+            continue
+        if tag == "SOURCE_MISMATCH":
+            errors.append(f"{cat} key 0x{kh:08X} (source={src!r}) source mismatch: stable_id 命中但 normalized source_text 不一致")
             continue
         if tr is None:
             errors.append(f"{cat} key 0x{kh:08X} (source={src!r}) 缺译文/unresolved (tag={tag})")
@@ -391,7 +477,17 @@ def main():
     cohort = Path(a.cohort)
     out_dir = Path(a.out_dir)
 
-    # ---- 防 stale: 目标 out-dir 已存在且非空 -> refuse / fail-fast (不自动删旧文件) ----
+    # ---- 0) 强 preflight: asset 加载失败/0行/schema 不兼容 -> 启动即 FAIL (不建 out-dir) ----
+    try:
+        resolver = TranslationResolver(a.overrides, a.done, a.cache)
+    except RuntimeError as ex:
+        print(f"[PREFLIGHT-FAIL] {ex}")
+        return 2
+    print(f"[assets] overrides: {resolver.overrides_loaded}/{resolver.overrides_total_rows} 行; "
+          f"done: {resolver.done_loaded}/{resolver.done_total_rows} 行; "
+          f"cache_db: {'载入' if resolver.cache_db else '未传/不存在'}")
+
+    # ---- 1) 防 stale: 目标 out-dir 已存在且非空 -> refuse / fail-fast (不自动删旧文件) ----
     if out_dir.exists() and any(out_dir.iterdir()):
         print(f"[FAIL-FAST] 目标 out-dir 非空: {out_dir}")
         print("   已存在文件/子目录, refuse —— 不会自动删除。请手动清空或换 --out-dir 后重试。")
@@ -403,7 +499,6 @@ def main():
         for r in csv.DictReader(f):
             rows.append(r)
 
-    resolver = TranslationResolver(a.overrides, a.done, a.cache)
 
     results = []
     for r in rows:
