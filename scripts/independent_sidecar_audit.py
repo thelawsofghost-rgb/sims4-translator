@@ -191,10 +191,12 @@ def main():
 
     R = Result()
 
-    # ---- 加载 production resolver (5 个冻结输入, 只读) ----
-    from gen_cohort_sidecars import TranslationResolver
+    # ---- 加载 production resolver —— 与真实 run2 generation 完全一致 (5 个冻结源, 只读) ----
+    from production_resolver import make_production_resolver
     try:
-        res = TranslationResolver(a.production_overlay, done_path=a.done)
+        res = make_production_resolver(a.title_final, a.desc_final, a.production_overlay,
+                                       translation_done=a.done or None,
+                                       translation_catalog=a.catalog_final or None)
     except Exception as ex:
         print(f"[FATAL] resolver 加载失败: {ex}")
         return 2
@@ -268,7 +270,7 @@ def main():
                             if kh not in kmap:
                                 continue
                             tr, tag = res.resolve(kmap[kh][1])
-                            if tag in ("OVERRIDE", "DONE", "CACHE"):
+                            if tag == "TRANSLATE" and tr is not None:
                                 any_terminal = True
                                 break
                         R.add(f"[NOOP {slot}] 无任何 APPROVED key 解析到 TRANSLATE 终态 (合法 NOOP)",
@@ -365,9 +367,9 @@ def main():
                     tr_map[kh] = (tr, tag)
                 # per-package: approved / translate / keep (只在 approved 内计)
                 tr_approved = {kh for kh, (tr, tag) in tr_map.items()
-                               if tag in ("OVERRIDE", "DONE", "CACHE")}
+                               if tag == "TRANSLATE" and tr is not None}
                 keep_approved = {kh for kh, (tr, tag) in tr_map.items()
-                                 if tag in ("KEEP", "MISSING", "SOURCE_MISMATCH")}
+                                 if tag != "TRANSLATE"}
                 A_cnt = len(appr_kh)
                 T_cnt = len(tr_approved)
                 K_cnt = len(keep_approved)
@@ -394,7 +396,7 @@ def main():
                     sfl, stxt = skmap[kh]
                     ofl, otxt = okmap[kh]
                     tr, tag = tr_map[kh]
-                    if tag in ("OVERRIDE", "DONE", "CACHE"):
+                    if tag == "TRANSLATE":
                         # approved TRANSLATE key
                         if tr is not None and tr != stxt:
                             if otxt == tr:
@@ -421,7 +423,7 @@ def main():
                 # ---- R5 changed set == expected_changed_keys ----
                 # expected = approved TRANSLATE 且 final!=source (真正要求变化的 key)
                 expected_changed = {kh for kh, (tr, tag) in tr_map.items()
-                                    if tag in ("OVERRIDE", "DONE", "CACHE")
+                                    if tag == "TRANSLATE"
                                     and tr is not None and tr != skmap[kh][1]}
                 changed_set = set(changed_keys)
                 miss = sorted(expected_changed - changed_set)      # 应改未改

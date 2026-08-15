@@ -1727,3 +1727,49 @@ auditor 用**同一 ProductionResolver**(五源) + build_approved(approved 集) 
 `scripts/run2_exact_plan.py` 只读诊断; writer/resolver/sidecar 未改; 未重新 generation。
 cache.db 仍未作 final payload (frozen ruling 保持)。下一步: 用户跑真实 Windows 数据, 若
 EXACT PLAN 建成 123/113 且 audit parity 236/236, 再审 sidecar。
+
+---
+
+## 🛠 independent_sidecar_audit.py —— resolver construction 对齐真实 run2 generation (2026-08-15)
+
+### 背景
+用户真实 Windows 上 `run2_exact_plan.py` EXACT_PLAN_PASS:
+- resolver = ProductionResolver 五源 (overlay=241 title=407 desc=190 done=1888 catalog=3540), cache=NO
+- exact plan A=241 T=123 K=118 (cohort 全部含 5 条 NOOP keep 包)
+- 9 generated slots 合计 A=236 T=123 K=113
+- provenance overlay=10 / title=7 / desc=2 / done=104 / UNATTRIBUTED=0
+- ACTION parity=241/241, FINAL parity=241/241
+
+### 改动点 (唯一改动 = auditor 的 resolver construction + 相应 tag 语义)
+**唯一代 writer/resolver/sidecar/manifest, 不重新 generation。**
+1. 弃用 legacy `TranslationResolver(a.production_overlay, done_path=a.done)` (2 源),
+   改为真实 run2 generation 用的五源:
+   `make_production_resolver(title_final, desc_final, production_overlay,
+                             translation_done=a.done, translation_catalog=a.catalog_final)`
+2. 因 ProductionResolver.resolve() 返回 tag 为 `TRANSLATE / KEEP / SOURCE_MISMATCH /
+   MISSING / MISSING_REVIEW` (非 legacy 的 OVERRIDE/DONE/CACHE), 同步修正 4 处 tag 判定:
+   - NOOP 合法性: `tag == "TRANSLATE" and tr is not None` (有终态 payload 才算非法 NOOP)
+   - tr_approved (approved TRANSLATE): `tag == "TRANSLATE" and tr is not None`
+   - keep_approved: `tag != "TRANSLATE"` (KEEP/MISSING/SOURCE_MISMATCH/MISSING_REVIEW)
+   - R5 changed set: `tag == "TRANSLATE" and tr is not None and tr != source`
+3. auditor 仍独立 cold-read source+sidecar; 仅 expected-plan resolver 用冻结五源。
+
+### 接受标准 (用户冻结)
+- R5 前硬门：approved == manifest A / TRANSLATE == manifest T / KEEP == manifest K
+- 整个 cohort: 241 / 123 / 118; 9 generated slots: 236 / 123 / 113; slot5 NOOP: 5 / 0 / 5,
+  PASS_NOOP_KEEP_ONLY, actual sidecar absent
+- 既有真正文件内容验证: source exact CHS TGI unique / sidecar RESOURCE_COUNT=1 /
+  STBL_COUNT=1 / TGI exact / no add/delete / approved TRANSLATE==resolver final /
+  KEEP unchanged / UNRELATED unchanged / duplicate=0 / parse error=0 / stray=0
+- 最终: sidecar audit PASS=9 / FAIL=0 / ERROR=0 / NOOP=1 / stray=0 → INDEPENDENT_AUDIT: PASS
+
+### 白盒回归 (全部绿)
+- `wb_approved_set_v3.py`: INDEPENDENT_AUDIT PASS + APPROVED_SET_REGRESSION OK
+- `wb_indep_v2.py`: 6/6 OK (A1 PASS, A2/A3 FAIL, B1 NOOP planned-path PASS)
+- `wb_indep_audit.py`: INDEPENDENT_AUDIT PASS (sidecar PASS=9 / FAIL=0 / ERROR=0 / NOOP=1 / stray=0)
+- `wb_indep_neg.py`: 10/10 OK (NEG-L PASS; NEG-1/2/3/4/5 全 FAIL 且不误放行)
+- `wb_exact_plan.py`: EXACT_PLAN_WB OK
+- 回归套件: test_phase2b_regression 135/0, test_sidecar_audit_regression 13/0
+- 白盒 resolver fixture 需满足冻结行数 (overlay=241 title=407 desc=190 done=1888
+  catalog=3540); KEEP 决策通过 catalog (status=KEEP), payload 通过 overlay 等源层表达
+  —— 这是 production resolver 与 legacy resolver 语义差异的自然结果。
