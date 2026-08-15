@@ -173,7 +173,7 @@ def _make_todo(path, n=12):
         w = csv.writer(f); w.writerow(cols); w.writerows(rows)
 
 
-def run_once(out, force=True):
+def run_once(out, force=True, auth=False):
     """跑一次 translate (注入 FakeTranslator), 返回模型调用次数 (calls)."""
     # 备份真实 OllamaTranslator, 注入 Fake
     real = P.OllamaTranslator
@@ -192,7 +192,8 @@ def run_once(out, force=True):
         P.DONE = out / "translation_done.csv"
         P.SAMPLE = None
         P.NO_LLM = False
-        sys.argv = ["phase2b_translate.py", str(out)]
+        P.AUTHORITATIVE_DECISION_ON = auth
+        sys.argv = ["phase2b_translate.py", str(out)] + (["--authoritative"] if auth else [])
         P.main()
         sys.argv = old_argv
         P.out_dir = old_out
@@ -200,6 +201,7 @@ def run_once(out, force=True):
     finally:
         P.OllamaTranslator = real
         P.FAKE_FORCE = None
+        P.AUTHORITATIVE_DECISION_ON = False
 
 
 def test_cache_resume():
@@ -432,6 +434,63 @@ def test_override():
     check("QA 识别 KEEP override 为 PASS 终态", q_pass[0] == "PASS", f"got={q_pass!r}")
 
 
+# ================================================================
+# 11. BUG1/BUG2/BUG3 修复回归 (2026-08-15 真实 retry 暴露)
+# ================================================================
+def test_bug_fixes():
+    print("\n== 11. BUG1(echo cache) / BUG2(segment gate) / BUG3(authoritative unchanged) =")
+    d = OUT / "bugfix_test"
+    d.mkdir(parents=True, exist_ok=True)
+    cols = ["translation_id", "source_text", "decision", "detected_language", "source_hash", "category"]
+    rows = [
+        # BUG2: 整行 translation != source, 但 semantic segment 保持英文 -> 假 DONE
+        ("T_962602977185_g1", "Wait... It's You! - Pose Pack", "TRANSLATE", "en", "h1", "TRANSLATE"),
+        ("T_e10b19982082_g1", "Emotions - Sad", "TRANSLATE", "en", "h2", "TRANSLATE"),
+        # BUG3: authoritative TRANSLATE + 整行 unchanged
+        ("T_438c8bd18eda_g1", "[ROSELIPA] 2AM", "TRANSLATE", "en", "h3", "TRANSLATE"),
+        # BUG1: semantic phrase -> echo cache
+        ("T_x1", "Happy Pose", "TRANSLATE", "en", "h4", "TRANSLATE"),
+        # 正常行 (应 DONE)
+        ("T_ok1", "Walking Pose - Relaxed", "TRANSLATE", "en", "h5", "TRANSLATE"),
+    ]
+    with open(d / "translations_todo.csv", "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f); w.writerow(cols); w.writerows(rows)
+    # 预置 cache: echo 条目 (Happy Pose/Pose Pack/Sad), 正常条目 (Emotions/Wait...)
+    cache = PhraseCache(d, model="fake")
+    def _put(src, val):
+        cache.put(fingerprint=build_fingerprint(source_phrase=src, glossary_hint="", context=""),
+                  translation_id="seed", segment_index="0", source_phrase=src,
+                  source_hash=A.source_hash(src), translation=val, now="2026-08-15 00:00:00")
+    _put("Happy Pose", "Happy Pose")        # echo
+    _put("Pose Pack", "Pose Pack")          # echo (BUG2 s1)
+    _put("Sad", "Sad")                      # echo (BUG2 s2)
+    _put("Wait... It's You!", "等等...是你！")
+    _put("Emotions", "情绪")
+    _put("Walking Pose", "行走姿势"); _put("Relaxed", "放松")
+    cache.close()
+    # BUG3 需 --authoritative 才触发 (authoritative TRANSLATE + unchanged + 无 terminal evidence)。
+    run_once(d, auth=True)
+    done = {r["translation_id"]: r for r in csv.DictReader(open(d / "translation_done.csv", encoding="utf-8-sig"))}
+    # BUG1/BUG2 (Fake 模型): echo cache 被拒 -> miss -> 重翻为非 echo 译文 -> DONE。
+    # 验证: 译文 != 原 semantic (echo 未 materialize, 已重翻译)。
+    r1 = done["T_962602977185_g1"]
+    check("BUG2: s1 的 Pose Pack 被重翻 (非 echo)", "译[Pose Pack]" in r1["translation"] and r1["translation"] != "Pose Pack",
+          f"trans={r1['translation']!r}")
+    r2 = done["T_e10b19982082_g1"]
+    check("BUG2: s2 的 Sad 被重翻 (非 echo)", "译[Sad]" in r2["translation"] and r2["translation"] != "Sad",
+          f"trans={r2['translation']!r}")
+    r4 = done["T_x1"]
+    check("BUG1: Happy Pose echo 被拒重翻 (非 echo)", r4["translation"] != "Happy Pose" and r4["status"] == "DONE",
+          f"trans={r4['translation']!r}")
+    # BUG3: authoritative + unchanged ([ROSELIPA] 2AM 无 terminal evidence) -> QA_FAIL
+    r3 = done["T_438c8bd18eda_g1"]
+    check("BUG3: authoritative unchanged 行 QA_FAIL", r3["status"] == "QA_FAIL",
+          f"status={r3['status']!r} trans={r3['translation']!r}")
+    # 正常行仍 DONE
+    r5 = done["T_ok1"]
+    check("BUG fix: 正常行 T_ok1 DONE", r5["status"] == "DONE", f"status={r5['status']!r}")
+
+
 # ---------------- 入口 ----------------
 def main():
     print("Phase 2B regression + cache/resume 验证")
@@ -446,6 +505,7 @@ def main():
     test_ollama_client_no_proxy()
     test_normalize_model_output()
     test_override()
+    test_bug_fixes()
     print(f"\n==== 结果: PASS={len(PASS)}  FAIL={len(FAIL)} ====")
     if FAIL:
         print("失败项:", *FAIL, sep="\n  - ")

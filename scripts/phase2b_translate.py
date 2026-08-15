@@ -426,8 +426,12 @@ def materialize_from_cache(tid: str, text: str, mode: str, cache, ctx_map=None) 
         hit = cache.get(fp)
         if not hit:
             return None, "PENDING"
+        # BUG1: cached 译文 == normalized source phrase (echo) -> invalid, 视为缺失重翻
+        _cand = normalize_model_output(hit["translation"])
+        if _cand.strip() and _cand.strip() == p["t"].strip():
+            return None, "PENDING"
         # 确定性后处理: 剥离行首 Target: 前缀 (缓存里可能存了脏值, 0 LLM 重新清洗)
-        resolved[p["key"]] = normalize_model_output(hit["translation"])
+        resolved[p["key"]] = _cand
     translation = rebuild(segs, resolved)
     translation = restore_protected(segs, translation)
     if translation.strip():
@@ -1220,22 +1224,34 @@ def main():
     phrase_res = {}
     phrase_failures = {}   # ck -> error (completion gate + 持久化失败报告用)
     cache = PhraseCache(out_dir, model=getattr(eng, "model", None))
+    cache_echo_rejected = 0   # BUG1: invalid echo cache entry 不计 hit, 视为 miss 重翻
     try:
         n_hit = n_miss = 0
         todo_items = []      # (ck, block) 需送模型的 (fingerprint miss)
         for ck, block in phrase_items:
             tid, orig_key, src_phrase, fp, gh = phrase_map[ck]
             cached = cache.get(fp)
+            _echo = False
             if cached and not FORCE:
+                _cand = normalize_model_output(cached["translation"])
+                # BUG1 修复: cached 译文 == normalized source phrase -> invalid echo cache entry,
+                # 不计 hit、不 materialize、视为 miss 重翻 (物理 row 保留, 读层忽略)。
+                if _cand.strip() and _cand.strip() == (src_phrase or "").strip():
+                    _echo = True
+            if cached and not FORCE and not _echo:
                 # 确定性后处理: 剥离行首 Target: 前缀 (缓存里可能存了脏值, 0 LLM 重新清洗)
                 phrase_res.setdefault(tid, {})[orig_key] = normalize_model_output(cached["translation"])
                 n_hit += 1
             else:
+                if _echo:
+                    cache_echo_rejected += 1
                 todo_items.append((ck, block))
                 n_miss += 1
 
         if n_hit:
             print(f"[缓存] 命中复用 {n_hit} 个 phrase (不调模型)")
+        if cache_echo_rejected:
+            print(f"[缓存] 拒绝 echo cache entry {cache_echo_rejected} 个 -> 视为 miss 重翻 (invalid echo cache)")
         if todo_items:
             print(f"[翻译] 调用引擎 {type(eng).__name__}, 新翻译 {len(todo_items)} 个 phrase (cache miss) ...")
             import time as _t
@@ -1348,32 +1364,51 @@ def main():
                 resolved.update(phrase_res.get(r.get("translation_id"), {}))
                 translation = rebuild(j["segs"], resolved)
                 translation = restore_protected(j["segs"], translation)
-                # ===== completion gate (2026-08-15 裁决) =====
+                # ===== completion gate (2026-08-15 裁决, segment-level) =====
                 # 1) 任一 model-required phrase unresolved/engine failed -> QA_FAIL/PENDING,
                 #    禁止原文 fallback 后仍 DONE。
                 # 2) semantic 最终译文 == semantic source (模型 echo / 缓存 echo) -> QA_FAIL/PENDING,
                 #    模型回显/未变化不叫成功。
                 # 3) 仅 protected/glossary/明确 non-semantic terminal evidence 才允许 unchanged DONE/KEEP。
-                # 判断该行是否有任何 model-required pending phrase 落入 fail_map
+                # 4) BUG2 修复: 逐 model-required semantic seg 判定 (不是只比整行),
+                #    每个需要翻译的 semantic segment 都必须 resolved 且 resolved != source segment。
+                # 5) BUG3 修复: authoritative TRANSLATE + 整行 unchanged + 无 terminal
+                #    KEEP/manual evidence -> QA_FAIL (authoritative 不能因"无 pending phrase"
+                #    就 unchanged+DONE)。
                 row_has_failed_phrase = any(
                     f"{r.get('translation_id')}:::{p['key']}" in phrase_failures
                     for p in j["pending"]
                 )
-                if row_has_failed_phrase:
+                # BUG2: 未 resolved 的 model-required semantic seg
+                bad_seg = []
+                for _p in j["pending"]:
+                    _rv = resolved.get(_p["key"])
+                    _src = _p["t"].strip()
+                    if _rv is None or not str(_rv).strip():
+                        bad_seg.append((_p["key"], _src, "UNRESOLVED"))
+                    elif str(_rv).strip() == _src:
+                        bad_seg.append((_p["key"], _src, "ECHO"))
+                status = "DONE"
+                if row_has_failed_phrase or bad_seg:
                     status = "QA_FAIL"
-                elif translation.strip():
-                    # 有译文
-                    if translation.strip() == text.strip():
-                        # 译文==原文: 有 pending phrase 则说明 semantic 未译(echo) -> QA_FAIL;
-                        # 无 pending(全 glossary/protected) 且 terminal 合法 -> DONE
-                        if j["pending"]:
-                            status = "QA_FAIL"
-                        else:
-                            status = "DONE"
-                    else:
-                        status = "DONE"
-                else:
+                elif not translation.strip():
                     status = "PENDING"
+                else:
+                    # 整行 unchanged 且有可译 semantic -> 仍 QA_FAIL (echo 守底)
+                    if translation.strip() == text.strip() and j["pending"]:
+                        status = "QA_FAIL"
+                    else:
+                        # BUG3: authoritative TRANSLATE + 整行 unchanged + 无 terminal evidence
+                        _row_unchanged = translation.strip() == text.strip()
+                        _term_evidence = bool(j["pending"]) and not bad_seg
+                        if (
+                            AUTHORITATIVE_DECISION_ON
+                            and _row_unchanged
+                            and (r.get("decision") or "").strip()
+                            in ("TRANSLATE", "FULL_TRANSLATE", "PARTIAL_TRANSLATE")
+                            and not _term_evidence
+                        ):
+                            status = "QA_FAIL"
             else:
                 # 该行本次未进引擎 (被过滤/缺席 jobs): 仍从 cache 物化 (materialized output)
                 translation, status = materialize_from_cache(r.get("translation_id"), text, mode, cache, ctx_map)
@@ -1402,6 +1437,17 @@ def main():
             w = csv.DictWriter(f, fieldnames=done_cols)
             w.writeheader(); w.writerows(done_rows)
         print(f"[写出] {DONE}  ({len(done_rows)} 行)")
+        # BUG1/BUG2/BUG3 结果汇总 (user 报告同款指标)
+        _st = [d["status"] for d in done_rows]
+        _n_done = _st.count("DONE") + _st.count("APPROVED")
+        _n_fail = _st.count("QA_FAIL")
+        _n_uniq = len({d["translation_id"] for d in done_rows})
+        _n_empty = sum(1 for d in done_rows if not (d.get("translation") or "").strip())
+        _n_same = sum(1 for d in done_rows if (d.get("translation") or "").strip()
+                      and (d.get("translation") or "").strip() == (d.get("source_text") or "").strip())
+        print(f"[结果] rows={len(done_rows)}  DONE={_n_done}  QA_FAIL={_n_fail}  "
+              f"unique={_n_uniq}  empty={_n_empty}  sameAsSource={_n_same}  "
+              f"cache_echo_rejected={cache_echo_rejected}")
     finally:
         cache.close()
 

@@ -651,6 +651,31 @@ TITLE 两层 reconciliation 下游可读 (2026-08-15 三次修正, production ba
     硬校验: production=145 & KEEP/manual hit=0 & auth_TR=38, 不满足 exit 4。
   白盒 6 场景 PASS (flag 回退/接production/load145/retry不命中终态/invariant/反例)。
 
+--- BUG1/2/3 修复 (2026-08-15 真实 retry 暴露, 全部白盒+regression 验证) ---
+BUG1 invalid echo cache 不计 hit:
+  - hit 路径 (load 循环): cached 译文 == normalized source phrase -> 视为 miss,
+    不 materialize, 重翻; cache_echo_rejected 计数暴露在 [结果] 行。
+  - materialize_from_cache: per-phrase echo -> 返回 (None,PENDING)。
+  - 物理 row 保留, 读层忽略。
+BUG2 completion gate 改 segment-level (不再只看整行):
+  - 对每个 model-required semantic seg (j["pending"]):
+      resolved 缺失 -> QA_FAIL;  resolved==source seg -> QA_FAIL;
+    全部 resolved 且非 echo 才 DONE。
+  - protected/glossary/明确 KEEP seg 不参与。
+  - 捕获 "Wait... It's You! - Pose Pack"->"等等...是你！ - Pose Pack"(Pose Pack echo)
+    与 "Emotions - Sad"->"情绪 - Sad"(Sad echo) 两个假 DONE。
+BUG3 authoritative unchanged gate:
+  - authoritative TRANSLATE + 整行 unchanged + 无 terminal KEEP/manual evidence
+    -> QA_FAIL (不能因 classifier 判无 pending phrase 就 unchanged+DONE)。
+改进 [结果] 汇总: rows/DONE/QA_FAIL/unique/empty/sameAsSource/cache_echo_rejected。
+诊断 (deterministic, 无模型): scripts/diag_retry_segments.py
+  python scripts/diag_retry_segments.py output --done output/translation_done_batch_title.csv
+  输出 38 行 segment trace: tid/row_status/seg_idx/seg_type/source_phrase/
+    resolved/resolution(cache|glossary|model|protected|UNRESOLVED)/required/echo
+  汇总: cached semantic echo count / rows affected / partial untranslated rows。
+验证: test_phase2b_regression.py 74 PASS (含 BUG1/2/3 回归); e2e --engine none
+  严格 QA_FAIL + re-translate 白盒 PASS; diag stuck-echo 捕获 PASS。
+
 A/D evidence 由 diag_title_qa 自动落盘 (不手工构造, 2026-08-15):
   python scripts/diag_title_qa.py output --done <done> --also-failed \
       --a-out output/title_A_tids.csv --d-out output/title_D_tids.csv
