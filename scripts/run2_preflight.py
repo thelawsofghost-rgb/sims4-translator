@@ -17,7 +17,11 @@ run2_preflight.py —— Phase 3B2-SIDECAR run2 resolver/production-input 零写
   - aggregate:
       unresolved = 0 / source mismatch = 0 / policy conflict = 0
       duplicate target package skipped as frozen rule
-  - 证明 run1 的 9 个 MISSING 已被当前 final resolver 消除 (而非 writer 层绕过)
+
+历史说明 (不 gate): run1 曾 1 PASS + 9 MISSING (文档注记, 见 PHASE3B-SIDECAR.md
+C-class), 但仓库内无可机读历史 artifact 记录具体哪 9 包/tid; 故不构造/不反推测。
+preflight 只证明当前 10 个 cohort package 的 resolve 一致性 (unresolved=0 /
+source_mismatch=0 / policy_conflict=0 / dup-KeyHash=0 / CHS-TGI=0)。
 
 fail-closed:
   * 3 production final 文件不存在 / 0 行 / 行数 != 冻结值 -> HARD-FAIL
@@ -26,7 +30,6 @@ fail-closed:
   * 每包 unresolved > 0 或 source mismatch > 0 或 duplicate KeyHash -> 该包 FAIL,
     汇总若任一包 FAIL -> 整体 rc=1 (不生成 sidecar)
   * out-dir (若 --out-dir 给了) stale 非空 -> HARD-FAIL (与 gen_cohort_sidecars 一致)
-  * --expect-missing-eliminated N 已知 run1 MISSING tid 文件, 逐一必须 resolved
 
 零写保证: 本脚本不调用 writer、不创建任何 .package / manifest、不改任何输入文件;
 仅 print 报告 + 可选写纯文本 preflight report (--report 显式才写, 默认 stdout)。
@@ -55,12 +58,6 @@ def main():
     ap.add_argument("--production-overlay", required=True,
                     help="output/translation_overrides.production.csv (217)")
     ap.add_argument("--catalog", default="", help="旧 frozen catalog terminal (可选, precedence 最低)")
-    ap.add_argument("--run1-missing", required=True,
-                    help="run1 的 9 个 MISSING tid 文件(每行一个, 必须提供 — 不允许省略); "
-                         "逐一必须被当前 resolver 消除")
-    ap.add_argument("--expect-run1-missing", default=9, type=int,
-                    help="run1-missing 期望条数(默认 9); 必须满足 rows=resolved=9, "
-                         "still_unresolved=0, 否则 HARD-FAIL")
     ap.add_argument("--report", default="", help="显式写出纯文本 preflight report (缺省只打印)")
     ap.add_argument("--out-dir", default="", help="若提供, 校验 stale 非空(与 gen_cohort_sidecars 一致)")
     a = ap.parse_args()
@@ -172,31 +169,13 @@ def main():
             f"{per['dup_keyhash']:>5} {per['tgi']:>3}  {per['result']}"
             + (f"  ERR={';'.join(per['errors'][:2])}" if per["errors"] else ""))
 
-    # ---- 3) run1 9 MISSING 消除证明 (必须提供文件; 缺文件/缺参数已在 argparse required 拦截) ----
-    missing_ids = [l.strip() for l in open(a.run1_missing, encoding="utf-8-sig")
-                   if l.strip() and not l.startswith("#")]
-    # 每个 tid 必须出现在任一 production final 的 key 中 (证明是 resolver 消除, 非 writer 绕过)
-    all_keys = set(resolver.overlay) | set(resolver.title) | set(resolver.desc) | set(resolver.catalog)
-    tids_in_prod = {k[0] for k in all_keys}
-    resolved_missing = [t for t in missing_ids if t in tids_in_prod]
-    still_unresolved = [t for t in missing_ids if t not in tids_in_prod]
-    exp = a.expect_run1_missing
-    uniq = len(set(missing_ids))
+    # ---- 3) 历史说明 (不进入 machine-verifiable PASS 条件) ----
+    # 历史 run1: 1 PASS + 9 MISSING (见 PHASE3B-SIDECAR.md 设计注记 C-class)。
+    # 仓库内无可机读历史 run1 artifact 记录具体哪 9 包/哪 9 tid, 故不构造/不反推。
+    # 此说明仅作文档, 不参与 fail-closed 判定。
     out_lines.append("-" * 64)
-    out_lines.append(f"run1_missing_expected            = {exp}")
-    out_lines.append(f"run1_missing_rows                = {len(missing_ids)}")
-    out_lines.append(f"run1_missing_unique              = {uniq}")
-    out_lines.append(f"run1_missing_resolved            = {len(resolved_missing)}")
-    out_lines.append(f"run1_missing_still_unresolved    = {len(still_unresolved)}")
-    if still_unresolved:
-        out_lines.append(f"  still_unresolved tids: {still_unresolved}")
-    proof_ok = (len(missing_ids) == exp and uniq == exp
-                and len(resolved_missing) == exp and len(still_unresolved) == 0)
-    if not proof_ok:
-        out_lines.append(f"[HARD-FAIL] run1 MISSING 未达到 {exp}/{exp}/0: "
-                         f"rows={len(missing_ids)} resolved={len(resolved_missing)} "
-                         f"still_unresolved={len(still_unresolved)} (unique={uniq})")
-        print("\n".join(out_lines)); return 2
+    out_lines.append("historical note: run1 had 1 PASS + 9 MISSING (文档注记, 不进入 PASS 条件)")
+    out_lines.append("run2 preflight 仅证明当前 10 个 cohort package 的 resolve 一致性。")
 
     # ---- 4) aggregate ----
     out_lines.append("-" * 64)

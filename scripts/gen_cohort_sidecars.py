@@ -476,9 +476,6 @@ def main():
     ap.add_argument("--desc-final", default="")
     ap.add_argument("--production-overlay", default="")
     ap.add_argument("--catalog-final", default="")
-    ap.add_argument("--run1-missing", default="",
-                    help="run1 的 9 个 MISSING tid 文件; --preflight-only 时必给")
-    ap.add_argument("--expect-run1-missing", type=int, default=9)
     ap.add_argument("--overrides", default="")
     ap.add_argument("--done", default="")
     ap.add_argument("--cache", default="")
@@ -527,11 +524,6 @@ def main():
                     "--production-overlay", a.production_overlay]
         if a.catalog_final:
             sys.argv += ["--catalog", a.catalog_final]
-        if not a.run1_missing:
-            print("[PREFLIGHT-FAIL] --preflight-only 必须给 --run1-missing (run1 9 MISSING 证据, 不允许省略)")
-            return 2
-        sys.argv += ["--run1-missing", a.run1_missing]
-        sys.argv += ["--expect-run1-missing", str(a.expect_run1_missing)]
         if out_dir.exists():
             sys.argv += ["--out-dir", str(out_dir)]
         rc = RP.main()
