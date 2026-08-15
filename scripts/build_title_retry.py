@@ -16,6 +16,12 @@ build_title_retry.py — TITLE retry manifest 构造 (确定性, 只读, 零模�
     motherlode_fight -> motherlode_打斗
     [Raspberrywhimss] Sweet Like Cinammon -> [Raspberrywhimss] 肉桂般甜蜜 (旧模型错译)
     [ROSELIPA] 2AM -> [ROSELIPA] 凌晨2点 (无语义可翻段)  (4)
+    + 8 retry_v2 QA_FAIL 定稿 + 8 DONE 内容修正 (2026-08-15) = 20 总计
+
+retry 已消费 (2026-08-15 停止模型 retry): retry_v2 36 行 = 28 DONE + 8 QA_FAIL;
+  8 QA_FAIL + 8 DONE 修正全部入 manual final (20)。remaining model retry = 0。
+  TITLE 407 最终唯一终态 reconciliation 见 scripts/build_title_final.py
+  (KEEP 3 + MANUAL 20 + RETRY_ACCEPTED 20 + CLEAN 364 = 407)。
 
 retry set (2026-08-15 修正口径, 用户裁决; 2026-08-15 BUG4 后 +2 manual):
   retry = (A − terminal_KEEP − manual_final_TRANSLATE) ∪ (D − A)

@@ -600,16 +600,24 @@ QA/invariant 每批:
 
 retry_v2 真实运行 (2026-08-15, 36 行, 不重跑; 模型已停): rows=36 DONE=28 QA_FAIL=8
   empty=0 sameAsSource=8。8 QA_FAIL 已人工定稿入 manual-final; 28 DONE 为 accepted
-  model result (其中 8 条又经人工内容修正入 manual-final, 见下)。
+  model result (其中 8 条又经人工内容修正入 manual-final, 见下)。remaining retry=0。
 
-TITLE 407 最终 terminal outcome 分配 (唯一终态; REVIEW/QA_FAIL=0 为目标):
+TITLE 407 最终唯一终态 (build_title_final.py, deterministic, 只读, 零模型):
   KEEP                      = 3
   manual final TRANSLATE    = 4 (先前) + 8 (retry_v2 QA_FAIL) + 8 (DONE 内容修正) = 20
   accepted model result     = 28 DONE − 8 (修正给 manual) = 20
   clean changed/QA          = 364
-  核对: 3 + 20 + 20 + 364 = 407。 remaining model retry = 0。
-  注: 上述计数须由真实 layer 文件推导, 不硬编码; 8 条 DONE 修正 tid 用户提供后
-      入 configs/title_manual_translate.c26.csv 完成 20 条 manual 终态。
+  核对: 3 + 20 + 20 + 364 = 407。 REVIEW/QA_FAIL=0, empty=0, dup=0, mismatch=0。
+
+reconciliation 输入 (Windows 真实):
+  --draft output/translation_done_batch_title.csv        (407)
+  --retry output/translation_done_batch_title_retry_v2.csv (36)
+  --keep  configs/title_terminal_keep.c26.csv            (3)
+  --transl configs/title_manual_translate.c26.csv        (20)
+precedence: manual final > terminal KEEP > retry_v2 accepted DONE > original clean。
+HARD-FAIL: duplicate tid / source_text mismatch / retry 非 draft 子集 /
+  retry_v2 QA_FAIL 或未裁决且不在 manual (不明覆盖) / 终态配置悬空 /
+  计数核对 != 407。输出 output/translation_done_title_final.csv (不覆盖旧证据)。
 
 B 类人工裁决 (configs/title_terminal_keep.c26.csv + configs/title_manual_translate.c26.csv):
   3 terminal KEEP:  simonly_VixenPoster#1/#2/#3 -> action=KEEP (不进 retry/workset)
@@ -631,8 +639,7 @@ TITLE 两层 reconciliation 下游可读 (2026-08-15 三次修正, production ba
   增量层 (仅以下三):
     configs/translation_overrides.c26_pose_keep.csv -> 26 pose C26 KEEP
     configs/title_terminal_keep.c26.csv             ->  3 title terminal KEEP
-    configs/title_manual_translate.c26.csv          -> 12 title manual final TRANSLATE (4 先前 + 8 retry_v2 QA_FAIL;
-                                                           另 8 条 DONE 内容修正待用户提供 tid 后补入 -> 共 20)
+    configs/title_manual_translate.c26.csv          -> 20 title manual final TRANSLATE (4 先前 + 8 retry_v2 QA_FAIL + 8 DONE 修正)
   新 derived 文件由 build_override_overlay.py 生成 (只读 base, 绝不改 frozen):
     output/translation_overrides.production.csv
   合并保证 (用户裁决): deterministic + 幂等;
@@ -721,8 +728,10 @@ BUG3 authoritative unchanged gate:
   T_1296d0b19078_g1 [Raspberrywhimss] Sweet Like Cinammon -> [Raspberrywhimss] 肉桂般甜蜜
     (旧模型错译"香草味肉桂")
   T_438c8bd18eda_g1 [ROSELIPA] 2AM -> [ROSELIPA] 凌晨2点 (无语义可翻段)
-结构重算 (用户裁决, 真实输入推导非硬编码): KEEP=3 manual=4 retry=36 clean=364 total=407;
-  production overlay 若四层仍 disjoint: 145->147 (由真实输入计算)。
+结构重算 (用户裁决, 真实输入推导非硬编码): KEEP=3 manual=20 retry=0(total) clean=364
+  total=407。remaining model retry=0 (retry_v2 已消费: 28 DONE + 8 QA_FAIL 全入 manual)。
+production overlay (真实输入计算, 不硬编码): base114 + pose26 + keep3 + manual20 = 163 unique
+  (若全部 disjoint; 由 build_override_overlay.py 自真实输入推导并报告, 非硬编 163)。
 preflight 不再硬编码 145/38: 期望值从当前 production overlay (len(ovr)) 与 retry manifest
   (requested/authoritative) 实际推导; 硬校验 = KEEP/manual 不入 retry + authoritative==retry
   行数 + scope 不丢行。build_title_retry 硬编码 38/3/2 移除 -> 自洽推导。
