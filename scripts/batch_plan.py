@@ -37,6 +37,7 @@ def main():
     ap.add_argument("--ws", required=True)
     ap.add_argument("--out", default="output/translation_batch_manifest.csv")
     ap.add_argument("--audit", default="")
+    ap.add_argument("--tids", default="", help="输出目录: 每批写 batch_<name>.tids (每行一个 tid, 供 --id-from-file)")
     a = ap.parse_args()
 
     rows = list(csv.DictReader(open(a.ws, encoding="utf-8-sig")))
@@ -135,6 +136,16 @@ def main():
         for p in sorted(plan, key=lambda p: (p["assigned_batch"], p["translation_id"])):
             w.writerow(p)
     print(f"\n[out] {a.out}  ({len(plan)} 行 = 626 unique tid)")
+
+    # ---- 每批 tid 清单 (供 --id-from-file, deterministic) ----
+    if a.tids:
+        os.makedirs(a.tids, exist_ok=True)
+        for b in PRIO:
+            tids = sorted(p["translation_id"] for p in plan if p["assigned_batch"] == b)
+            fname = os.path.join(a.tids, f"batch_{b}.tids")
+            with open(fname, "w", encoding="utf-8") as f:
+                f.write("\n".join(tids) + ("\n" if tids else ""))
+            print(f"[tids] {fname}  ({len(tids)} tid)")
 
 
 if __name__ == "__main__":

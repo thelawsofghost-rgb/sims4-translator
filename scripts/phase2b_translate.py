@@ -90,6 +90,17 @@ ONLY_CATEGORY = _flag_val("--category")      # 只处理 decision/category 等�
 CONCURRENCY = int(_flag_val("--concurrency", "8"))
 BATCH_SIZE = int(_flag_val("--batch-size", "8"))
 
+# ---- 增量 workset 接入 (2026-08-15): --todo/--done 允许直接以
+#      translation_batch_manifest.csv 为唯一 workset/todo 源, 而不必是
+#      旧 translations_todo.csv。不改任何翻译逻辑: glossary/protected spans/
+#      override/cache/QA/done 写回 全部复用。仅替换输入与输出文件名。 ----
+_TODO_OVERRIDE = _flag_val("--todo")
+_DONE_OVERRIDE = _flag_val("--done")
+if _TODO_OVERRIDE:
+    TODO = Path(_TODO_OVERRIDE)
+if _DONE_OVERRIDE:
+    DONE = Path(_DONE_OVERRIDE)
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from phase2a_catalog import (norm_text, source_hash, detect_language,
@@ -832,6 +843,15 @@ def load_todo():
     rows = []
     with open(TODO, encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
+            # workset/manifest 无 decision 列时, 缺省为 TRANSLATE (增量层已冻结决策)
+            if not (r.get("decision") or "").strip():
+                r["decision"] = "TRANSLATE"
+            if not (r.get("detected_language") or "").strip():
+                try:
+                    r["detected_language"] = detect_language(
+                        norm_text(r.get("source_text") or ""), "TRANSLATE", "") or ""
+                except Exception:
+                    r["detected_language"] = ""
             rows.append(r)
     return rows
 

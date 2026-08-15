@@ -548,4 +548,34 @@ Phase2B 分批执行建议 (workset=626 + batch manifest PASS 后再启动):
   每批完成后跑 invariant: 该批已译 + manual 5 不重翻; 无重复 tid。模型只产译文草稿,
   final QA 须过 glossary+protected spans+人工 review, cache 仅作草稿参考不作最终。
 
+== Phase2B 最小改动接入 manifest (不另写翻译器) ==
+phase2b_translate.py 新增两个 CLI flag (不新增翻译引擎, 不建新层):
+  --todo <csv>  默认仍是 output/translations_todo.csv; 传入则直接以该文件为 workset/todo 源
+                (本增量轮传 translation_batch_manifest.csv, 它是唯一 workset/batch source of truth)
+  --done <csv>  默认仍是 translation_done.csv; 传入时写该路径, 避免覆盖 frozen 旧 done
+  decision 缺列时 load_todo 缺省为 TRANSLATE; detected_language 缺失时自动 detect。
+  glossary/protected spans/override/cache/QA/done 写回逻辑完全复用, 零改动。
+manifest 无 context/decision/detected_language 列也能安全入流 (白盒验证)。
+
+三个 batch 执行命令 (每批独立 --done, 各自产物; 先只跑第1批29):
+先由 batch_plan 落盘每批 tid (每行一个, 供 --id-from-file):
+  python scripts\batch_plan.py --ws output\translation_incremental_workset.csv --out output\translation_batch_manifest.csv --audit output\translation_overlap_audit.csv --tids output\batch_tids
+  -> 生成 output\batch_tids\batch_POSE_DISPLAY_NAME.tids (29) /
+     batch_PACK_TITLE.tids (407) / batch_PACK_DESCRIPTION.tids (190)
+批1 POSE_DISPLAY_NAME (29):
+  python scripts\phase2b_translate.py output --todo output\translation_batch_manifest.csv --done output\translation_done_batch_pose.csv --id-from-file output\batch_tids\batch_POSE_DISPLAY_NAME.tids
+批2 PACK_TITLE (407):
+  python scripts\phase2b_translate.py output --todo output\translation_batch_manifest.csv --done output\translation_done_batch_title.csv --id-from-file output\batch_tids\batch_PACK_TITLE.tids
+批3 PACK_DESCRIPTION (190):
+  python scripts\phase2b_translate.py output --todo output\translation_batch_manifest.csv --done output\translation_done_batch_desc.csv --id-from-file output\batch_tids\batch_PACK_DESCRIPTION.tids
+  (multi-provenance 3 条已由 batch_plan 唯一分配到 POSE 批, 不会在其它批出现, 禁重复成立)
+
+QA/invariant 每批:
+  --id-from-file 只处理指定 tid; --done 独立落盘 -> union 可用三批 done 的 tid 并集核对 ==626,
+  批次间交集 ==0, missing==0, duplicate==0。模型输出仅 draft: final QA 须过
+  phase2b_qa.py (glossary/protected-span/source exact-match) 后才能进 final。
+
+白盒: Phase2B 直接吞 manifest (decision 缺省 TRANSLATE, detected 自动) 且不碰 frozen
+  translations_todo.csv/translation_done.csv; 旧路径回归 69/69 不受影响。
+
 **验证要求 (汇报)**: 10 个 sidecar 文件名 / 每包修改 key 数 / writer verify / independent audit / 是否全部 PASS。
