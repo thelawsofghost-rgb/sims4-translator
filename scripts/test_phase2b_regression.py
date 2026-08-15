@@ -597,6 +597,63 @@ def test_bug5_contraction_and_pose_glossary():
           f"pending={[(p['t'].strip(), p.get('gloss_hint')) for p in pending]}")
 
 
+# ================================================================
+# 14. DESCRIPTION protection regression (URL/domain, product/model,
+#     creator/name, asset id, 纯 '+'): content-QA 不得把这些判为 candidate
+# ================================================================
+def test_desc_protection_content_qa():
+    print("\n== 14. DESCRIPTION protection regression (content-QA 不误报) ==")
+    try:
+        import desc_content_qa as Q
+    except Exception as e:
+        check("import desc_content_qa", False, f"import err: {e}")
+        return
+
+    # protected 样例 (品牌/作者/asset id/URL/纯+) -> 不得产生 RESIDUAL_EN / CJK / 破坏 flag
+    protected_cases = [
+        ("katverse.com", "katverse.com"),                      # URL/domain
+        ("katverse.com", "katverse.com"),
+        ("Pose 3 - iPhone 13 Pro Max", "姿势 3 - iPhone 13 Pro Max"),  # 产品/型号
+        ("[Musae] Sleeping Beauty", "[Musae] 睡美人"),                 # bracketed creator
+        ("Soloriya Dance Pose", "Soloriya 舞蹈姿势"),                 # creator 专名
+        ("BRADFORD Sweater", "BRADFORD 毛衣"),                       # creator 专名
+        ("[AnotherSimsStory]-HospitalBedFlat", "[AnotherSimsStory]-医院床铺平面"),  # asset id
+        ("NA_Iphone ACC accessory", "NA_Iphone ACC 配件"),             # NA_/ACC accessory
+        ("Tiny Detail +", "微小细节 +"),                             # 纯 + 符号保持
+    ]
+    for src, tr in protected_cases:
+        flags = []
+        if Q.residual_english(tr, src):
+            flags.append("RESIDUAL_EN")
+        if Q.cjk_latin_glue(tr):
+            flags.append("CJK_LATIN_GLUE")
+        if Q.digit_drop(src, tr):
+            flags.append("DIGIT_DROP")
+        if Q.bracket_id_broken(src, tr):
+            flags.append("BRACKET_ID_BROKEN")
+        check(f"desc-protect: {src!r} -> 无 candidate flags", not flags, f"flags={flags}")
+
+    # 负例 (真问题): 必须还能抓出 candidate
+    neg_cases = [
+        ("Look At Camera 123", "看镜头", "DIGIT_DROP"),          # digit dropped
+        ("I Am Here Now", "我在这里I", "CJK_LATIN_GLUE"),        # I 黏连
+        ("Waving (hand", "挥手 (手", "BRACKET_IMBALANCE"),     # 括号不平衡
+    ]
+    for src, tr, want_flag in neg_cases:
+        flags = []
+        if Q.residual_english(tr, src):
+            flags.append("RESIDUAL_EN")
+        if Q.cjk_latin_glue(tr):
+            flags.append("CJK_LATIN_GLUE")
+        if Q.digit_drop(src, tr):
+            flags.append("DIGIT_DROP")
+        if Q.bracket_balance(tr):
+            flags.append("BRACKET_IMBALANCE")
+        if Q.bracket_id_broken(src, tr):
+            flags.append("BRACKET_ID_BROKEN")
+        check(f"desc-detect: {src!r} 应含 {want_flag}", want_flag in flags, f"flags={flags}")
+
+
 # ---------------- 入口 ----------------
 def main():
     print("Phase 2B regression + cache/resume 验证")
@@ -614,6 +671,7 @@ def main():
     test_bug_fixes()
     test_bug4_title_creator_protection()
     test_bug5_contraction_and_pose_glossary()
+    test_desc_protection_content_qa()
     print(f"\n==== 结果: PASS={len(PASS)}  FAIL={len(FAIL)} ====")
     if FAIL:
         print("失败项:", *FAIL, sep="\n  - ")

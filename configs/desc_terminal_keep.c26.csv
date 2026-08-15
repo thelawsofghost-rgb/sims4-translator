@@ -1,0 +1,3 @@
+translation_id,source_text,translation,action,reason,notes
+T_12fd8e705f78_g1,katverse.com,,KEEP,DESC terminal KEEP 2026-08-15: URL/域名, 纯技术标识无玩家可见语义, 保持原文,DESC terminal KEEP (c26_desc_keep) 独立人工 reconciliation, 不改旧 frozen catalog
+T_823ade16cc5d_g1,NA_Iphone ACC,,KEEP,DESC terminal KEEP 2026-08-15: NA_ 前缀 + 品牌(iphone)半技术标识 + ACC(accessory)辅助标注, 无独立玩家语义, 保持原文,DESC terminal KEEP (c26_desc_keep) 独立人工 reconciliation, 不改旧 frozen catalog

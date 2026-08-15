@@ -904,3 +904,52 @@ authoritative TRANSLATE。根因不在 Phase2B (POLICY-CONFLICT gate 保留)。
   -> POLICY-CONFLICT; 不存在 tid -> HARD-FAIL; PENDING 显式。全白盒 9 套 + 回归 69/69 PASS。
 
 **验证要求 (汇报)**: 10 个 sidecar 文件名 / 每包修改 key 数 / writer verify / independent audit / 是否全部 PASS。
+
+---
+== PACK_DESCRIPTION 190 启动 + 终态裁决 + content QA + final reconciliation (2026-08-15) ==
+
+preflight (preflight_desc_190.py, 只读零模型):
+  输入: translation_batch_manifest.csv + batch_PACK_DESCRIPTION.tids + translation_overrides.production.csv
+  期望: requested=190 scoped=190 unique=190 authoritative_TRANSLATE=190
+        production_overrides_loaded=163 terminal KEEP/manual conflict=0 -> PASS
+  语义与 phase2b_translate.py 的 preflight (scope-at-load/authoritative/production overlay/终态不入批) 对齐。
+  HARD-FAIL: tids duplicate / requested 非 manifest 子集 / assigned_batch!=PACK_DESCRIPTION / 冲突>0 / 计数!=190。
+  白盒 PASS + 3 负例 gates。提交 b5ff702。
+
+DESCRIPTION run (真实, 已跑): 190 = 173 DONE + 17 QA_FAIL (25 failed phrase = 23 ECHO + 2 EMPTY,
+  completion gate 正常)。不再整体重跑模型。
+
+17 QA_FAIL 人工终态裁决:
+  terminal KEEP 2      -> configs/desc_terminal_keep.c26.csv
+                          T_12fd8e705f78_g1 katverse.com (URL/域名)
+                          T_823ade16cc5d_g1  NA_Iphone ACC (NA_+品牌+AC accessory)
+  manual final 15      -> configs/desc_manual_translate.c26.csv (Dorothy 人工译文)
+  build_desc_manual.py: 由真实 done QA_FAIL 行(tid+source) + dorothy 表(tid->final_translation)
+    确定性生成 manual 15; HARD-FAIL 若缺译文/含KEEP tid/多余 tid。
+  不修改旧 frozen layers。
+
+DESCRIPTION protection regression (test 14, 123->135 PASS):
+  URL/domain (katverse.com) / 产品型号 (iPhone 13 Pro Max) / creator 专名 (Musae/Soloriya/
+  BRADFORD, Title-Case+ALL-CAPS) / asset identifier ([AnotherSimsStory]-...) /
+  NA_/ACC accessory 标识 / 纯 '+' -> content-QA 不得判 candidate。
+  不建宽泛"大写词/camelCase 全 protected"规则; 只按明确结构(source 专名/方括号/URL/型号)放行。
+  负例: DIGIT_DROP / CJK_LATIN_GLUE(I我) / BRACKET_IMBALANCE 仍必检。
+
+content QA (desc_content_qa.py, 只产生 REVIEW_CANDIDATE 不自动改):
+  输入 translation_done_batch_desc.csv 的 DONE 行。6 规则:
+    R1 residual English semantic fragments (排除白名单/保留专名/URL/型号)
+    R2 Latin/CJK 异常黏连 (单字母 I我, 非多字母词)
+    R3 source 数字完整保留
+    R4 bracket/parentheses 平衡
+    R5 bracketed creator/URL/accessory id 不被破坏
+    R6 极端长度变化 (<1/3 或 >3x)
+  输出 translation_desc_qa_candidates.csv (REVIEW_CANDIDATE)。报告 DONE input / suspicious / clean。
+
+final reconciliation (build_desc_final.py, 只读零模型):
+  precedence manual 15 > terminal KEEP 2 > accepted model DONE 173 = 190。
+  输入 translation_done_batch_desc.csv + desc_manual_translate.c26.csv + desc_terminal_keep.c26.csv
+  输出 translation_done_desc_final.csv (新 derived, 不覆盖旧证据)。
+  期望: rows=190 uniqueTid=190 KEEP=2 MANUAL_FINAL=15 ACCEPTED_MODEL=173
+        QA_FAIL=0 PENDING=0 REVIEW=0 empty=0 duplicate=0 source mismatch=0
+        2+15+173=190 PASS。HARD-FAIL: 未裁决 QA_FAIL / 悬空终态 / manual∩keep / source mismatch。
+  白盒 PASS + 3 负例 gates。不跑模型, 不生成 sidecar。先不 final merge。
