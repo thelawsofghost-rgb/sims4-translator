@@ -28,6 +28,8 @@ pose_coverage.py — 659 CONFIRMED_POSE 只读 coverage 扫描 + 代表性 10-co
   SKIP_AMBIGUOUS_TGI      CHS 目标 STBL >1 或多 target family, 无法唯一确定
   SKIP_MAPPING_UNCERTAIN  无结构证据 / pack 级字段引不到 STBL
   SKIP_DUPLICATE_KEYHASH  (唯一 target) 含重复 KeyHash, 保守跳过, 不进 ELIGIBLE
+  SKIP_FALSE_POSITIVE_INTERNAL_POSE  STRONG_OBJECT_FOOTPRINT 命中 (OBJD>0 AND COBJ>0 AND
+                             (RSLT>0 OR FTPT>0)): 功能物品内部 pose, 非独立 Pose Pack
   SKIP_MISSING_FILE       corpus 清单中的 production source 路径不存在 (保留记录, 不泛化为 ERROR)
   ERROR                   DBPF 解析失败等异常 (文件存在但解析失败)
   ERROR_COVERAGE_INVARIANT target 三分法不满足 invariant (计量单位/scope 异常)
@@ -55,6 +57,15 @@ STBL_TID = 0x220557DA
 MAGIC = b"STBL"
 LOCALE_CHS = 0x01
 DEFAULT_VERI = r"D:/projects/sims4_trans/output/pose_verification.csv"
+
+# ---- STRONG_OBJECT_FOOTPRINT gate (VERIFIED resource type IDs, lib/s4pi_src 核实) ----
+# 批准于 2026-08-15 真实448 census: OBJD+COBJ+(RSLT|FTPT) 在 448 里唯一命中就=Kritical。
+# 命中 -> SKIP_FALSE_POSITIVE_INTERNAL_POSE; 不使用 interaction/action/animation 单列或
+# >=2/>=3 signal types / 任意 signal / 文件名 / 作者名。
+OBJD_TID = 0xC0DB5AE7   # ObjectDefinition(catalog)
+COBJ_TID = 0x319E4F1D   # Catalog object
+RSLT_TID = 0xD3044521   # Slot
+FTPT_TID = 0xD382BF57   # Footprint
 
 # corpus inventory 路径修正 (2026-08-15 实查):
 # 包文件被移动/改名后, 以 basename 匹配修正为真实 production 路径。
@@ -271,6 +282,10 @@ def scan_package(path: str) -> dict:
         "non_ascii_source_present": 0,
         "long_string_present": 0,
         "repeated_source_text_present": 0,
+        "OBJD_count": 0,
+        "COBJ_count": 0,
+        "RSLT_count": 0,
+        "FTPT_count": 0,
         "multiple_target_STBL_families": 0,
         "status": "ERROR",
         "reason": "",
@@ -295,6 +310,17 @@ def scan_package(path: str) -> dict:
         pass
 
     backend = get_backend("readonly").open(path)
+
+    # ---- STRONG_OBJECT_FOOTPRINT signal 计数 (只读, VERIFIED type IDs) ----
+    # 资源全集已在 idx.entries 解析; fail-closed: 若资源不可枚举则下方 ERROR。
+    try:
+        row["OBJD_count"] = sum(1 for e in idx.entries if e.type_id == OBJD_TID)
+        row["COBJ_count"] = sum(1 for e in idx.entries if e.type_id == COBJ_TID)
+        row["RSLT_count"] = sum(1 for e in idx.entries if e.type_id == RSLT_TID)
+        row["FTPT_count"] = sum(1 for e in idx.entries if e.type_id == FTPT_TID)
+    except Exception as ex:
+        row["reason"] = f"STRONG_OBJECT_FOOTPRINT 资源枚举失败(fail-closed): {ex}"
+        return row  # 保持 status=ERROR, 不得当 signal=0
 
     # ---- STBL 汇总 ----
     stbl_entries = [e for e in idx.entries if e.type_id == STBL_TID]
@@ -514,6 +540,19 @@ def scan_package(path: str) -> dict:
 
 
 def _classify(row: dict) -> dict:
+    # ---- STRONG_OBJECT_FOOTPRINT gate (fail-closed) ----
+    # 命中: OBJD>0 AND COBJ>0 AND (RSLT>0 OR FTPT>0) -> SKIP_FALSE_POSITIVE_INTERNAL_POSE
+    # 这是 functional-object 内部内置 pose 的强证据 (448 census: 唯一命中=Kritical),
+    # 无论 CHS 状态如何都不得判 ELIGIBLE。
+    if (row["OBJD_count"] > 0 and row["COBJ_count"] > 0
+            and (row["RSLT_count"] > 0 or row["FTPT_count"] > 0)):
+        row["status"] = "SKIP_FALSE_POSITIVE_INTERNAL_POSE"
+        row["reason"] = (
+            f"STRONG_OBJECT_FOOTPRINT: OBJD={row['OBJD_count']} AND COBJ={row['COBJ_count']} "
+            f"AND (RSLT={row['RSLT_count']} OR FTPT={row['FTPT_count']}) —— 功能物品内置 pose, "
+            f"非独立 Pose Pack (448 census 唯一命中即 Kritical, 见 functional_signal_census_448)")
+        return row
+
     if row["CHS_0x01_exists"] == 0:
         row["status"] = "SKIP_NO_CHS"
         row["reason"] = "缺 0x01 CHS (不自行创建, 不推导新 Instance)"
@@ -859,6 +898,7 @@ def main():
     print("\n--- status 数量 ---")
     for s in ("ELIGIBLE_EXISTING_CHS", "SKIP_NO_CHS", "SKIP_AMBIGUOUS_TGI",
               "SKIP_MAPPING_UNCERTAIN", "SKIP_DUPLICATE_KEYHASH",
+              "SKIP_FALSE_POSITIVE_INTERNAL_POSE",
               "SKIP_MISSING_FILE", "ERROR", "ERROR_COVERAGE_INVARIANT"):
         print(f"  {s}: {sc.get(s, 0)}")
 
@@ -936,6 +976,7 @@ _COLS = ["package_path", "file_size", "PosePackInstance_count", "STBL_count_tota
          "translate_set_complete", "resolved_pv_key_set_size", "translate_key_set_size",
          "STBL_version", "compression_state",
          "non_ascii_source_present", "long_string_present", "repeated_source_text_present",
+         "OBJD_count", "COBJ_count", "RSLT_count", "FTPT_count",
          "multiple_target_STBL_families", "status", "reason"]
 
 
