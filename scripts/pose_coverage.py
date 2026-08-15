@@ -872,10 +872,12 @@ def _print_help():
   --report <md>    新报告输出路径 (默认 output/coverage_report.md)。
   --cohort-out <csv> 新 cohort 输出路径。若不指定且 output/cohort_selection.csv 已存在
                    (冻结历史 cohort), 则【拒绝覆盖】, 只报告 roster 是否变化, 不写文件。
+  --force          显式允许覆盖已存在的 --out/--report/--cohort-out 目标 (默认 fail-closed)。
 
 安全:
   * -h/--help 立即返回 (rc=0), 零扫描、零写入。
   * 默认不覆盖已存在的历史 frozen cohort (除非显式给 --cohort-out)。
+  * --out/--report/--cohort-out 目标已存在时默认 fail-closed (rc=1), 需 --force 或新路径。
   * coverage.csv / report 为本次 rerun 产物, 默认覆盖各自路径。
 """)
 
@@ -923,12 +925,23 @@ def main():
             report_path = args[i + 1]; i += 2; continue
         if args[i] == "--cohort-out":
             cohort_out = args[i + 1]; i += 2; continue
+        if args[i] == "--force":
+            i += 1; continue
         print(f"[ERROR] 未知参数: {args[i]} (用 -h 查看用法)")
         return 2
         i += 1
     if list_path and not os.path.exists(list_path):
         print(f"[ERROR] --list 文件不存在: {list_path}")
         return 2
+
+    # ---- fail-closed: 显式输出目标已存在则不覆盖 (安全新文件) ----
+    # 默认拒绝覆盖历史/已存在产物; --force 才覆盖。coverage/report/cohort 均检查。
+    _force = "--force" in args
+    _targets = [("--out", out_csv), ("--report", report_path), ("--cohort-out", cohort_out)]
+    for flag, t in _targets:
+        if t and os.path.exists(t) and not _force:
+            print(f"[FAIL-CLOSED] {flag} 目标已存在, 不覆盖: {t} (用 --force 才覆盖, 或用新路径)")
+            return 1
 
     paths = load_packages(list_path)
     if not paths:
