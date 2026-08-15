@@ -138,7 +138,9 @@ def audit_package(path: str) -> list:
                 "posepack_root": "",
                 "interaction_root": "",
             }
-            # 只对文本类 XML/tuning 做结构提炼 (不读 BLOD/DDS/CLIP 大资源)
+            # ---- 只对文本类 XML/tuning 做结构提炼 (不读 BLOD/DDS/CLIP 大资源) ----
+# 语义标签: 0x7DF2169C 在本上下文是 c=PosePackInstance 的 tuning XML (非 WW 专属动画)。
+# 报告中性标签: TUNING_XML/PosePackInstance (见 user 2026-08-15 术语修正, 不改 production)。
             if e.type_id in XML_TEXT_TIDS and e.size and e.size <= 4 * 1024 * 1024:
                 raw = backend.read_small_resource(e, 4 * 1024 * 1024)
                 if raw:
