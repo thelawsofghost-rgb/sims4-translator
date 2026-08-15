@@ -1,48 +1,47 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""READ-ONLY lexical-earlier audit for the 436 DEPLOY rows.
+"""READ-ONLY lexical-earlier audit for the 436 DEPLOY rows + candidate naming policy.
 
-背景: Canary 真机结果 Anika=FAIL。既有 game-proven deployment contract 要求
-  target_basename 在字典序上严格早于 source_basename (target < source),
-  确保 target sidecar 按 Mods load order 后加载覆盖 source。
-  但 '000_'-prefix 技巧对以低位 ASCII (<= 0x2F: 空格 与 ! "# $ % & ' ( ) * + , - . / 等)
-  开头的 source 失效: '0'(0x30) 字典序排在它们之后, 故 target 不早于 source。
+背景: Canary 真机 (A/B) 结果:
+  000_!Anika_Argument_CHS.package = FAIL
+  !!Anika_Argument_CHS.package   = PASS   (sidecar bytes/SHA 未变)
+=> LOAD_ORDER_CAUSE_CONFIRMED / M64_GAME_CANARY=PASS
+=> 正式候选 target naming policy: target = "!" + source_stem + "_CHS.package"
+  (不再使用统一 '000_' 假设; '000_'-prefix 对首字为低位 ASCII
+   (<= 0x2F: 空格 与 ! " # $ % & ' ( ) * + , - . / 等) 的 source 失效:
+   '0'(0x30) 排在它们之后, 故 target 不早于 source)
 
-本审计【ZERO WRITE TO MODS】, 逐行比较 436 个 DEPLOY rows:
+本审计【ZERO WRITE TO MODS】, 对全部 DEPLOY rows 逐行 machine-audit:
 
   source_basename = Path(package_path).name
-  target_basename = source stem 生成的部署目标名 (与 production_deploy_preflight_438.py 的
-                    target_filename_for() 完全一致):
-                      f"000_{source_stem}_CHS.package"
-  target_lexically_earlier = target_basename.lower() < source_basename.lower()
-    (Python codepoint 字典序比较; 与我们生成/部署时使用的确定性 ordinal basename
-     比较一致, 不依赖 PowerShell culture sort)
+  candidate       = "!" + source_stem + "_CHS.package"  (与 A/B 确认的候选一致)
+  candidate_earlier = candidate.lower() < source_basename.lower()
+    (Python codepoint 字典序; 与部署时确定性 ordinal basename 比较一致)
 
-输出所有 FAIL rows (target 未 lexical earlier), 并统计:
-  DEPLOY rows = 436
-  lexical earlier PASS = ?
-  lexical earlier FAIL = ?
-  FAIL-by-first-char 分布 (尤其 ! " # $ % & ' ( ) * + , - . / 数字 _ [ { 等开头)
+必须全部满足 (否则禁止采用 / fail-closed):
+  candidate earlier PASS = 436
+  candidate earlier FAIL = 0
+  duplicate target paths = 0
+  source leading-space count = 0
+  case-insensitive target collisions = 0
 
-特别核查 source basename 以 ! ( [ { _ 数字 等开头的情况。
+可选 --mods-root (ZERO WRITE): 额外扫描
+  - candidate target 是否已存在于 Mods
+  - 是否与旧 localization/test sidecar 形成 exact-TGI coexist (需人工确认清理后再 canary)
 
 产出:
-  output/deployment_lexical_audit.csv    (所有 436 行: source_basename, target_basename,
-                                          target_lexically_earlier, source_first_char, verdict)
+  output/deployment_lexical_audit.csv      (各列: source_basename, target_basename(000_ 诊断),
+                                             verdict(000_ 诊断), candidate, candidate_earlier)
   output/deployment_lexical_audit_report.md
-终局:
-  DEPLOY rows = 436
-  lexical earlier PASS = ?
-  lexical earlier FAIL = ?
-  leading-char breakdown (仅 FAIL)
-  LEXICAL_AUDIT: PASS|FAIL   (PASS 当且仅当 FAIL==0)
-
-fail-closed: 输出已存在则拒写除非 --force; FAIL>0 -> rc=1 (fail-closed, 不引导部署)。
+终局: CANDIDATE_POLICY_AUDIT: ADOPT|REJECT
+fail-closed: 输出已存在拒写除非 --force; candidate policy 未全达标 -> rc=1 (不授权 bulk)。
 """
 import argparse
 import csv
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 MAN_OUT = "output/deployment_lexical_audit.csv"
 REP_OUT = "output/deployment_lexical_audit_report.md"
@@ -63,6 +62,9 @@ def main():
     ap.add_argument("--selection", required=True)
     ap.add_argument("--out", default=MAN_OUT)
     ap.add_argument("--report", default=REP_OUT)
+    ap.add_argument("--mods-root", default=None,
+                    help="Mods 根目录 (可选)。给出时额外做 ZERO-WRITE coexist 扫描: "
+                         "candidate target 是否已存在, 及是否与旧 localization/test sidecar 形成 exact-TGI coexist")
     ap.add_argument("--force", action="store_true")
     a = ap.parse_args()
 
@@ -106,66 +108,53 @@ def main():
     ok = (n_fail == 0)
     verdict = "PASS" if ok else "FAIL"
 
-    # ---- 确定性安全 naming policy 推荐 (只读, 不改名不部署) ----
-    # 需求: 对每个 source, target_basename < source_basename (Python codepoint 序)。
-    # 现有 '000_'-prefix (首字 '0'=0x30) 只对首字 > '0' 的 source 成立;
-    # 对首字 < '0' (0x00-0x2F: 空格与 !"#$%&'()*+,-./) 失效。
-    # 策略: 选一个固定 prefix P, 其首码位严格小于 436 个 source 首码位的最小值 m,
-    #   则 P+stem+_CHS 恒早于该 source。P 必须是合法 Windows 文件名部分。
-    all_first = [x["source_first_char"] for x in rows]
-    m = min((ord(c) for c in all_first), default=0x7F) if all_first else 0x7F
-    m_char = chr(m) if all_first else ""
-    # 可打印合法文件首字候选 (升序), 取第一个严格 < m 的
-    candidates = [ch for ch in map(chr, range(0x20, 0x7F))]
-    # 排除 Windows 文件名非法字符
-    illegal = set('<>:"/\\|?*')
-    candidates = [c for c in candidates if c not in illegal and c != '.']
-    chosen = next((c for c in candidates if ord(c) < m), None)
-    if chosen is None:
-        # m 已是最小可打印格即空格; 改用两字符降级前缀: 特殊字符 + '0'
-        chosen = None
-        policy_ok = False
-        policy_note = ("首码位最小为空格(0x20), 无可打印字符 < 它; 需特殊处理(见 policy_note)")
-    else:
-        prefix = chosen + "00_"
-        policy_passes = 0
-        for x in rows:
-            s = x["source_basename"]
-            tgt_new = prefix + Path(s).stem + "_CHS.package"
-            if tgt_new.lower() < s.lower():
-                policy_passes += 1
-        policy_ok = (policy_passes == n_deploy)
-        policy_note = (f"首码位最小 source = {m_char!r} (ord {m}); 选择 prefix 首字 {chosen!r} (ord {ord(chosen)}) < {m}; "
-                       f"prefix = {prefix!r}; 在 {n_deploy} 行中均满足 target<source: {policy_ok}")
-    # FAIL 行在现有策略下的暴露数 = n_fail; 新策略下如 policy_ok 则全 0
-    policy_fail_under_new = (0 if policy_ok else None)
+    # ===================================================================
+    # 正式候选 naming policy (A/B 真机已确认): target = "!" + source_stem + "_CHS.package"
+    # -------------------------------------------------------------------
+    # A/B 结果: !!Anika_Argument_CHS.package = PASS (000_!... = FAIL); sidecar bytes/SHA 未变
+    # => LOAD_ORDER_CAUSE_CONFIRMED / M64_GAME_CANARY=PASS
+    # 本段对全部 436 行做 ZERO-WRITE machine audit。
+    # 必须全部满足才被批准 (否则禁止采用/bulk):
+    #   candidate earlier PASS = 436
+    #   candidate earlier FAIL = 0
+    #   duplicate target paths = 0
+    #   source leading-space count = 0
+    #   case-insensitive target collisions = 0
+    # 另: 当给 --mods-root 时, 扫描 candidate target 是否已存在于 Mods,
+    #   以及是否与旧 localization/test sidecar 形成 exact-TGI coexist。
+    def cand_target(src: str) -> str:
+        return "!" + Path(src).stem + "_CHS.package"
 
-    # ---- candidate_b: "!" + source_stem + "_CHS.package" ----
-    # 与现有 contract 完全相同的比较: candidate_b.lower() < source_basename.lower()
-    # 每行 machine-assert; 除非全 436 行满足:
-    #   candidate_b PASS = 436, FAIL = 0, duplicate target = 0, leading-space source = 0
-    # 否则禁止采用此候选。
-    cb_passes = 0
-    cb_fails = 0
-    cb_dup_targets = 0
-    cb_dup_paths = set()
-    cb_seen = {}
+    cand_passes = 0
+    cand_fails = 0
+    cand_dup_exact = 0
+    cand_dup_exact_paths = set()
+    cand_ci_collisions = 0
+    cand_ci_paths = set()
+    cand_seen_exact = {}   # candidate path (raw) -> source
+    cand_seen_ci = {}      # candidate.lower() -> source
+    cand_leading_space = sum(1 for x in rows if x["source_basename"][:1] == " ")
     for x in rows:
         s = x["source_basename"]
-        cand = "!" + Path(s).stem + "_CHS.package"
+        cand = cand_target(s)
         if cand.lower() < s.lower():
-            cb_passes += 1
+            cand_passes += 1
         else:
-            cb_fails += 1
-        if cand.lower() in cb_seen:
-            if cb_seen[cand.lower()] != s.lower():
-                cb_dup_targets += 1
-                cb_dup_paths.add(cand)
+            cand_fails += 1
+        # duplicate target paths (exact)
+        if cand in cand_seen_exact:
+            cand_dup_exact += 1
+            cand_dup_exact_paths.add(cand)
         else:
-            cb_seen[cand.lower()] = s.lower()
-    # source 前导空格计数 (现有 contract 也从不给这类 source 生成合法 target)
-    cb_leading_space = sum(1 for x in rows if x["source_basename"][:1] == " ")
-    # source basename 在 lower() 后碰撞计数 (若有则 prefix 方案本身有歧义)
+            cand_seen_exact[cand] = s
+        # case-insensitive target collisions (candidate.lower() 重复 -> Windows 上同文件)
+        cl = cand.lower()
+        if cl in cand_seen_ci:
+            cand_ci_collisions += 1
+            cand_ci_paths.add(cand)
+        else:
+            cand_seen_ci[cl] = s
+    # source basename lower() 碰撞 (diagnostic)
     src_seen_lower = {}
     src_collide = 0
     for x in rows:
@@ -174,24 +163,76 @@ def main():
             src_collide += 1
         else:
             src_seen_lower[sl] = True
-    cb_ok = (cb_passes == n_deploy and cb_fails == 0 and cb_dup_targets == 0
-             and cb_leading_space == 0)
-    cb_adopt = "ADOPT" if cb_ok else "REJECT"
-    cb_note = (f"candidate_b PASS={cb_passes} FAIL={cb_fails} dup_target={cb_dup_targets} "
-               f"leading_space={cb_leading_space} source_lower_collision={src_collide} => {cb_adopt}")
+
+    cand_ok = (cand_passes == n_deploy and cand_fails == 0 and cand_dup_exact == 0
+               and cand_leading_space == 0 and cand_ci_collisions == 0)
+    cand_adopt = "ADOPT" if cand_ok else "REJECT"
+    cand_note = (f"{cand_adopt}: PASS={cand_passes} FAIL={cand_fails} "
+                 f"dup_target_exact={cand_dup_exact} ci_collisions={cand_ci_collisions} "
+                 f"leading_space={cand_leading_space}")
+
+    def _first_stbl_tgi(p: Path):
+        try:
+            import dbpf_fast
+        except Exception:
+            return None
+        try:
+            idx, err = dbpf_fast.safe_parse(str(p))
+            if idx is None:
+                return None
+            for e in idx.entries:
+                if e.type_id == 0x220557DA:  # STBL
+                    return f"0x{e.type_id:08X}/0x{e.group_id:08X}/0x{e.instance_id:016X}"
+        except Exception:
+            return None
+        return None
+    _read_first_stbl_tgi = _first_stbl_tgi
+
+    # 每个 source 的 exact TGI (从 selection CHS_target_TGI), 供 coexist 扫描
+    src_tgi = {Path(r.get("package_path", "")).name: r.get("CHS_target_TGI", "")
+               for r in deploys}
+
+    # ---- Mods coexist 扫描 (ZERO WRITE): candidate target 已存在 / exact-TGI coexist ----
+    mods_root = _res(a.mods_root) if a.mods_root else None
+    cand_mods_preexist = []          # candidate target 已存在于 Mods 的路径
+    mods_exact_tgi_coexist = []      # 与该 candidate 形成 exact-TGI coexist 的 Mods 文件
+    mods_scan_error = None
+    if mods_root is not None and mods_root.is_dir():
+        # 收集 Mods 中所有 .package 的 exact STBL TGI
+        tgis_in_mods = {}
+        for p in mods_root.rglob("*.package"):
+            tgi = _read_first_stbl_tgi(p)
+            if tgi:
+                tgis_in_mods.setdefault(tgi, []).append(str(p))
+        # candidate target 是否已存在
+        for x in rows:
+            cand = cand_target(x["source_basename"])
+            if (mods_root / cand).exists():
+                cand_mods_preexist.append(str(mods_root / cand))
+        # exact-TGI coexist
+        for x in rows:
+            s = x["source_basename"]
+            tgi = src_tgi.get(s, "")
+            if not tgi:
+                continue
+            for other in tgis_in_mods.get(tgi, []):
+                mods_exact_tgi_coexist.append((s, tgi, other))
+        mods_exact_tgi_coexist = sorted(set(mods_exact_tgi_coexist))
+    elif mods_root is not None:
+        mods_scan_error = f"Mods root 不是目录: {mods_root}"
 
     out.parent.mkdir(parents=True, exist_ok=True)
     cols = ["source_basename", "target_basename", "target_lexically_earlier",
             "source_first_char", "source_first_ord", "verdict",
-            "candidate_b", "candidate_b_earlier"]
+            "candidate", "candidate_earlier"]
     with open(out, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
         for x in rows:
             s = x["source_basename"]
-            cand = "!" + Path(s).stem + "_CHS.package"
-            x["candidate_b"] = cand
-            x["candidate_b_earlier"] = "YES" if cand.lower() < s.lower() else "NO"
+            cand = cand_target(s)
+            x["candidate"] = cand
+            x["candidate_earlier"] = "YES" if cand.lower() < s.lower() else "NO"
             w.writerow(x)
 
     rep.parent.mkdir(parents=True, exist_ok=True)
@@ -217,60 +258,69 @@ def main():
     else:
         L.append("- (无 FAIL)")
     L.append("")
-    L.append("## 确定性安全 target naming policy (推荐, 暂不执行)")
-    L.append(f"- 现有 prefix '000_' (首字 '0'=0x30) 对首字<='0' 的 source 失效:")
-    L.append(f"  位置规则 '0'(0x30) > 低位标点/空格 (0x20-0x2F), 故 target 不早于 source。")
-    L.append(f"- 436 个 source 首码位最小值 m = {hex(m)} ({m_char!r}).")
-    if chosen is None:
-        L.append(f"- 无可打印合法首字 < m; 需特殊处理 (m 为空格等极端情况).")
-    else:
-        prefix = chosen + "00_"
-        L.append(f"- 推荐 prefix 首字 = {repr(chosen)} (ord {ord(chosen)}) < m, prefix = {prefix!r}.")
-        L.append(f"- 用 prefix 重生成后, {n_deploy} 行全部满足 target<source: {policy_ok}")
-        if not policy_ok:
-            L.append(f"- 警告: 新 prefix 仍有未满足行 (policy_fail_under_new 待查).")
-    L.append("- 约束: prefix 必须是合法 Windows 文件名部分 (不含 < > : \" / \\ | ? * 且不以点结尾).")
-    L.append("- 本报告只读; 不重命名任何现有 Mods 文件, 不 bulk deploy.")
-    L.append("")
-    L.append("## candidate_b: '!' + source_stem + '_CHS.package'")
-    L.append(f"candidate_b earlier PASS = {cb_passes}")
-    L.append(f"candidate_b earlier FAIL = {cb_fails}")
-    L.append(f"candidate_b duplicate target paths = {cb_dup_targets}")
-    L.append(f"source leading-space count = {cb_leading_space}")
+    L.append("## 正式候选 naming policy: target = '!' + source_stem + '_CHS.package'")
+    L.append("(A/B 真机已确认: !!Anika_Argument_CHS.package = PASS, 000_!... = FAIL;\n"
+             " sidecar bytes/SHA 未变 => LOAD_ORDER_CAUSE_CONFIRMED / M64_GAME_CANARY=PASS)")
+    L.append("- 当前'000_'策略诊断: lexical earlier PASS = {} / FAIL = {}".format(n_pass, n_fail))
+    L.append(f"candidate earlier PASS = {cand_passes}")
+    L.append(f"candidate earlier FAIL = {cand_fails}")
+    L.append(f"duplicate target paths = {cand_dup_exact}")
+    L.append(f"source leading-space count = {cand_leading_space}")
+    L.append(f"case-insensitive target collisions = {cand_ci_collisions}")
     L.append(f"source basename collision after lower() = {src_collide}")
-    L.append(f"ADOPT/REJECT: {cb_adopt}   ({cb_note})")
-    if cb_dup_targets:
-        L.append("重复 target (lower) 列表:")
-        for d in sorted(cb_dup_paths):
+    L.append(f"CANDIDATE POLICY: {cand_adopt}   ({cand_note})")
+    if cand_dup_exact:
+        L.append("重复 target (exact) 列表:")
+        for d in sorted(cand_dup_exact_paths):
             L.append(f"- {d!r}")
-    if not cb_ok:
-        L.append("原因: 未达到 PASS=436/FAIL=0/dup=0/leading-space=0, 禁止采用.")
+    if cand_ci_collisions:
+        L.append("case-insensitive target 碰撞列表:")
+        for d in sorted(cand_ci_paths):
+            L.append(f"- {d!r}")
+    if not cand_ok:
+        L.append("原因: 未达到 PASS=436/FAIL=0/dup=0/leading-space=0/ci-collision=0, "
+                 "禁止采用 (fail-closed).")
     L.append("")
-    L.append("## 全部 FAIL rows")
+    if mods_root is not None:
+        L.append("## Mods coexist 扫描 (ZERO WRITE)")
+        L.append(f"mods-root: {mods_root}")
+        if mods_scan_error:
+            L.append(f"扫描错误: {mods_scan_error}")
+        L.append(f"candidate target 已存在于 Mods = {len(cand_mods_preexist)}")
+        for p in cand_mods_preexist:
+            L.append(f"- preexists: {p!r}")
+        L.append(f"exact-TGI coexist with 其他 Mods 文件 = {len(mods_exact_tgi_coexist)}")
+        for s, tgi, other in mods_exact_tgi_coexist:
+            L.append(f"- source={s!r} TGI={tgi} <-> {other!r}")
+        L.append("(仅报告; ZERO WRITE; 需人工确认是否清理旧 sidecar 后再 canary)")
+        L.append("")
+    L.append("## 000_ 当前策略下 FAIL rows (诊断; 000_ 已废弃)")
     for x in rows:
         if x["verdict"] == "FAIL":
             L.append(f"- FAIL  source={x['source_basename']!r}  target={x['target_basename']!r}"
                      f"  (first={x['source_first_char']!r} ord={x['source_first_ord']})")
     L.append("")
-    L.append(f"LEXICAL_AUDIT: {verdict}")
+    L.append(f"CANDIDATE_POLICY_AUDIT: {cand_adopt}")
+    L.append("注: 批准候选 policy 需 candidate PASS=436 / FAIL=0 / dup=0 / "
+             "leading-space=0 / ci-collision=0 (及 Mods coexist 无新歧义).")
     with open(rep, "w", newline="", encoding="utf-8") as f:
         f.write("\n".join(L) + "\n")
 
-    print(f"## LEXICAL_AUDIT: {verdict}")
+    print(f"## LEXICAL_AUDIT (000_ 诊断): {verdict}")
     print(f"DEPLOY rows = {n_deploy}")
-    print(f"lexical earlier PASS = {n_pass}")
-    print(f"lexical earlier FAIL = {n_fail}")
-    if chosen is not None:
-        prefix = chosen + "00_"
-        print(f"POLICY: prefix={prefix!r} (首字ord={ord(chosen)} < m={hex(m)}); "
-              f"{n_deploy} 行全满足 target<source: {policy_ok}")
-    else:
-        print(f"POLICY: 无可打印首字 < m={hex(m)}, 需特殊处理")
-    print(f"CANDIDATE_B: PASS={cb_passes} FAIL={cb_fails} dup_target={cb_dup_targets} "
-          f"leading_space={cb_leading_space} => {cb_adopt}")
+    print(f"000_ lexical earlier PASS = {n_pass}  (000_ 已废弃)")
+    print(f"000_ lexical earlier FAIL = {n_fail}")
+    print(f"CANDIDATE (target='!'+stem+'_CHS'): PASS={cand_passes} FAIL={cand_fails} "
+          f"dup_target={cand_dup_exact} ci_collision={cand_ci_collisions} "
+          f"leading_space={cand_leading_space} => {cand_adopt}")
+    if mods_root is not None:
+        print(f"MODS_COEXIST: preexist={len(cand_mods_preexist)} "
+              f"exact_tgi_coexist={len(mods_exact_tgi_coexist)}"
+              + (f" scan_error={mods_scan_error}" if mods_scan_error else ""))
     print(f"output: {out}")
     print(f"report: {rep}")
-    return 0 if ok else 1
+    # 部署门: 候选 policy 必须全 436 达标; 否则 fail-closed rc=1 (不授权 bulk)
+    return 0 if cand_ok else 1
 
 
 if __name__ == "__main__":
