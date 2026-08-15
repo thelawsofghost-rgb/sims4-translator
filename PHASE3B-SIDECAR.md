@@ -520,11 +520,32 @@ python scripts\bake_workset.py --todo output\translation_final_todo.csv --manual
 白盒 PASS: todo=631(含5 manual-T) -> workset=626, 626+5==631, KEEP 排除, manual-T 排除,
 source_text/source_hash exact 对应, provenance 分布报告。
 
-Phase2B 分批执行建议 (workset=626 严格 PASS 后再启动):
+== Overlap Audit + Batch Plan (626 唯一 tid, 每个 tid 为一翻译单位) ==
+Windows 真实 provenance: PACK_DESCRIPTION=193, PACK_TITLE=407, POSE_DISPLAY_NAME=29, 和=629 != 626
+-> 差异来自 multi-provenance source (同一 tid 跨多个 provenance)。启动翻译前只做一次只读 audit+batch:
+
+script: scripts/batch_plan.py
+  1) overlap audit: unique tid=626; single-provenance; multi-provenance + 各组合及数量
+  2) deterministic batch plan: 每 translation_id 只分配到一个 batch (唯一单位),
+     multi-provenance 只进一个 batch 禁重复; 优先级 POSE_DISPLAY_NAME > PACK_TITLE > PACK_DESCRIPTION
+     (含 POSE -> POSE; 否则含 TITLE -> TITLE; 否则 DESC)。
+  输入 --ws translation_incremental_workset.csv(626);
+  输出 --out output/translation_batch_manifest.csv
+        (translation_id, source_text, source_hash, provenance, assigned_batch)
+  硬 invariant fail-fast: batch unique tid union == 626; batches 交集 == 0; missing == 0; duplicate == 0。
+```
+python scripts\batch_plan.py --ws output\translation_incremental_workset.csv --out output\translation_batch_manifest.csv --audit output\translation_overlap_audit.csv
+```
+实测(白盒, 629=626+3 场景): multi=3 (PACK_TITLE+POSE_DISPLAY_NAME), 单 prov=623;
+batch: POSE_DISPLAY_NAME=29, PACK_TITLE=407, PACK_DESCRIPTION=190 (3 个 multi 归入 POSE 优先),
+union=626, inter=0, missing=0, dup=0 -> PASS。确认任何 batch 均以 translation_id 为唯一单位,
+同一 tid 无论几个 provenance 只送模型一次。
+
+Phase2B 分批执行建议 (workset=626 + batch manifest PASS 后再启动):
   沿用现有 translation 流水线 (glossary/overrides/protected spans/policy 不变)。建议按
-  provenance 分批: 先 POSE_DISPLAY_NAME 批 (103 属 D 中的 pose 源, 含人工已锁的 pose 语义),
-  再 PACK_TITLE (434) 与 PACK_DESCRIPTION (199) 批; 每批完成后跑一次 invariant 校验
-  (batch translated + manual 5 不重翻; 无重复 tid)。模型只产译文草稿, final QA 须过
-  glossary+protected spans+人工 review, cache 仅作草稿参考不作最终。
+  assigned_batch 分批执行: batch_plan 已把每个 tid 唯一划分到 POSE_DISPLAY_NAME(29) /
+  PACK_TITLE(407) / PACK_DESCRIPTION(190); 同 tid 跨多 provenance 只进一个 batch 不重翻。
+  每批完成后跑 invariant: 该批已译 + manual 5 不重翻; 无重复 tid。模型只产译文草稿,
+  final QA 须过 glossary+protected spans+人工 review, cache 仅作草稿参考不作最终。
 
 **验证要求 (汇报)**: 10 个 sidecar 文件名 / 每包修改 key 数 / writer verify / independent audit / 是否全部 PASS。
