@@ -17,16 +17,21 @@ precedence (高->低):
   --transl  configs/desc_manual_translate.c26.csv      (15 manual final)
   -o        output/translation_done_desc_final.csv     (新 derived, 不覆盖旧证据)
 
-content-QA 闸门 (用户裁决 2026-08-15):
+content-QA 闸门 (用户裁决 2026-08-15, fail-closed):
   在 final 之前必须先过真实 DONE173 content QA:
     manual15 / KEEP2 落盘 -> desc_content_qa.py 检查真实 DONE173 ->
     suspicious candidates 人工复核 -> 若发现错译则加 DESC manual correction layer ->
     suspicious 全部 resolved -> 才 build_desc_final.py。
-  --qa-candidates <content QA 输出的 REVIEW_CANDIDATE csv> 传入后:
-    其中每个 suspicious tid 必须出现在 --qa-allowlist (已 resolve) 中;
-    否则 HARD-FAIL: unresolved_content_review > 0 (禁止把未处理 candidate 记 ACCEPTED_MODEL)。
+  **production fail-closed**: --qa-candidates 与 --qa-allowlist 为必填 (default dict 的
+  default=None 会在无值时触发 HARD-FAIL, 不靠“提醒”放行)。
+    --qa-candidates: content QA 输出的 REVIEW_CANDIDATE csv;
+    --qa-allowlist  : 已 resolve 的 suspicious tid 清单 (每行一个 tid 或 csv 首列)。
+    其中每个 suspicious tid 必须出现在 allowlist, 否则 HARD-FAIL
+    unresolved_content_review > 0 (禁止把未处理 candidate 记 ACCEPTED_MODEL)。
   --allow-zero-candidates: 允许 candidates 为空即为全部 resolve。
-  若省略 --qa-candidates: 打印提醒但默认放行 (纯终态计算); 生产建议务必传。
+  **测试专用**: 仅 white-box / 无 QA fixture 时, 显式传 --test-no-qa 才放行
+  (打印 TEST 标记并跳过 content-QA 闸门)。production 默认必须 fail-closed,
+  绝不因缺少 candidate 而允许静默放行。
 
 终态分配 (唯一定, 由真实输入推导, 不硬编码):
   2 terminal KEEP + 15 manual final + 173 accepted model DONE = 190
@@ -76,11 +81,13 @@ def main():
     ap.add_argument("--keep", required=True, help="DESC terminal KEEP CSV (2)")
     ap.add_argument("--transl", required=True, help="DESC manual final TRANSLATE CSV (15)")
     ap.add_argument("--qa-candidates", default=None,
-                    help="content QA 的 REVIEW_CANDIDATE csv (translation_id,...); 其 suspicious tid 需全 resolve")
+                    help="content QA 的 REVIEW_CANDIDATE csv (production 必填, fail-closed 于脚本内强制)")
     ap.add_argument("--qa-allowlist", default=None,
-                    help="已 resolve 的 suspicious tid 清单 (csv/文本, 每行一个 tid)")
+                    help="已 resolve 的 suspicious tid 清单 (production 必填, fail-closed 于脚本内强制; 每行一个 tid)")
     ap.add_argument("--allow-zero-candidates", action="store_true",
                     help="candidates 为空视为已全部 resolve")
+    ap.add_argument("--test-no-qa", action="store_true",
+                    help="仅测试/无 QA fixture 时显式跳过 content-QA 闸门 (production 禁用)")
     ap.add_argument("-o", "--out", required=True)
     a = ap.parse_args()
 
@@ -148,9 +155,19 @@ def main():
             fail(f"source mismatch: {tid} done={done_by[tid].get('source_text')!r} "
                  f"config={src!r}")
 
-    # ---- content-QA 闸门: 未 resolve 的 suspicious candidate 禁止记 ACCEPTED_MODEL ----
-    cand_tids = set()
-    if a.qa_candidates:
+    # ---- content-QA 闸门 (fail-closed): 未 resolve 的 suspicious 禁止记 ACCEPTED_MODEL ----
+    if not a.qa_candidates or not a.qa_allowlist:
+        # 即使 argparse required 兜底, 仍防御性 fail-closed: 缺任一即拒绝
+        if a.test_no_qa:
+            print("  [TEST] --test-no-qa: 跳过 content-QA 闸门 (仅测试/无 QA fixture, production 禁用)")
+        else:
+            sys.exit("[HARD-FAIL] content-QA 闸门 fail-closed: 必须同时提供 "
+                     "--qa-candidates 与 --qa-allowlist (production 不允许靠提醒绕过 "
+                     "content QA)。测试用 --test-no-qa 显式跳过。")
+    elif a.test_no_qa:
+        print("  [TEST] --test-no-qa: 跳过 content-QA 闸门 (仅测试, production 禁用)")
+    else:
+        cand_tids = set()
         import os as _os
         if not _os.path.exists(a.qa_candidates):
             fail(f"qa-candidates 文件不存在: {a.qa_candidates}")
@@ -161,10 +178,8 @@ def main():
                 _t = _u(_r.get("translation_id"))
                 if _t:
                     cand_tids.add(_t)
-    allow_tids = set()
-    if a.qa_allowlist:
-        import os as _os2
-        if _os2.path.exists(a.qa_allowlist):
+        allow_tids = set()
+        if _os.path.exists(a.qa_allowlist):
             with open(a.qa_allowlist, encoding="utf-8-sig") as _f:
                 for _ln in _f:
                     _t = _ln.strip().split(",")[0].strip()
@@ -173,18 +188,15 @@ def main():
         else:
             # 内联逗号分隔 allowlist
             allow_tids = {x.strip() for x in a.qa_allowlist.split(",") if x.strip()}
-    if a.qa_candidates is None:
-        print("  [提醒] 未传 --qa-candidates: 跳过 content-QA 门 (仅为纯终态计算)。"
-              "生产请先过 desc_content_qa.py 并 resolve 后传入。")
-    elif a.allow_zero_candidates and not cand_tids:
-        print("  [content-qa] 无 suspicious candidate (allow-zero-candidates), resolve 通过。")
-    else:
-        unresolved_content_review = sorted(cand_tids - allow_tids)
-        if unresolved_content_review:
-            fail(f"unresolved_content_review > 0: {unresolved_content_review} "
-                 f"(content-QA suspicious 未 resolve, 禁止记 ACCEPTED_MODEL)")
+        if a.allow_zero_candidates and not cand_tids:
+            print("  [content-qa] 无 suspicious candidate (allow-zero-candidates), resolve 通过。")
         else:
-            print(f"  [content-qa] 全部 {len(cand_tids)} 个 suspicious candidate 已 resolve (allowlist)。")
+            unresolved_content_review = sorted(cand_tids - allow_tids)
+            if unresolved_content_review:
+                fail(f"unresolved_content_review > 0: {unresolved_content_review} "
+                     f"(content-QA suspicious 未 resolve, 禁止记 ACCEPTED_MODEL)")
+            else:
+                print(f"  [content-qa] 全部 {len(cand_tids)} 个 suspicious candidate 已 resolve (allowlist)。")
 
     # ---- 组装终态 (precedence: manual > keep > accepted DONE) ----
     origin = {}

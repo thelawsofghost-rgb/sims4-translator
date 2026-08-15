@@ -987,3 +987,19 @@ gate C — DESC 两层接进 production overlay:
   但真实 action 拆分由真实 base 计算, 不硬编码 180)。
   白盒 (synthetic base114 + 真实 layers disjoint): 最终 unique = 180, 交集全 0。
   所有旧 frozen layer (base114/pose/title) 不修改。
+
+---
+== PACK_DESCRIPTION 190 补 fail-closed 修正 (2026-08-15, 用户批准后) ==
+
+用户不批准“缺 --qa 参数 -> 提醒+放行”的 bypass。production final 必须 fail-closed:
+  build_desc_final.py content-QA 闸门改为:
+    --qa-candidates 与 --qa-allowlist 均必填 (缺任一 -> HARD-FAIL / nonzero exit,
+    脚本内 fail-closed 强制, 不靠 argparse required 兜底, 不允许靠提醒绕过)。
+    测试专用显式 flag: --test-no-qa 才跳过闸门 (仅 white-box / 无 QA fixture,
+    production 禁用, 打印 [TEST] 标记)。
+  白盒矩阵:
+    缺 qa-candidates / 缺 qa-allowlist          -> HARD-FAIL EXIT=1
+    两者缺 + --test-no-qa                       -> PASS (显式测试标记)
+    两者都有 + 全 resolve                       -> PASS 190=2+15+173
+    candidate 未 resolve                        -> FAIL unresolved_content_review>0 EXIT=1
+  不再 build DESC final, 等 Windows 真实 173 DONE content QA 人工复核完成后再跑。
