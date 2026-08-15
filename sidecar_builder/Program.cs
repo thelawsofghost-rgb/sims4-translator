@@ -386,14 +386,15 @@ class Program
     {
         bool allOk = true;
         // (label, expected_source, translated_value, want_roundtrip)
-        var cases = new (string, string, string, bool)[] {
-            ("source_colon",      "Need: [MURPHY] iPhone 13 Pro Max (hat, LEFT)", "需要：iPhone 13 Pro Max 帽子（左）", true),
-            ("value_colon",       "普通姿势", "姿势 A：左侧（带冒号的译文）", true),
-            ("chinese_unicode",   "相拥", "深情相拥（中文 Unicode）", true),
-            ("creator_brackets",  "[wrenmie] Posepack 5: Cozy Days", "[wrenmie] 姿势包 5：舒适时光", true),
-            ("empty_value",       "空译文目标", "", true),
-            ("ordinary_ascii",    "plain ascii pose", "plain translated value", true),
-            ("second_colon_src",  "ALL-IN-ONE: RIGHT", "全能：右侧", true),
+        // 用 .NET 4.0 mscorlib 原生 Tuple<> (勿用 ValueTuple: 需额外依赖)。selfcheck 专用。
+        var cases = new Tuple<string, string, string, bool>[] {
+            Tuple.Create("source_colon",      "Need: [MURPHY] iPhone 13 Pro Max (hat, LEFT)", "需要：iPhone 13 Pro Max 帽子（左）", true),
+            Tuple.Create("value_colon",       "普通姿势", "姿势 A：左侧（带冒号的译文）", true),
+            Tuple.Create("chinese_unicode",   "相拥", "深情相拥（中文 Unicode）", true),
+            Tuple.Create("creator_brackets",  "[wrenmie] Posepack 5: Cozy Days", "[wrenmie] 姿势包 5：舒适时光", true),
+            Tuple.Create("empty_value",       "空译文目标", "", true),
+            Tuple.Create("ordinary_ascii",    "plain ascii pose", "plain translated value", true),
+            Tuple.Create("second_colon_src",  "ALL-IN-ONE: RIGHT", "全能：右侧", true),
         };
         foreach (var c in cases)
         {
