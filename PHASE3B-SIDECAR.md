@@ -586,6 +586,30 @@ QA/invariant 每批:
 白盒: Phase2B 直接吞 manifest (decision 缺省 TRANSLATE, detected 自动) 且不碰 frozen
   translations_todo.csv/translation_done.csv; 旧路径回归 69/69 不受影响。
 
+== TITLE 407 内容 completion 缺陷诊断 (2026-08-15, 实跑) ==
+TITLE 实跑: rows=407 unique=407 pending=0 keep=0 emptyTranslation=0 sameAsSource=42。
+工程 scope invariant PASS, 但内容 completion 判定有真实缺陷:
+  1) translation!=''(非空) -> DONE 的完成门槛过松: 语义标题被原样写成 DONE。
+  2) phrase 引擎 failure=8, 但最终 PENDING=0 -> failure propagation 缺陷。
+
+根因 (代码 + 白盒证明):
+  - _on_done() 拒绝空/`[ERR` 值 -> 失败 phrase 永不进 phrase_res/resolved
+  - rebuild() missing key -> 原文回填
+  - 终态块 any(startswith("[ERR")) 永不可达 ([ERR 在入口被拒)
+  - elif translation.strip(): -> DONE  (失败 phrase 回填原文 -> 非空 -> DONE)
+  => 8 failed phrase 全部"原文回填但仍 DONE" (Option A, 错误)。
+
+diag_title_qa.py (只读, 零模型) 按内容层语义证据把每行归 A/B/C/D:
+  A. SAME_AS_SOURCE_SEMANTIC   : translation==source 且有 semantic token -> FAIL/PENDING
+  B. SAME_AS_SOURCE_NONSEMANTIC: translation==source 且 non-semantic/technical -> REVIEW/KEEP
+  C. TRANSLATED                : translation != source
+  D. MODEL_PHRASE_FAILED       : phrase cache miss 且未由 glossary/protected 覆盖
+  唯一合法保持原文 = protected span / glossary / 明确 non-semantic evidence。
+  权威语义 = translate_mode_for(); KEEP(技术标识) 直接归 B。
+
+不 merge translation_done_batch_title.csv (仅 draft/诊断产物)。DESC 暂停。
+未改 frozen workset/batch/coverage/writer/decision; 未调模型。
+
 == C26 批次1 决策 reconciliation (2026-08-15, 用户裁决) ==
 批1 real 运行: scope=26, output=26, unique=26, pending=0, KEEP=0, empty=0,
 但 QA 发现 26/26 translation==source —— 全是编号/性别/版本/变体/占位技术 pose label。
