@@ -1256,3 +1256,54 @@ Windows 用法 (真实审计, 先 cd 仓根, 短路径):
     仍 MISSING)
   - 白盒: 3 TRANSLATE + 1 APPROVED + 2 KEEP + 1 REVIEW catalog, overrides(2)+done(2) 非空 =>
     RESOLVED=4 MISSING=1 KEEP=2 NEW=0 EXIT=0
+
+## 🔒 historical-source reduction audit (2026-08-15)
+
+**真实 Windows audit:**
+  catalog rows=3540 (KEEP=1572, REVIEW=7, TRANSLATE=1961)
+  CATALOG_TRANSLATE_RESOLVED=1888
+  CATALOG_TRANSLATE_MISSING=80   (全局80个 missing 暂不处理, 不等于当前10-package cohort unresolved)
+
+**缩减目标证明 (只读 `scripts/historical_source_reduction_audit.py`):**
+  - done 单独是否覆盖全部 1888 historical resolved (tid,norm_source)
+      done rows / done nonempty rows / done nonempty unique(tid,norm_source)
+      merged_resolved - done_nonempty =?   (期望 0 => done 单独全覆盖)
+      done_nonempty - merged_resolved =?   (期望 0 => done 无泄漏)
+  - overrides114 不在 production_overlay217 的 key =?   (期望 0 => ⊆)
+  - final2 不在 overrides114 的 key =?                  (期望 0 => ⊆)
+
+**理想成立 (均满足):**
+  RESOLVED=1888, done nonempty unique=1888, merged - done = 0
+  overrides114 ⊆ production_overlay217
+  final2 ⊆ overrides114
+
+**成立后 run2 production resolver 加载集 (缩减法: 不再加载 final2, 不再单独加载 base114):**
+  production_overlay217 + title_final407 + desc_final190 + translation_done.csv + catalog
+
+**角色严格区分:**
+  production_overlay = explicit latest terminal override (最高权威)
+  title/desc final    = new final results
+  translation_done    = historical final translation fallback (merged historical resolved)
+  catalog             = decision/index ONLY (不是 final payload)
+
+**catalog 规则:**
+  KEEP     -> 无更高层终态时 -> KEEP
+  TRANSLATE-> 必须有 overlay / title-desc final / historical done 提供 translation, 否则 MISSING
+  REVIEW   -> 若有更高层 final outcome -> 以高层为准并记录 superseded, 否则 unresolved
+  不再比较 catalog.translation (非 final payload)
+
+**superseded (不 HARD-FAIL, 仅报告):**
+  latest overlay supersedes historical final / catalog decision; 报告
+  historical_superseded=N 与 catalog_decision_superseded=N。
+
+**真正 HARD-FAIL:**
+  title_final vs desc_final 同 key 不一致
+  final source 内部重复冲突 (同 key 两个不同 translation)
+  source_text mismatch
+  当前 cohort TRANSLATE 无任何 final payload
+
+**白盒:**
+  正例 (done=1888, ov⊆po, f2⊆ov) EXIT=0
+  负例 done漏(1883!=1888) EXIT=2 | ov⊄po EXIT=2 | f2⊄ov EXIT=2 |
+      title vs desc 冲突 EXIT=2 | done 内部重复 EXIT=2
+  回归 135 PASS / 0 FAIL。不生成 sidecar, 不改 writer。
