@@ -598,6 +598,19 @@ QA/invariant 每批:
   engine run failed=8, 但 cache 重建仅确定 5 unresolved; 另 3 未经解释, 不声称已解决。
   后续翻译运行必须直接持久化 failed_phrase 明细, 不再靠 cache 反推。
 
+retry_v2 真实运行 (2026-08-15, 36 行, 不重跑; 模型已停): rows=36 DONE=28 QA_FAIL=8
+  empty=0 sameAsSource=8。8 QA_FAIL 已人工定稿入 manual-final; 28 DONE 为 accepted
+  model result (其中 8 条又经人工内容修正入 manual-final, 见下)。
+
+TITLE 407 最终 terminal outcome 分配 (唯一终态; REVIEW/QA_FAIL=0 为目标):
+  KEEP                      = 3
+  manual final TRANSLATE    = 4 (先前) + 8 (retry_v2 QA_FAIL) + 8 (DONE 内容修正) = 20
+  accepted model result     = 28 DONE − 8 (修正给 manual) = 20
+  clean changed/QA          = 364
+  核对: 3 + 20 + 20 + 364 = 407。 remaining model retry = 0。
+  注: 上述计数须由真实 layer 文件推导, 不硬编码; 8 条 DONE 修正 tid 用户提供后
+      入 configs/title_manual_translate.c26.csv 完成 20 条 manual 终态。
+
 B 类人工裁决 (configs/title_terminal_keep.c26.csv + configs/title_manual_translate.c26.csv):
   3 terminal KEEP:  simonly_VixenPoster#1/#2/#3 -> action=KEEP (不进 retry/workset)
   2 manual final TRANSLATE:
@@ -618,7 +631,8 @@ TITLE 两层 reconciliation 下游可读 (2026-08-15 三次修正, production ba
   增量层 (仅以下三):
     configs/translation_overrides.c26_pose_keep.csv -> 26 pose C26 KEEP
     configs/title_terminal_keep.c26.csv             ->  3 title terminal KEEP
-    configs/title_manual_translate.c26.csv          ->  2 title manual final TRANSLATE
+    configs/title_manual_translate.c26.csv          -> 12 title manual final TRANSLATE (4 先前 + 8 retry_v2 QA_FAIL;
+                                                           另 8 条 DONE 内容修正待用户提供 tid 后补入 -> 共 20)
   新 derived 文件由 build_override_overlay.py 生成 (只读 base, 绝不改 frozen):
     output/translation_overrides.production.csv
   合并保证 (用户裁决): deterministic + 幂等;
@@ -714,6 +728,29 @@ preflight 不再硬编码 145/38: 期望值从当前 production overlay (len(ovr
   行数 + scope 不丢行。build_title_retry 硬编码 38/3/2 移除 -> 自洽推导。
 diag_retry_segments 输出新增 protected/reason 列; 要求输出每个 echo segment 的
   tid/source_phrase/protected=yes-no/required_translate/reason, 确认 creator 不再真失败。
+
+--- BUG5: 英文 apostrophe contraction segmentation (2026-08-15 用户新诊断) ---
+真实错误: [AA] I'm here -> [AA] I我在这里。根因: I 被 standalone/single-letter
+  protection 命中 -> prot; 'm here 被当语义翻译 -> rebuild = I + 我在这里。
+修复: contraction 必须先于 single-letter/technical 保护识别。当 "大写字母+apostrophe
+  ('或curly’)+字母" (如 I'm/It's) 时跳过 single-letter prot, 整个 contraction
+  流入 sem_buf 保持一个语义短语。覆盖: I'm, it's, don't, can't, won't, let's,
+  you're, we're, they've (ASCII ' 与 curly ’)。实测:
+    [AA] I'm here -> [AA](prot) + "I'm here"(sem)   (无 prot I)
+  保留 standalone I/F/B/M/A 真正单独技术 token 原规则 (I, F, B 2 仍 prot)。
+
+--- Pose Player 领域术语表 (2026-08-15 用户裁决, 新 deterministic glossary) ---
+  _GLOSSARY 新增: "pose pack"/"posepack" -> "姿势包" (casefold, 大小写不敏感)。
+  Pose Pack / pose pack / POSEPACK / posepack 全命中, 不再进模型;
+  不允许同一 TITLE batch 混出"动作包 / 姿势包"。行内嵌词给 gloss_hint
+  (如 NA_Arrested posepack -> 剩余语义词带 posepack=姿势包 提示)。
+
+--- retry_v2 人工定稿 + 日志语义 (2026-08-15) ---
+  8 QA_FAIL 入 manual-final (tid 见 configs/title_manual_translate.c26.csv);
+  8 DONE 内容修正待用户提供 tid 后补入 -> manual 12+8=20。
+  日志口径修复: 进度/完成行拆分 attempted / transport_success /
+  accepted_translation / engine_error / unresolved (-成功歧义); echo_rejected
+  仍由 [结果] 汇总 cache_echo_rejected= 打印。不阻塞 production, DESC 前已修。
 
 A/D evidence 由 diag_title_qa 自动落盘 (不手工构造, 2026-08-15):
   python scripts/diag_title_qa.py output --done <done> --also-failed \

@@ -444,7 +444,8 @@ def test_bug_fixes():
     cols = ["translation_id", "source_text", "decision", "detected_language", "source_hash", "category"]
     rows = [
         # BUG2: 整行 translation != source, 但 semantic segment 保持英文 -> 假 DONE
-        ("T_962602977185_g1", "Wait... It's You! - Pose Pack", "TRANSLATE", "en", "h1", "TRANSLATE"),
+        # (用非 glossary 段, 因 Pose Pack 已入确定性术语表 -> 不再是 stuck segment)
+        ("T_962602977185_g1", "Wait... It's You! - Special Pack", "TRANSLATE", "en", "h1", "TRANSLATE"),
         ("T_e10b19982082_g1", "Emotions - Sad", "TRANSLATE", "en", "h2", "TRANSLATE"),
         # BUG3: authoritative TRANSLATE + 整行 unchanged
         ("T_438c8bd18eda_g1", "[ROSELIPA] 2AM", "TRANSLATE", "en", "h3", "TRANSLATE"),
@@ -462,7 +463,7 @@ def test_bug_fixes():
                   translation_id="seed", segment_index="0", source_phrase=src,
                   source_hash=A.source_hash(src), translation=val, now="2026-08-15 00:00:00")
     _put("Happy Pose", "Happy Pose")        # echo
-    _put("Pose Pack", "Pose Pack")          # echo (BUG2 s1)
+    _put("Special Pack", "Special Pack")     # echo (BUG2 s1)
     _put("Sad", "Sad")                      # echo (BUG2 s2)
     _put("Wait... It's You!", "等等...是你！")
     _put("Emotions", "情绪")
@@ -474,7 +475,7 @@ def test_bug_fixes():
     # BUG1/BUG2 (Fake 模型): echo cache 被拒 -> miss -> 重翻为非 echo 译文 -> DONE。
     # 验证: 译文 != 原 semantic (echo 未 materialize, 已重翻译)。
     r1 = done["T_962602977185_g1"]
-    check("BUG2: s1 的 Pose Pack 被重翻 (非 echo)", "译[Pose Pack]" in r1["translation"] and r1["translation"] != "Pose Pack",
+    check("BUG2: s1 的 Special Pack 被重翻 (非 echo)", "译[Special Pack]" in r1["translation"] and r1["translation"] != "Special Pack",
           f"trans={r1['translation']!r}")
     r2 = done["T_e10b19982082_g1"]
     check("BUG2: s2 的 Sad 被重翻 (非 echo)", "译[Sad]" in r2["translation"] and r2["translation"] != "Sad",
@@ -503,7 +504,7 @@ def test_bug4_title_creator_protection():
         ("(simmer_creator) - Male poses #1", {"Male poses #"}, {"(simmer_creator)"}),
         ("(UNI) Emotion Poses Adult", {"Emotion Poses Adult"}, {"(UNI)"}),
         ("Loulicorn - Pretty Smile Poses", {"Pretty Smile Poses"}, {"Loulicorn"}),
-        ("Grownasssimmer Kaley - Pose Pack", {"Pose Pack"}, {"Grownasssimmer Kaley"}),
+        ("Grownasssimmer Kaley - Special Moves", {"Special Moves"}, {"Grownasssimmer Kaley"}),
         ("[Jarride]xLienaEnna - Pretty Smile Poses", {"Pretty Smile Poses"}, {"xLienaEnna"}),
     ]
     for src, exp_pending, exp_prot in cases:
@@ -553,6 +554,49 @@ def test_bug4_title_creator_protection():
           len(pending) > 0, f"pending={pending}")
 
 
+# ================================================================
+# 13. BUG5: 英文 apostrophe contraction 必须先于 standalone/technical 识别
+#      + Pose Player 领域术语表 (Pose Pack -> 姿势包)
+# ================================================================
+def test_bug5_contraction_and_pose_glossary():
+    print("\n== 13. BUG5 contraction segmentation + Pose Pack glossary ==")
+    _conts = ["I'm here", "I’m here", "It's", "It’s", "don't", "don’t",
+              "can't", "can’t", "won't", "won’t", "let's", "let’s",
+              "you're", "you’re", "we're", "we’re", "they've", "they’ve"]
+    for c in _conts:
+        segs, _ = P.split_semantic_spans(c)
+        kinds = [s["kind"] for s in segs]
+        check(f"BUG5: {c!r} 不被拆成 standalone prot + 剩余 (整段 sem)",
+              kinds == ["sem"] and any(s["t"].strip().casefold() == c.casefold() for s in segs),
+              f"segs={[(s['kind'],s['t']) for s in segs]}")
+    # 用户核心: [AA] I'm here -> [AA] prot + "I'm here" sem (不得出现 prot I)
+    segs, _ = P.split_semantic_spans("[AA] I'm here")
+    prot_any = [s for s in segs if s["kind"] == "prot" and s["t"].strip() == "I"]
+    sem_cont = any(s["kind"] == "sem" and "I'm here" in s["t"] for s in segs)
+    check("BUG5: [AA] I'm here -> [AA]prot + I'm here sem (无 prot I)",
+          not prot_any and sem_cont, f"segs={[(s['kind'],s['t']) for s in segs]}")
+    # 保留 standalone I/F/B/M/A 为技术 token 原规则
+    for lone in ["I", "F", "B", "M", "A"]:
+        segs, _ = P.split_semantic_spans(lone)
+        check(f"BUG5: standalone {lone} 仍 prot (技术 token)",
+              segs and segs[0]["kind"] == "prot" and segs[0]["t"].strip() == lone,
+              f"segs={[(s['kind'],s['t']) for s in segs]}")
+    # Pose Player 领域术语表: Pose Pack / pose pack / posepack -> 姿势包
+    for sp in ["Pose Pack", "pose pack", "POSEPACK", "posepack", "Pose Pack 1"]:
+        segs, _ = P.split_semantic_spans(sp)
+        resolved, pending = P.glossary_resolve(segs)
+        check(f"glossary: {sp!r} -> 姿势包 (无 pending)",
+              resolved and all(v == "姿势包" for v in resolved.values()) and not pending,
+              f"resolved={resolved} pending={[p['t'].strip() for p in pending]}")
+    # glossary 不进模型但行内嵌词给 gloss_hint: NA_Arrested posepack
+    prot, _ = P.title_creator_protection("NA_Arrested posepack")
+    segs, _ = P.split_semantic_spans("NA_Arrested posepack", force_prot_spans=prot)
+    resolved, pending = P.glossary_resolve(segs)
+    check("glossary: NA_Arrested posepack -> NA_ prot + gloss_hint posepack",
+          any((p.get("gloss_hint") or "") == "posepack=姿势包" for p in pending),
+          f"pending={[(p['t'].strip(), p.get('gloss_hint')) for p in pending]}")
+
+
 # ---------------- 入口 ----------------
 def main():
     print("Phase 2B regression + cache/resume 验证")
@@ -569,6 +613,7 @@ def main():
     test_override()
     test_bug_fixes()
     test_bug4_title_creator_protection()
+    test_bug5_contraction_and_pose_glossary()
     print(f"\n==== 结果: PASS={len(PASS)}  FAIL={len(FAIL)} ====")
     if FAIL:
         print("失败项:", *FAIL, sep="\n  - ")

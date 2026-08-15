@@ -215,6 +215,10 @@ _GLOSSARY = {
     "concern": "担忧", "doubtful": "疑惑", "smirk": "坏笑",
     "sim": "模拟市民", "idle": "待机",
     "all in one": "整合版",
+    # Pose Player corpus 领域术语 (固定, 不进模型): Pose Pack 必须稳定译"姿势包",
+    # 不得在同一 TITLE batch 混出"动作包/姿势包"。大小写不敏感: Pose Pack / pose
+    # pack / Posepack / POSEPACK 都命中。
+    "pose pack": "姿势包", "posepack": "姿势包",
 }
 # 统一为小写键做 casefold 不敏感查找 (All In One / ALL IN ONE / all in one 都命中)
 _GLOSSARY = {k.casefold(): v for k, v in _GLOSSARY.items()}
@@ -341,7 +345,17 @@ def split_semantic_spans(text: str, force_prot_spans=None):
         # 仅当前后都不是字母数字时 (真正独立 token), 否则是自然词内部 (如 RIGHT 里的 T)
         prev_is_alnum = (i > 0 and t[i - 1].isalnum())
         next_is_alnum = (i + 1 < n and t[i + 1].isalnum())
-        if t[i].isupper() and not prev_is_alnum and not next_is_alnum:
+        # BUG5: 英文 apostrophe contraction 必须先于 standalone/technical 识别。
+        # 如 I'm / It's: I 后接 ' 再接字母 -> 是 contraction 词干, 不是孤立技术 token;
+        # 若在此把 I 当性别/索引 prot, 会把 I'm here 拆成 I(prot) + 'm here(sem),
+        # rebuild 后错成 "I我在这里"。故碰到 "<大写字母>+apostrophe+字母" 时跳过
+        # single-letter prot, 让整个 contraction 流入 sem_buf 保持一个语义短语。
+        # (ASCII ' 与 curly ’ 都覆盖; 若 I 后是 \' 但后接非字母, 则仍按原规则判定)
+        _is_contraction_lead = (t[i].isupper()
+                                and i + 2 < n
+                                and t[i + 1] in "'’"
+                                and t[i + 2].isalpha())
+        if not _is_contraction_lead and t[i].isupper() and not prev_is_alnum and not next_is_alnum:
             flush_sem()
             segs.append({"t": t[i], "kind": "prot"})
             i += 1
@@ -844,8 +858,9 @@ class OllamaTranslator(Translator):
         print(f"[进度] 待翻译 phrase 共 {total} 个, 开始 (并发={concurrency}, 每批={per_call}) ...")
         results = {}
         attempted = 0
-        ok = 0
-        err_n = 0
+        transport_success = 0   # 引擎/transport 成功返回的 phrase 数 (不论内容)
+        ok = 0                  # accepted_translation: 接受的非错误/非echo译文
+        err_n = 0               # engine_error: transport/5xx 等引擎错误
         last_log = [0.0]
 
         def _log(force=False):
@@ -854,7 +869,10 @@ class OllamaTranslator(Translator):
                 return
             last_log[0] = now
             el = now - t0
-            print(f"[进度] attempted={attempted} 成功={ok} 失败={err_n}  已用 {el/60:4.1f}min", flush=True)
+            # 日志语义拆分 (用户裁决): "成功" 仅指 transport 返回, 勿与接受译文混淆。
+            print(f"[进度] attempted={attempted} transport_success={transport_success} "
+                  f"accepted_translation={ok} engine_error={err_n}  已用 {el/60:4.1f}min",
+                  flush=True)
 
         def _emit(k, z):
             nonlocal ok
@@ -884,6 +902,7 @@ class OllamaTranslator(Translator):
                     continue
                 attempted += len(b)
                 if st == "ok":
+                    transport_success += len(b)
                     for k, z in zip(keymap, zh):
                         if z and not z.startswith("[ERR"):
                             _emit(k, z)
@@ -898,6 +917,7 @@ class OllamaTranslator(Translator):
                         except Exception:
                             st2, keymap2, zh2 = "err", b, []
                         if st2 == "ok":
+                            transport_success += len(b)
                             for k, z in zip(keymap2, zh2):
                                 if z and not z.startswith("[ERR"):
                                     _emit(k, z)
@@ -923,7 +943,14 @@ class OllamaTranslator(Translator):
             raise RuntimeError(f"Ollama 大面积解析失败 ({round_bad}/{attempted}); 请检查模型/prompt/JSON schema")
 
         el = time.time() - t0
-        print(f"[进度] 完成: attempted={attempted} 成功={ok} 失败={err_n}  总耗时 {el/60:.1f}min", flush=True)
+        unresolved = max(0, attempted - ok - err_n)  # 既非接受译文亦非引擎错误的剩余
+        # 日志语义拆分 (用户裁决, DESC 前修掉"成功"歧义): attempted / transport_success /
+        # accepted_translation / engine_error / unresolved。echo_rejected 属 cache 层,
+        # 已在 [结果] 汇总 (cache_echo_rejected=) 单独打印。
+        print(f"[进度] 完成: attempted={attempted} transport_success={transport_success} "
+              f"accepted_translation={ok} engine_error={err_n} unresolved={unresolved} "
+              f"  总耗时 {el/60:.1f}min",
+              flush=True)
         return results
 
     def _call_batch(self, items):
