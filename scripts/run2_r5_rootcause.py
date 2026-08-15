@@ -203,18 +203,15 @@ def main():
             print(f"[SKIP] slot {slot}: 读取失败 serr={serr} oerr={oerr}")
             continue
 
-        # role per key: 复用 approved_pv_refs (只读 XML 遍历) 得 (category, kh, src_text)
-        from gen_cohort_sidecars import approved_pv_refs
-        role_map = {}
-        try:
-            _tgi_pv, _km_pv, _appr, _errs = approved_pv_refs(src)
-            if _appr is not None:
-                for cat, kh, _t in _appr:
-                    role_map[kh] = cat
-            elif _errs:
-                print(f"[note] slot {slot}: approved_pv_refs 无 approved (errors={_errs[:2]})")
-        except Exception as _ex:
-            print(f"[note] slot {slot}: approved_pv_refs 异常: {_ex}")
+        # 关键 contract: 只对「本包 approved_pv_refs」的 approved 集做 resolver action 判定。
+        # 其余 source STBL entry 一律 UNRELATED —— 即使其 stable TID 在全局命中某 TRANSLATE
+        # 源文本, 也绝不能跨包提升为 TRANSLATE target (否则 expected set 污染: 误报
+        # KEEP_CHANGED / TRANSLATE_NOT_APPLIED, 并扭曲 per-package T/K 分配)。
+        from independent_sidecar_audit import build_approved
+        appr_kh, role_map, aerr = build_approved(src)
+        if appr_kh is None:
+            print(f"[SKIP] slot {slot}: 无法建立 approved 集 -> {aerr}")
+            continue
 
         role = r.get("role") or ""
         agg = {
@@ -223,14 +220,20 @@ def main():
             "TRANSLATE_CHANGED_OK": 0, "TRANSLATE_NOOP": 0,
             "TRANSLATE_NOT_APPLIED": 0, "TRANSLATE_WRONG_VALUE": 0,
             "KEEP_CHANGED": 0, "KEEP_OK": 0,
-            "physical_changed": 0, "manifest_modified_key_count": r.get("modified_key_count"),
+            "approx": len(appr_kh),
+            "man_A": int(r.get("approved_key_count") or 0),
+            "man_T": int(r.get("translated_key_count") or 0),
+            "man_K": int(r.get("keep_key_count") or 0),
+            "physical_changed": 0, "unsaf_changed": 0,
+            "manifest_modified_key_count": r.get("modified_key_count"),
         }
         sset = set(skmap)
-        for kh in sorted(sset):
+        # ---- approved keys: 进入 resolver action 判定 + 分类 + aggregate ----
+        for kh in sorted(appr_kh & sset):
             sfl, stxt = skmap[kh]
             ofl, otxt = okmap.get(kh, (None, None))
             if otxt is None:
-                continue  # sidecar 缺该 key (R4 no-add/deploy 已覆盖; 这里只诊断都存在的)
+                continue  # sidecar 缺该 key (R4 no-add 已覆盖; 这里只诊断都存在的)
             tr, tag = res.resolve(stxt)
             if tag in _TRANSLATE_TAGS:
                 action = "TRANSLATE"
@@ -240,7 +243,7 @@ def main():
             elif tag in _KEEP_TAGS:
                 action, final, rsrc = "KEEP", "", "KEEP_flag"
             else:
-                action, final = "KEEP", ""       # MISSING/SOURCE_MISMATCH 视为非 player-visible, 须 verbatim
+                action, final = "KEEP", ""      # MISSING/SOURCE_MISMATCH 视为非 player-visible, 须 verbatim
                 rsrc = tag
             status = classify(action, final, stxt, otxt)
             agg[status] += 1
@@ -261,11 +264,29 @@ def main():
                 "source_eq_sidecar": "Y" if stxt == otxt else "N",
                 "final_eq_sidecar": "Y" if final == otxt else "N",
                 "source_changed": "Y" if otxt != stxt else "N",
+                "key_class": "approved",
+            })
+        # ---- unrelated keys: 单独诊断, 不混入 resolver TRANSLATE/KEEP aggregate ----
+        for kh in sorted((sset & set(okmap)) - appr_kh):
+            sfl, stxt = skmap[kh]
+            ofl, otxt = okmap[kh]
+            if otxt != stxt:
+                agg["unsaf_changed"] += 1   # unrelated 被误改 (绝不允许)
+            out_rows.append({
+                "slot": slot, "package": os.path.basename(src), "role": "",
+                "keyhash": f"0x{kh:08X}",
+                "resolver_action": "UNRELATED", "resolver_source": "",
+                "resolver_final": "",
+                "source_stbl_text": repr(stxt), "sidecar_stbl_text": repr(otxt),
+                "manifest_action": "", "manifest_expected_final": "",
+                "source_eq_final": "", "source_eq_sidecar": "Y" if stxt == otxt else "N",
+                "final_eq_sidecar": "", "source_changed": "Y" if otxt != stxt else "N",
+                "key_class": "unrelated",
             })
         slot_agg[slot] = agg
 
     # ---- 写 CSV ----
-    cols = ["slot", "package", "role", "keyhash",
+    cols = ["slot", "package", "role", "keyhash", "key_class",
             "resolver_action", "resolver_source", "resolver_final",
             "source_stbl_text", "sidecar_stbl_text",
             "manifest_action", "manifest_expected_final",
@@ -276,25 +297,42 @@ def main():
         w.writeheader()
         for row in out_rows:
             w.writerow(row)
-    print(f"[WROTE] {a.out}  ({len(out_rows)} key rows)")
+    print(f"[WROTE] {a.out}  ({len(out_rows)} key rows, "
+          f"approved={sum(1 for x in out_rows if x['key_class']=='approved')} / "
+          f"unrelated={sum(1 for x in out_rows if x['key_class']=='unrelated')})")
 
-    # ---- slot aggregate ----
-    print("\n==== slot aggregate ====")
-    print(f"{'slot':<6}{'pkg':<22}{'TRtrans':<9}{'CHG_OK':<8}{'NOOP':<6}{'NOT_APP':<9}{'WRONG':<7}{'KEEP_CHG':<9}{'phys_chg':<10}{'man_mod_cnt'}")
+    # ---- slot aggregate (approved only) ----
+    print("\n==== slot aggregate (approved only) ====")
+    print(f"{'slot':<6}{'pkg':<22}{'APPR':<6}{'Aman':<6}{'T':<5}{'Tman':<6}{'K':<5}{'Kman':<6}"
+          f"{'TRtrans':<8}{'CHG_OK':<8}{'NOOP':<6}{'NOT_APP':<9}{'WRONG':<7}{'KEEP_CHG':<9}{'phys_chg':<9}{'unrel_chg'}")
     for slot in sorted(slot_agg):
         ag = slot_agg[slot]
-        print(f"{slot:<6}{ag['package']:<22}{ag['resolver_translate']:<9}{ag['TRANSLATE_CHANGED_OK']:<8}"
-              f"{ag['TRANSLATE_NOOP']:<6}{ag['TRANSLATE_NOT_APPLIED']:<9}{ag['TRANSLATE_WRONG_VALUE']:<7}"
-              f"{ag['KEEP_CHANGED']:<9}{ag['physical_changed']:<10}{ag['manifest_modified_key_count']}")
+        print(f"{slot:<6}{ag['package']:<22}{ag['approx']:<6}{ag['man_A']:<6}{ag['resolver_translate']:<5}"
+              f"{ag['man_T']:<6}{ag['approx']-ag['resolver_translate']:<5}{ag['man_K']:<6}"
+              f"{ag['resolver_translate']:<8}{ag['TRANSLATE_CHANGED_OK']:<8}{ag['TRANSLATE_NOOP']:<6}"
+              f"{ag['TRANSLATE_NOT_APPLIED']:<9}{ag['TRANSLATE_WRONG_VALUE']:<7}{ag['KEEP_CHANGED']:<9}"
+              f"{ag['physical_changed']:<9}{ag['unsaf_changed']}")
 
-    # 全量汇总
+    # 全量汇总 (approved only) + 门控校验
     tot = {k: sum(slot_agg[s][k] for s in slot_agg) for k in
-           ["resolver_translate", "TRANSLATE_CHANGED_OK", "TRANSLATE_NOOP",
+           ["approx", "resolver_translate", "TRANSLATE_CHANGED_OK", "TRANSLATE_NOOP",
             "TRANSLATE_NOT_APPLIED", "TRANSLATE_WRONG_VALUE", "KEEP_CHANGED",
-            "KEEP_OK", "physical_changed"]}
-    print("\n=== ALL slots sum ===")
+            "KEEP_OK", "physical_changed", "unsaf_changed"]}
+    print("\n=== ALL slots sum (approved only) ===")
     for k, v in tot.items():
         print(f"  {k} = {v}")
+    # 门控: approved 总数应 == 241; 每包 A/T/K 与 manifest 一致
+    gate_ok = True
+    for slot in sorted(slot_agg):
+        ag = slot_agg[slot]
+        for lab, got, want in (("A", ag["approx"], ag["man_A"]),
+                               ("T", ag["resolver_translate"], ag["man_T"]),
+                               ("K", ag["approx"] - ag["resolver_translate"], ag["man_K"])):
+            if got != want:
+                gate_ok = False
+                print(f"  !! GATE {slot} {lab}: resolved={got} manifest={want}")
+    print(f"\napproved A/T/K == manifest gates: {'PASS' if gate_ok else 'FAIL'}")
+    print(f"total approved = {tot['approx']} (期望 241); unrelated 被误改 = {tot['unsaf_changed']} (期望 0)")
 
     # ---- 已知 KeyHash 精确 repr 对比 (exact stored str, 主循环已收集到 _known_exact) ----
     if known and _known_exact:

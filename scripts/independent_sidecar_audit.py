@@ -152,6 +152,30 @@ def parse_tgi(s):
         return None
 
 
+def build_approved(src):
+    """该包唯一 approved KeyHash 集 (来自 approved_pv_refs) + role map.
+
+    返回 (approved_kh_set, role_map, errors)。
+    - 只有 approved keys 才允许进入 resolver action 判定与 R5 changed-set 构造。
+    - 其余 source STBL entry 一律 UNRELATED: 即使其 stable TID 在全局 resolver 命中某
+      TRANSLATE 源文本, 也绝不能跨包提升为 TRANSLATE target。
+    - approved_pv_refs 失败 (包非 ELIGIBLE_EXISTING_CHS 等) -> 返回 (None, None, errors),
+      上层必须 HARD-FAIL (无法建立 approved 集就谈不上 R5 一致性审计)。
+    """
+    from gen_cohort_sidecars import approved_pv_refs
+    errors = []
+    try:
+        _tgi, _km, appr, errs = approved_pv_refs(src)
+    except Exception as ex:
+        return None, None, [f"approved_pv_refs 异常: {ex}"]
+    if appr is None:
+        return None, None, (list(errs) if errs else ["approved_pv_refs 无 approved"])
+    role_map = {}
+    for cat, kh, _txt in appr:
+        role_map[kh] = cat
+    return set(role_map), role_map, errors
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cohort", required=True)
@@ -229,17 +253,26 @@ def main():
                 if kmap is None:
                     R.add(f"[NOOP {slot}] source target STBL 解析 OK", False, "; ".join(errs) or "unreadable")
                 else:
-                    # NOOP 合法性: 没有任何源 key 解析到 TRANSLATE 终态 (OVERRIDE/DONE/CACHE),
-                    # 否则生成期应产生 sidecar (NOOP 判定错误)。author/pack 等 metadata key
-                    # 解析到 MISSING 属正常 (非 player-visible), 不视为需翻译。
-                    any_terminal = False
-                    for kh, (fl, txt) in kmap.items():
-                        tr, tag = res.resolve(txt)
-                        if tag in ("OVERRIDE", "DONE", "CACHE"):
-                            any_terminal = True
-                            break
-                    R.add(f"[NOOP {slot}] 无任何源 key 解析到 TRANSLATE 终态 (合法 NOOP)",
-                          not any_terminal, "")
+                    # NOOP 合法性: 没有任何 APPROVED key 解析到 TRANSLATE 终态 (OVERRIDE/DONE/CACHE)。
+                    # 只以该包 approved_pv_refs 的 approved 集为准; 其余 source STBL entry 一律
+                    # UNRELATED —— 即使其 stable TID 在全局 resolver 命中某 TRANSLATE 源文本,
+                    # 也绝不能跨包提升为 TRANSLATE (否则误报 NOOP)。author/pack metadata 解析到
+                    # MISSING 属正常 (非 player-visible)。
+                    appr_kh, _rmap, aerr = build_approved(src)
+                    if appr_kh is None:
+                        R.add(f"[NOOP {slot}] approved 集可建立 (approved_pv_refs)", False,
+                              "; ".join(aerr) or "approved_pv_refs 失败")
+                    else:
+                        any_terminal = False
+                        for kh in appr_kh:
+                            if kh not in kmap:
+                                continue
+                            tr, tag = res.resolve(kmap[kh][1])
+                            if tag in ("OVERRIDE", "DONE", "CACHE"):
+                                any_terminal = True
+                                break
+                        R.add(f"[NOOP {slot}] 无任何 APPROVED key 解析到 TRANSLATE 终态 (合法 NOOP)",
+                              not any_terminal, "")
                 # 计数与 manifest 对齐
                 R.add(f"[NOOP {slot}] translated_key_count==0",
                       str(r.get("translated_key_count")) in ("0", "", "None"),
@@ -310,43 +343,100 @@ def main():
             del_keys = sorted(sset - oset)
             log.add("R5 no add", len(add_keys) == 0, f"added={['0x%08X'%k for k in add_keys]}")
             log.add("R5 no delete", len(del_keys) == 0, f"deleted={['0x%08X'%k for k in del_keys]}")
-            # 文本一致性与 resolver 最终 (changed set == TRANSLATE set)
-            #   tr_tag(kh) = production resolver 对 source 原文的终态 (KEEP / OVERRIDE/DONE/CACHE / 其他)
-            tr_map = {}
-            for kh in (sset & oset):
-                tr, tag = res.resolve(skmap[kh][1])
-                tr_map[kh] = (tr, tag)
-            text_mism = 0
-            changed_keys = []
-            for kh in sorted(sset & oset):
-                sfl, stxt = skmap[kh]
-                ofl, otxt = okmap[kh]
-                tr, tag = tr_map[kh]
-                if tag == "KEEP" or tag in ("MISSING", "SOURCE_MISMATCH"):
-                    # KEEP / unrelated 键: 必须保持 source 原文完全不变 (verbatim copy)
-                    if ofl != sfl or otxt != stxt:
-                        text_mism += 1
-                elif tag in ("OVERRIDE", "DONE", "CACHE"):
-                    # TRANSLATE 键: 必须等于 resolver 最终译文
-                    if otxt != tr:
-                        text_mism += 1
+
+            # ===================================================================
+            # 关键 contract: 只对「本包 approved_pv_refs 的 approved 集」做 resolver
+            # action 判定与 R5 changed-set 构造。其余 source STBL entry 一律 UNRELATED:
+            #   即使其 stable TID 在全局 resolver 命中某 TRANSLATE 源文本, 也绝不能跨包
+            #   提升为 TRANSLATE target (否则 expected set 污染 -> 误报 KEEP_CHANGED /
+            #   TRANSLATE_NOT_APPLIED, 并扭曲 per-package T/K 分配)。
+            appr_kh, _rmap, aerr = build_approved(src)
+            if appr_kh is None:
+                # 无法建立 approved 集 -> 无法开展 R5 一致性审计, HARD-FAIL
+                log.add("approved 集可建立 (approved_pv_refs)", False,
+                        "; ".join(aerr) or "approved_pv_refs 失败")
+            else:
+                # 该包 approved 集 (∩ 实际 source key)
+                appr_in_src = appr_kh & sset
+                # 只对 approved 内 key 解析 resolver; 其余 (unrelated) 不 resolve
+                tr_map = {}
+                for kh in appr_in_src:
+                    tr, tag = res.resolve(skmap[kh][1])
+                    tr_map[kh] = (tr, tag)
+                # per-package: approved / translate / keep (只在 approved 内计)
+                tr_approved = {kh for kh, (tr, tag) in tr_map.items()
+                               if tag in ("OVERRIDE", "DONE", "CACHE")}
+                keep_approved = {kh for kh, (tr, tag) in tr_map.items()
+                                 if tag in ("KEEP", "MISSING", "SOURCE_MISMATCH")}
+                A_cnt = len(appr_kh)
+                T_cnt = len(tr_approved)
+                K_cnt = len(keep_approved)
+                print(f"  slot {slot}: approved={A_cnt} translate={T_cnt} keep={K_cnt} "
+                      f"(manifest A={r.get('approved_key_count')} T={r.get('translated_key_count')} "
+                      f"K={r.get('keep_key_count')})")
+                # ---- aggregate gates: must be HARD-FAIL before R5 ----
+                man_A = int(r.get("approved_key_count") or 0)
+                man_T = int(r.get("translated_key_count") or 0)
+                man_K = int(r.get("keep_key_count") or 0)
+                log.add("approved count == manifest A", A_cnt == man_A,
+                        f"resolved={A_cnt} man={man_A}")
+                log.add("approved TRANSLATE count == manifest T", T_cnt == man_T,
+                        f"resolved={T_cnt} man={man_T}")
+                log.add("approved KEEP count == manifest K", K_cnt == man_K,
+                        f"resolved={K_cnt} man={man_K}")
+
+                # ---- 文本一致性 (只对 approved key)
+                text_mism = 0       # approved TRANSLATE 写错 / approved KEEP 被误改 / unrelated 被误改
+                trans_noop = []     # approved TRANSLATE 但 final==source (合法 NOOP-like, 另计)
+                changed_keys = []   # approved TRANSLATE 且 final!=source 且 sidecar==final (确实被改)
+                spurious_unrel = [] # unrelated key 被改 (绝不允许)
+                for kh in sorted(appr_in_src):
+                    sfl, stxt = skmap[kh]
+                    ofl, otxt = okmap[kh]
+                    tr, tag = tr_map[kh]
+                    if tag in ("OVERRIDE", "DONE", "CACHE"):
+                        # approved TRANSLATE key
+                        if tr is not None and tr != stxt:
+                            if otxt == tr:
+                                changed_keys.append(kh)
+                            else:
+                                text_mism += 1          # 应为 final 却不是
+                        else:
+                            # TRANSLATE 但 final==source (no-op final): 必须保持 verbatim
+                            trans_noop.append(kh)
+                            if otxt != stxt:
+                                text_mism += 1
                     else:
-                        changed_keys.append(kh)  # 确实被改成 resolver 最终
-            # 关键不变式: changed set == TRANSLATE set  (每个 TRANSLATE 键必须真的被改,
-            # 每个非 TRANSLATE(即 KEEP/MISSING/unrelated) 键必须没被改)
-            tr_keys = {kh for kh, (tr, tag) in tr_map.items() if tag in ("OVERRIDE", "DONE", "CACHE")}
-            changed_set = set(changed_keys)
-            miss = sorted(tr_keys - changed_set)      # 应改为未改
-            spurious = sorted(changed_set - tr_keys)  # 不该改却改了
-            log.add("R5 changed set == TRANSLATE set",
-                    text_mism == 0 and not miss and not spurious,
-                    f"mismatch={text_mism} 未改TRANSLATE={['0x%08X'%k for k in miss]} 误改={['0x%08X'%k for k in spurious]}")
-            log.add("R5 文本与 resolver 最终一致 (0 mismatch)", text_mism == 0, f"mismatch={text_mism}")
-            # R5 modified_key_count 与 manifest 对齐 (cold 独立计数)
-            mod_cnt = len(changed_keys)
-            log.add("R5 modified_key_count==manifest",
-                    mod_cnt == int(r.get("modified_key_count") or 0),
-                    f"cold={mod_cnt} man={r.get('modified_key_count')}")
+                        # approved KEEP (含 MISSING/SOURCE_MISMATCH): 必须 verbatim
+                        if ofl != sfl or otxt != stxt:
+                            text_mism += 1
+                # ---- unrelated keys: 必须 verbatim (sidecar==source), 绝不能被跨包提升 ----
+                unrelated = (sset & oset) - appr_kh
+                for kh in sorted(unrelated):
+                    sfl, stxt = skmap[kh]
+                    ofl, otxt = okmap[kh]
+                    if ofl != sfl or otxt != stxt:
+                        spurious_unrel.append(kh)
+                        text_mism += 1
+                # ---- R5 changed set == expected_changed_keys ----
+                # expected = approved TRANSLATE 且 final!=source (真正要求变化的 key)
+                expected_changed = {kh for kh, (tr, tag) in tr_map.items()
+                                    if tag in ("OVERRIDE", "DONE", "CACHE")
+                                    and tr is not None and tr != skmap[kh][1]}
+                changed_set = set(changed_keys)
+                miss = sorted(expected_changed - changed_set)      # 应改未改
+                spurious = sorted(changed_set - expected_changed)  # 不改却改 (不应发生)
+                log.add("R5 changed set == expected_changed_keys",
+                        text_mism == 0 and not miss and not spurious and not spurious_unrel,
+                        f"mismatch={text_mism} 未改TRANSLATE={['0x%08X'%k for k in miss]} "
+                        f"误改={['0x%08X'%k for k in spurious]} 误改UNRELATED={['0x%08X'%k for k in spurious_unrel]}")
+                log.add("R5 文本与 resolver 最终一致 (0 mismatch)", text_mism == 0,
+                        f"mismatch={text_mism} TRANSLATE_NOOP={['0x%08X'%k for k in trans_noop]}")
+                # R5 modified_key_count 与 manifest 对齐 (cold 独立计数, 仅 approved TRANSLATE 变化 key)
+                mod_cnt = len(changed_keys)
+                log.add("R5 modified_key_count==manifest",
+                        mod_cnt == man_T,
+                        f"cold={mod_cnt} man={man_T}")
         else:
             log.add("R4/R5/R6 需 source(target)+sidecar 均可读",
                     skmap is not None and okmap is not None,

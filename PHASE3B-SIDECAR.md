@@ -1545,3 +1545,72 @@ exit code: 0 = 完成 (dump 成功, 不影响审计结论); 2 = CLI/加载错误
 白盒: 6 分类全部正确分支 (CHANGED_OK/NOOP/NOT_APPLIED/WRONG_VALUE/KEEP_OK/KEEP_CHANGED),
 known-key repr 表 (len/bytes/NFC/exact) 就位; 既有 independent_sidecar_audit 白盒回归保持 PASS。
 退出码语义保留: 本工具只诊断, 不改审计结论。
+
+---
+
+## 🎯 approved-set contract fix — expected action set 构造范围错误 (2026-08-15)
+
+### 根因 (用户定位, 已证实)
+`independent_sidecar_audit.py` 的 R5 与 `run2_r5_rootcause.py` 的错误: 对 **source STBL 的全部
+entry** 调用 `resolver.resolve()` (441 keys), 而非只对该 package `approved_pv_refs` 的 **approved
+set** (241 keys) 建立 expected action set。后果:
+- rootcause 错误输出 441 行 (应 241)。
+- TRtrans 被跨包重新分配 (s2=14 s3=1 s4=8 s8=23 s9=68 s10=5, 总和仍=123) —— unrelated key 的
+  stable TID 在全局 resolver 命中另一包的 TRANSLATE 源文本, 被跨包提升为 TRANSLATE target。
+- `TRANSLATE_NOT_APPLIED=9` / `KEEP_CHANGED=9` / `WRONG_VALUE=0` 正是 expected set 污染的产物;
+  而 `physical_changed == manifest T` 对每个 slot 精确相等 (s2=14 s3=2 s4=6 s8=20 s9=70 s10=7),
+  证明 writer 正确, 只是 expected-key 集合构造错了。
+
+### 正确 contract (user frozen)
+1. 每包先由 `approved_pv_refs(source_package)` 得该包**唯一 approved KeyHash 集**。
+2. **只有 approved keys** 才能进入 resolver action 判定 (KEEP / TRANSLATE) 与
+   R5 changed-set 构造; expected final = resolver final。
+3. 门控 (HARD-FAIL, R5 之前):
+   - `approved count == manifest A`
+   - `approved TRANSLATE count == manifest T`
+   - `approved KEEP count == manifest K`
+   任意不相等 -> HARD-FAIL, 继续 audit。
+4. source STBL 其余 keys 一律 **UNRELATED**: 即使其文本恰与全局 resolver 某 TRANSLATE source
+   相同 (stable TID 命中), 也绝不能因跨包命中而变成本包 TRANSLATE target。
+   UNRELATED 必须 `sidecar_text == source_text` (verbatim)。
+5. R5 changed set 严格为:
+   `expected_changed_keys = {approved keys where action=TRANSLATE and final != source}`。
+6. 若 production contract 要求所有 TRANSLATE 最终都实际变化, 可额外审计 TRANSLATE_NOOP
+   (approved TRANSLATE 且 final==source); 但**绝不能从 unrelated entry 构造 expected TRANSLATE key**。
+
+### 实现改动 (只改 auditor / diagnostic)
+- `scripts/independent_sidecar_audit.py`:
+  - 新增 `build_approved(src)` -> `(approved_kh_set, role_map, errors)` (包 non-ELIGIBLE 返回
+    errors, 上层 HARD-FAIL "approved 集可建立")。
+  - NOOP 块: 合法性 = 没有任何 **APPROVED** key 解析到 TRANSLATE 终态 (不再扫全部 source key)。
+  - generation-slot: R5 前打印 `slot X: approved=A translate=T keep=K (manifest A=.. T=.. K=..)`;
+    新增 approved==A / TRANSLATE==T / KEEP==K 三扇门 (HARD-FAIL)。
+  - 只对 approved key 调 resolver; unrelated = (sset∩oset)−approved_kh 必须 verbatim (误改即 FAIL)。
+  - R5 changed set == expected_changed_keys; TRANSLATE_NOOP 单独列; modified_key_count==man_T。
+- `scripts/run2_r5_rootcause.py`:
+  - 复用 `build_approved`; 只有 approved key 进入 resolver aggregate + CSV 行。
+  - unrelated key 单独输出 (`key_class=unrelated`, `resolver_action=UNRELATED`), 不混入
+    TRANSLATE/KEEP aggregate; 新增 `unrel_chg` 计数 (unrelated 被误改, 期望 0)。
+  - approved 总行应 = 241; 每包 A/T/K 门控校验打印 PASS/FAIL; `total approved` 打印。
+  - CSV 新增 `key_class` 列。
+
+### 新增 regression (用户指定)
+package A 有 unrelated key 文本 "Foo"; package B 的 approved key "Foo" 在全局 resolver 为
+TRANSLATE -> package A 的 unrelated Foo 必须仍为 **UNRELATED / unchanged**, 不得被标成
+TRANSLATE。白盒 `/tmp/wb_approved_set_v3.py` 验证: INDEPENDENT_AUDIT PASS +
+APPROVED_SET_REGRESSION OK。
+
+### 白盒/回归汇总 (全绿)
+- 新 regression (approved-set/Foo-unrelated): PASS。
+- v2 (18-STBL A1 PASS / A2 missing FAIL / A3 dup FAIL / B1 NOOP planned PASS): 全对。
+- POS 10/9/1 PASS; NEG-1..5 全 FAIL (rc=1)。
+- 既有 `test_phase2b_regression.py` 135/0 + `test_sidecar_audit_regression.py` 13/0 全 PASS。
+- `python3 -Wall -m py_compile` 两脚本干净。
+
+### Windows 重跑 (现有 retry1, 不 regeneration; 不改 writer; 不进 Mods)
+单行命令与之前相同 (`independent_sidecar_audit.py`), 现在 R5 前每包会打印
+`approved=A translate=T keep=K (manifest ...)`, 期望每包三者与 manifest 完全一致;
+最终 `generated sidecars=9 / NOOP=1 / sidecar audit PASS=*** / FAIL=0 / ERROR=0 / stray=0
+-> INDEPENDENT_AUDIT: PASS` (rc=0)。
+若仍 FAIL: per-slot `!!` 指出是 approved-gate / R5 changed-set / unrelated 误改 三类之一;
+writer / resolver / sidecar 不做任何修改。
