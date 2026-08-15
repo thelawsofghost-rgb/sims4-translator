@@ -42,6 +42,13 @@
   --sample N : 只对分层抽样的 N 行调用翻译引擎 (默认全量)
   --no-llm   : 不调用任何翻译引擎, 仅跑翻译层决策 (输出 mode/status 骨架, translation 置空)
   --engine none : 同 --no-llm
+  --overrides <path> : 用指定的 production overlay 作为人工 override 源 (只读,
+                       不改 frozen base/不回写)。缺省回退到 frozen translation_overrides.csv。
+  --authoritative : 权威 workset, decision=TRANSLATE 不得被老 classifier 改判 KEEP
+  --id / --regex / --category : 作用域裁剪 (先于一切层决策), 支持 retry 定位
+  retry preflight (--overrides + --id 38): 打印 requested/scoped/unique/
+      production_overrides_loaded/terminal_KEEP_hit/manual_final_hit/authoritative_TRANSLATE,
+      硬校验 production_overrides=145 & KEEP/manual hit=0 & authoritative=38, 不满足退出 4。
 """
 import sys, os, csv, re, json, io, unicodedata
 from pathlib import Path
@@ -101,6 +108,14 @@ if _TODO_OVERRIDE:
     TODO = Path(_TODO_OVERRIDE)
 if _DONE_OVERRIDE:
     DONE = Path(_DONE_OVERRIDE)
+
+# ---- production overlay 接入 (2026-08-15): --overrides <path> 让人工 override 加载
+#      指定的 production overlay 文件, 而不默认读 frozen translation_overrides.csv(114)。
+#      只读该文件, 绝不改 frozen base, 绝不写回 114/145。不改变 scope-at-load /
+#      authoritative gate / POLICY-CONFLICT。缺省回退到 frozen baseline (向后兼容)。
+OVERRIDES_PATH = _flag_val("--overrides")
+if OVERRIDES_PATH:
+    print(f"[overrides] 使用 production overlay: {OVERRIDES_PATH}")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -430,19 +445,24 @@ def materialize_from_cache(tid: str, text: str, mode: str, cache, ctx_map=None) 
 #   action=REVIEW    : 显式挂起, 不改写该行 (走正常流程)
 # 校验: 必须 translation_id + source_text 两者同时匹配才允许 override;
 #       缺列/非法 action/(tid,source_text) 不一致 -> 告警并跳过该条。
-OVER_FILE = out_dir / "translation_overrides.csv"
+OVER_FILE = Path(OVERRIDES_PATH) if OVERRIDES_PATH else out_dir / "translation_overrides.csv"
 _OVERRIDE_ACTIONS = {"TRANSLATE", "KEEP", "REVIEW"}
 
 
 def load_overrides(out_dir_) -> dict:
-    """读 translation_overrides.csv, 返回 {(tid, source_text): override_row}。
+    """读 translation_overrides.csv (或 --overrides 指定的 production overlay),
+    返回 {(tid, source_text): override_row}。
 
     校验 (translation_id, source_text) 组合; 不一致或缺关键列的条目跳过并告警。
     文件不存在 -> 空 dict (机制可逆: 删文件即回退到纯 cache/LLM 流程)。
     """
-    p = Path(out_dir_) / "translation_overrides.csv"
+    p = OVERRIDES_PATH if OVERRIDES_PATH else (Path(out_dir_) / "translation_overrides.csv")
+    p = Path(p)
     ovr = {}
     if not p.exists():
+        if OVERRIDES_PATH:
+            print(f"[HARD-FAIL] --overrides 指定的文件不存在: {p}", file=sys.stderr)
+            sys.exit(3)
         return ovr
     with open(p, encoding="utf-8-sig") as f:
         for i, r in enumerate(csv.DictReader(f), start=2):
@@ -962,9 +982,45 @@ def main():
 
     # 人工 override (优先级最高; 不写 cache; 不写 .package)
     ovr = load_overrides(out_dir)
+    _ovsrc = OVERRIDES_PATH if OVERRIDES_PATH else (Path(out_dir) / "translation_overrides.csv")
     if ovr:
         n_o = sum(1 for r in todo if override_for(ovr, r.get("translation_id"), norm_text(r.get("source_text"))))
-        print(f"[override] 加载 {len(ovr)} 条 translation_overrides.csv, 命中 todo {n_o} 行 (TRANSLATE/KEEP 终态, REVIEW 挂起)")
+        src = "production overlay" if OVERRIDES_PATH else "frozen translation_overrides.csv"
+        print(f"[override] 加载 {len(ovr)} 条 [{src}] ({_ovsrc}), 命中 todo {n_o} 行 (TRANSLATE/KEEP 终态, REVIEW 挂起)")
+
+    # ---- retry preflight invariant (仅确认 loader, 不调用模型) ----
+    # requested=38 / scoped=38 / unique=38 / production overrides=145 /
+    # terminal KEEP hit=0 / manual final hit=0 / authoritative TRANSLATE=38
+    _req_tids = set(x.strip() for x in ONLY_ID.split(",")) if ONLY_ID else set(r.get("translation_id", "") for r in todo)
+    _scope_tids = set(r.get("translation_id", "") for r in todo)
+    _uniq = len(_scope_tids)
+    _keep_hit = 0
+    _man_hit = 0
+    _auth_tr = 0
+    for r in todo:
+        tid = r.get("translation_id", "")
+        o = override_for(ovr, tid, norm_text(r.get("source_text", "")))
+        if o:
+            if o["action"] == "KEEP":
+                _keep_hit += 1
+            else:
+                _man_hit += 1
+        if (r.get("decision") or "").strip() in ("TRANSLATE", "FULL_TRANSLATE", "PARTIAL_TRANSLATE"):
+            _auth_tr += 1
+    print(f"[preflight] requested={len(_req_tids)} scoped={len(_scope_tids)} unique={_uniq} "
+          f"production_overrides_loaded={len(ovr) if OVERRIDES_PATH else 0} "
+          f"terminal_KEEP_hit={_keep_hit} manual_final_hit={_man_hit} authoritative_TRANSLATE={_auth_tr}")
+    # 硬预检: 当 --overrides 传了 production overlay 且 request 是 retry 38 时, 期望
+    #   overrides=145 且 本批 todo 中 KEEP/manual 命中=0 (terminal KEEP/manual 已是终态, 不应进 retry)。
+    if OVERRIDES_PATH and len(_req_tids) == 38:
+        exp = {"production_overrides_loaded": 145, "terminal_KEEP_hit": 0, "manual_final_hit": 0, "authoritative_TRANSLATE": 38}
+        got = {"production_overrides_loaded": len(ovr), "terminal_KEEP_hit": _keep_hit,
+               "manual_final_hit": _man_hit, "authoritative_TRANSLATE": _auth_tr}
+        bad = [k for k in exp if got.get(k) != exp[k]]
+        if bad:
+            print(f"[PREFLIGHT-FAIL] override 校验未过: { {k: (got.get(k), '期望', exp[k]) for k in bad} }", file=sys.stderr)
+            sys.exit(4)
+        print("[preflight] production overlay 145 校验 PASS (terminal KEEP/manual 不入 retry; authoritative TRANSLATE=38)")
 
     # 逐行翻译层决策
     decided = []

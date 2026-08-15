@@ -636,6 +636,21 @@ TITLE 两层 reconciliation 下游可读 (2026-08-15 三次修正, production ba
   CLI: python scripts/build_override_overlay.py output [--out <p>] [--no-write]
   下游显式传 .production.csv 读取 (不是改 frozen base)。
 
+--- phase2b 消费 production overlay (集成, 2026-08-15) ---
+  默认 phase2b_translate.py 读 frozen output/translation_overrides.csv(114) ——
+    仅因生成了 production overlay(145) 不会自动改读。必须显式:
+  python phase2b_translate.py output \
+        --overrides output/translation_overrides.production.csv \
+        --id <38 tids> --todo <manifest> [--engine none]
+  -ORIDRES_PATH 生效时 OVER_FILE=该文件 (只读); 缺省回退 frozen (向后兼容)。
+  不修改 frozen base114 / 不回写 145 / 不改变 scope-at-load /
+   不改变 authoritative gate / 不改 POLICY-CONFLICT。
+  retry preflight (加载后, 不调用模型):
+    requested=38 scoped=38 unique=38 production_overrides_loaded=145
+    terminal_KEEP_hit=0 manual_final_hit=0 authoritative_TRANSLATE=38
+    硬校验: production=145 & KEEP/manual hit=0 & auth_TR=38, 不满足 exit 4。
+  白盒 6 场景 PASS (flag 回退/接production/load145/retry不命中终态/invariant/反例)。
+
 A/D evidence 由 diag_title_qa 自动落盘 (不手工构造, 2026-08-15):
   python scripts/diag_title_qa.py output --done <done> --also-failed \
       --a-out output/title_A_tids.csv --d-out output/title_D_tids.csv
