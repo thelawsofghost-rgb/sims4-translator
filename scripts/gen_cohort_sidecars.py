@@ -470,14 +470,14 @@ def main():
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--writer", required=True)
     ap.add_argument("--run2", action="store_true",
-                    help="run2 生产模式: 用 3 个 frozen production final 作 resolver 源")
+                    help="run2 生产模式: 用五份 frozen production source 作 resolver 源")
     ap.add_argument("--preflight-only", action="store_true", help="只做 resolver/production preflight, 零写不生成")
     ap.add_argument("--title-final", default="")
     ap.add_argument("--desc-final", default="")
     ap.add_argument("--production-overlay", default="")
     ap.add_argument("--catalog-final", default="")
-    ap.add_argument("--overrides", default="")
     ap.add_argument("--done", default="")
+    ap.add_argument("--overrides", default="")
     ap.add_argument("--cache", default="")
     a = ap.parse_args()
 
@@ -492,11 +492,13 @@ def main():
                 raise RuntimeError("run2 模式必须给 --title-final/--desc-final/--production-overlay")
             resolver = make_production_resolver(
                 a.title_final, a.desc_final, a.production_overlay,
-                catalog=a.catalog_final or None)
-            print(f"[assets run2] title_final({len(resolver.title)}) desc_final({len(resolver.desc)}) "
-                  f"overlay({len(resolver.overlay)})" +
-                  (f" catalog({len(resolver.catalog)})" if resolver.catalog else ""))
-            print(f"[assets run2] 一致性冲突 = {len(resolver.consistency_errors)}")
+                translation_done=a.done or None, translation_catalog=a.catalog_final or None)
+            print(f"[assets run2] overlay({len(resolver.overlay)}) title_final({len(resolver.title)}) "
+                  f"desc_final({len(resolver.desc)}) done({len(resolver.done)}) "
+                  f"catalog({len(resolver.catalog)})")
+            print(f"[assets run2] 一致性冲突 = {len(resolver.consistency_errors)} | "
+                  f"hist_superseded = {resolver.historical_superseded} | "
+                  f"catalog_superseded = {resolver.catalog_decision_superseded}")
         else:
             if not a.overrides:
                 raise RuntimeError("非 run2 模式必须给 --overrides")
@@ -521,9 +523,9 @@ def main():
                     "--cohort", a.cohort,
                     "--title-final", a.title_final,
                     "--desc-final", a.desc_final,
-                    "--production-overlay", a.production_overlay]
-        if a.catalog_final:
-            sys.argv += ["--catalog", a.catalog_final]
+                    "--production-overlay", a.production_overlay,
+                    "--done", a.done,
+                    "--catalog", a.catalog_final]
         if out_dir.exists():
             sys.argv += ["--out-dir", str(out_dir)]
         rc = RP.main()

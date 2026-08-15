@@ -4,34 +4,47 @@
 run2_preflight.py —— Phase 3B2-SIDECAR run2 resolver/production-input 零写 preflight
 =========================================================================================
 目的: 在生成任何 sidecar 之前, 证明 gen_cohort_sidecars 的 resolver 在 run2 中使用的是
-冻结的 3 个 production final (title_final 407 / desc_final 190 / production overlay 217),
-并生成 zero-write preflight report (不建 package, 不碰 package, 不写 sidecar, 不改 Mods)。
+冻结的五份 production source, 并生成 zero-write preflight report
+(不建 package, 不碰 package, 不写 sidecar, 不改 Mods)。
 
-报告覆盖:
-  - cohort packages = 10; real source paths = 10; missing paths = 0
-  - 每包:
-      approved player-visible entries
-      KEEP count / TRANSLATE count / unresolved count / source mismatch count
-      duplicate KeyHash gate (target STBL)
-      exact existing CHS TGI gate
-  - aggregate:
-      unresolved = 0 / source mismatch = 0 / policy conflict = 0
-      duplicate target package skipped as frozen rule
+production source (preflight 与 generation 必须使用完全相同):
+  production_overlay  = 217   (explicit latest terminal override, 最高权威)
+  title_final         = 407   (新批次 final)
+  desc_final          = 190   (新批次 final)
+  translation_done    = 1888  (historical final translation fallback, nonempty unique)
+  translation_catalog = 3540  (decision/index ONLY, 不是 final payload)
 
-历史说明 (不 gate): run1 曾 1 PASS + 9 MISSING (文档注记, 见 PHASE3B-SIDECAR.md
-C-class), 但仓库内无可机读历史 artifact 记录具体哪 9 包/tid; 故不构造/不反推测。
-preflight 只证明当前 10 个 cohort package 的 resolve 一致性 (unresolved=0 /
-source_mismatch=0 / policy_conflict=0 / dup-KeyHash=0 / CHS-TGI=0)。
+已退出 resolver (只作 provenance/audit, base114 已被 production overlay217 完整包含):
+  translation_overrides.csv (base114), translation_overrides.final2.csv
 
-fail-closed:
-  * 3 production final 文件不存在 / 0 行 / 行数 != 冻结值 -> HARD-FAIL
-  * 任一 production source 是禁止的 batch/retry/desc-done/cache 文件 -> HARD-FAIL
-  * 多源 (tid,norm_source) 一致性冲突 (action/translation) -> HARD-FAIL
-  * 每包 unresolved > 0 或 source mismatch > 0 或 duplicate KeyHash -> 该包 FAIL,
-    汇总若任一包 FAIL -> 整体 rc=1 (不生成 sidecar)
-  * out-dir (若 --out-dir 给了) stale 非空 -> HARD-FAIL (与 gen_cohort_sidecars 一致)
+禁止作 final payload: catalog.translation, translation_cache.db。
 
-零写保证: 本脚本不调用 writer、不创建任何 .package / manifest、不改任何输入文件;
+报告结构:
+  1) production source health:
+       overlay rows = 217 / title rows = 407 / desc rows = 190
+       historical done nonempty unique = 1888 / catalog rows = 3540
+       title_desc_overlap = ? / title_desc_conflict = 0
+       historical_superseded = ? / catalog_decision_superseded = ?
+  2) 10 个真实 cohort:
+       packages = 10 / real paths = 10 / missing paths = 0
+       每包: approved / KEEP / TRANSLATE / unresolved / source_mismatch /
+             duplicate_KeyHash / CHS_TGI
+  3) aggregate:
+       unresolved = 0 / source_mismatch = 0 / policy_conflict = 0
+       duplicate_KeyHash_violation = 0 / CHS_TGI_violation = 0
+
+fail-closed (真正 HARD-FAIL):
+  * 五份 production source 缺文件 / 0 行 / 行数 != 冻结值 -> HARD-FAIL
+  * 任一 production source 是禁止的 base114/final2/batch/retry/cache 文件 -> HARD-FAIL
+  * source_text mismatch、final source 内部 duplicate key 且 outcome 不同、
+    title_final vs desc_final 同 key outcome 不一致 -> HARD-FAIL
+  * 当前 cohort catalog TRANSLATE 最终无 payload / REVIEW 无更高层终态 -> 该包 FAIL -> rc
+  * out-dir (若给) stale 非空 -> HARD-FAIL (与 gen_cohort_sidecars 一致)
+
+superseded (合法历史修订, 仅计数, 不 HARD-FAIL):
+  historical_superseded / catalog_decision_superseded
+
+零写保证: 本脚本不调用 writer、不创建任何 .package / manifest / sidecar / out-dir;
 仅 print 报告 + 可选写纯文本 preflight report (--report 显式才写, 默认 stdout)。
 """
 import sys, os, csv, argparse
@@ -57,24 +70,24 @@ def main():
     ap.add_argument("--desc-final", required=True, help="output/translation_done_desc_final.csv (190)")
     ap.add_argument("--production-overlay", required=True,
                     help="output/translation_overrides.production.csv (217)")
-    ap.add_argument("--catalog", default="", help="旧 frozen catalog terminal (可选, precedence 最低)")
+    ap.add_argument("--done", default="", help="output/translation_done.csv (historical final, nonempty unique 1888)")
+    ap.add_argument("--catalog", default="", help="output/translation_catalog.csv (decision/index only 3540)")
     ap.add_argument("--report", default="", help="显式写出纯文本 preflight report (缺省只打印)")
     ap.add_argument("--out-dir", default="", help="若提供, 校验 stale 非空(与 gen_cohort_sidecars 一致)")
     a = ap.parse_args()
 
-    hf = []
+    # 必须给 done + catalog (五源完整)
     for p, lab in [(a.title_final, "title_final"), (a.desc_final, "desc_final"),
-                   (a.production_overlay, "production_overlay"), (a.cohort, "cohort")]:
+                   (a.production_overlay, "production_overlay"), (a.done, "translation_done"),
+                   (a.catalog, "translation_catalog"), (a.cohort, "cohort")]:
         if not Path(p).exists():
-            hf.append(f"{lab} 文件不存在: {p}")
-    if hf:
-        print("[HARD-FAIL]\n  " + "\n  ".join(hf)); return 3
+            print(f"[HARD-FAIL] {lab} 文件不存在: {p}"); return 3
 
-    # ---- 0) 禁止源守卫 + production resolver (多源一致性) ----
+    # ---- 0) 禁止源守卫 + production resolver (五源一致性) ----
     try:
         resolver = make_production_resolver(
             a.title_final, a.desc_final, a.production_overlay,
-            catalog=a.catalog or None)
+            translation_done=a.done, translation_catalog=a.catalog)
     except RuntimeError as ex:
         print(str(ex)); return 2
 
@@ -93,14 +106,28 @@ def main():
     out_lines.append("=" * 64)
     out_lines.append("Phase 3B2-SIDECAR run2 — resolver/production-input PREFLIGHT (zero-write)")
     out_lines.append("=" * 64)
-    out_lines.append(f"cohort packages         = {len(rows)}")
-    out_lines.append(f"real source paths       = {len(real)}")
-    out_lines.append(f"missing paths           = {len(missing)}" +
-                     (f"  -> {missing}" if missing else ""))
-    out_lines.append(f"production sources      = title_final({len(resolver.title)}) "
-                     f"desc_final({len(resolver.desc)}) overlay({len(resolver.overlay)})" +
-                     (f" catalog({len(resolver.catalog)})" if resolver.catalog else ""))
-    out_lines.append(f"禁止源黑名单           = {'ACTIVE (batch/retry/cache 拒收)' if any(Path(p).name in BANNED_PRODUCTION_SOURCE for p in [a.title_final,a.desc_final,a.production_overlay,a.catalog]) else '无命中'}")
+
+    # ---- production source health ----
+    ov_keys = set(resolver.overlay.keys())
+    tf_keys = set(resolver.title.keys())
+    df_keys = set(resolver.desc.keys())
+    td_overlap = len(tf_keys & df_keys)
+    td_conflict = sum(1 for k in (tf_keys & df_keys)
+                      if resolver.title[k]["translation"] != resolver.desc[k]["translation"])
+    out_lines.append("production source health:")
+    out_lines.append(f"  overlay rows                     = {len(resolver.overlay)}  (期望 217)")
+    out_lines.append(f"  title rows                       = {len(resolver.title)}  (期望 407)")
+    out_lines.append(f"  desc rows                        = {len(resolver.desc)}  (期望 190)")
+    out_lines.append(f"  historical done nonempty unique  = {len(resolver.done)}  (期望 1888)")
+    out_lines.append(f"  catalog rows                     = {len(resolver.catalog)}  (期望 3540)")
+    out_lines.append(f"  title_desc_overlap               = {td_overlap}")
+    out_lines.append(f"  title_desc_conflict              = {td_conflict}")
+    out_lines.append(f"  historical_superseded            = {resolver.historical_superseded}  (仅计数, 不 HARD-FAIL)")
+    out_lines.append(f"  catalog_decision_superseded      = {resolver.catalog_decision_superseded}  (仅计数, 不 HARD-FAIL)")
+    out_lines.append(f"  consistency_errors               = {len(resolver.consistency_errors)}")
+    banneds = [Path(p).name for p in [a.title_final, a.desc_final, a.production_overlay, a.done, a.catalog]
+               if Path(p).name in BANNED_PRODUCTION_SOURCE]
+    out_lines.append(f"  禁止源黑名单命中                  = {banneds if banneds else '无'}")
 
     cohort_fail = bool(missing) or len(rows) != 10 or len(set(paths)) != 10 or bool(non_eligible)
     if cohort_fail:
@@ -119,6 +146,8 @@ def main():
            "source_mismatch": 0, "policy_conflict": 0, "dup_keyhash": 0,
            "tgi_gate": 0, "pack_fail": 0, "pack_pass": 0}
     out_lines.append("-" * 64)
+    out_lines.append("cohort:")
+    out_lines.append(f"  packages = {len(rows)} / real paths = {len(real)} / missing paths = {len(missing)}")
     out_lines.append("per-package:")
     out_lines.append(f"{'slot':>4} {'pkg':<32} {'aprv':>4} {'KEEP':>4} {'TR':>4} "
                      f"{'unres':>5} {'mism':>5} {'dupKH':>5} {'tgi':>3}  result")
@@ -134,7 +163,6 @@ def main():
         except Exception as ex:
             per["result"] = "FAIL"; per["errors"].append(f"mapping 异常: {ex}"); pack_rows.append(per); continue
         if errs:
-            # 区分 duplicate KeyHash / TGI gate
             duperrs = [e for e in errs if "重复 KeyHash" in e or "重复" in e]
             tgierrs = [e for e in errs if "数 != 1" in e or "CHS 目标" in e or "no 0x01" in e or "无 0x01" in e]
             per["errors"].extend(errs)
@@ -169,30 +197,25 @@ def main():
             f"{per['dup_keyhash']:>5} {per['tgi']:>3}  {per['result']}"
             + (f"  ERR={';'.join(per['errors'][:2])}" if per["errors"] else ""))
 
-    # ---- 3) 历史说明 (不进入 machine-verifiable PASS 条件) ----
-    # 历史 run1: 1 PASS + 9 MISSING (见 PHASE3B-SIDECAR.md 设计注记 C-class)。
-    # 仓库内无可机读历史 run1 artifact 记录具体哪 9 包/哪 9 tid, 故不构造/不反推。
-    # 此说明仅作文档, 不参与 fail-closed 判定。
-    out_lines.append("-" * 64)
-    out_lines.append("historical note: run1 had 1 PASS + 9 MISSING (文档注记, 不进入 PASS 条件)")
-    out_lines.append("run2 preflight 仅证明当前 10 个 cohort package 的 resolve 一致性。")
-
-    # ---- 4) aggregate ----
+    # ---- aggregate ----
     out_lines.append("-" * 64)
     out_lines.append("aggregate:")
-    out_lines.append(f"  approved entries      = {agg['approved']}")
-    out_lines.append(f"  KEEP                  = {agg['keep']}")
-    out_lines.append(f"  TRANSLATE             = {agg['translate']}")
-    out_lines.append(f"  unresolved            = {agg['unresolved']}")
-    out_lines.append(f"  source mismatch       = {agg['source_mismatch']}")
-    out_lines.append(f"  policy conflict       = {agg['policy_conflict']}")
-    out_lines.append(f"  duplicate target skip = frozen rule (0 新 dup)")
-    out_lines.append(f"  packages PASS/FAIL    = {agg['pack_pass']}/{agg['pack_fail']}")
+    out_lines.append(f"  approved entries              = {agg['approved']}")
+    out_lines.append(f"  KEEP                          = {agg['keep']}")
+    out_lines.append(f"  TRANSLATE                     = {agg['translate']}")
+    out_lines.append(f"  unresolved                    = {agg['unresolved']}")
+    out_lines.append(f"  source_mismatch               = {agg['source_mismatch']}")
+    out_lines.append(f"  policy_conflict               = {agg['policy_conflict']}")
+    out_lines.append(f"  duplicate_KeyHash_violation   = {agg['dup_keyhash']}")
+    out_lines.append(f"  CHS_TGI_violation             = {1 if agg['tgi_gate'] else 0}")
+    out_lines.append(f"  packages PASS/FAIL            = {agg['pack_pass']}/{agg['pack_fail']}")
 
     # 结论
-    ok = (len(rows) == 10 and not missing and agg["unresolved"] == 0
-          and agg["source_mismatch"] == 0 and agg["policy_conflict"] == 0
-          and agg["pack_fail"] == 0 and not resolver.has_consistency_errors())
+    ok = (len(rows) == 10 and not missing
+          and agg["unresolved"] == 0 and agg["source_mismatch"] == 0
+          and agg["policy_conflict"] == 0 and agg["dup_keyhash"] == 0
+          and agg["pack_fail"] == 0 and not resolver.has_consistency_errors()
+          and td_conflict == 0)
     out_lines.append("-" * 64)
     out_lines.append(f"PREFLIGHT: {'PASS' if ok else 'FAIL'} "
                      f"({'所有 10 包可安全生成' if ok else '存在阻塞, 不生成 sidecar'})")

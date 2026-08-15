@@ -1307,3 +1307,46 @@ Windows 用法 (真实审计, 先 cd 仓根, 短路径):
   负例 done漏(1883!=1888) EXIT=2 | ov⊄po EXIT=2 | f2⊄ov EXIT=2 |
       title vs desc 冲突 EXIT=2 | done 内部重复 EXIT=2
   回归 135 PASS / 0 FAIL。不生成 sidecar, 不改 writer。
+
+## 🔒 run2 production resolver —— 五源终态 (2026-08-15, reduction audit PASS 后)
+
+**输入正式冻结 (preflight 与 generation 必须完全相同):**
+  production_overlay  = 217   (explicit latest terminal override, 最高权威)
+  title_final         = 407   (新批次 final)
+  desc_final          = 190   (新批次 final)
+  translation_done    = 1888  (historical final translation fallback, nonempty unique)
+  translation_catalog = 3540  (decision/index ONLY, 不是 final payload)
+
+**退出 production resolver (仅 provenance/audit; base114 已被 production overlay217
+完整包含, 见 reduction audit):**
+  translation_overrides.csv (base114), translation_overrides.final2.csv
+
+**禁止作 final payload:** catalog.translation, translation_cache.db
+
+**语义 (高到低, 真正 final 源间不静默覆盖):**
+  overlay > title_final/desc_final > translation_done > catalog(decision only)
+  catalog: KEEP→(无更高层终态)→KEEP; TRANSLATE→必须由 overlay/title/desc/done 提供
+  非空 payload 否则 MISSING; REVIEW→有更高层终态 superseded / 无更高层终态 unresolved。
+
+**superseded (合法修订, 仅计数, 不 HARD-FAIL):**  production overlay/higher final >
+historical done       -> historical_superseded
+production final      > old catalog decision -> catalog_decision_superseded
+
+**真正 HARD-FAIL (fail-closed):**
+  A) source_text mismatch          (tid 命中但 norm_source 不符)
+  B) final source 内部 duplicate key 且 outcome 不同
+  C) title_final vs desc_final 同 key outcome 不一致
+  D) 当前 cohort catalog TRANSLATE 最终无 payload (MISSING)
+  E) 当前 cohort REVIEW 无更高层终态 (unresolved)
+
+**preflight 报告 production source health:**
+  overlay=217 / title=407 / desc=190 / done nonempty unique=1888 / catalog=3540
+  title_desc_overlap=? / title_desc_conflict=0
+  historical_superseded=? / catalog_decision_superseded=?
+然后 10 包: approved/KEEP/TRANSLATE/unresolved/source_mismatch/duplicate_KeyHash/CHS_TGI。
+aggregate: unresolved=0 source_mismatch=0 policy_conflict=0 dup-KeyHash=0 CHS_TGI=0。
+
+**零写:** --preflight-only 不建 out-dir / 不写 sidecar / 不改 writer。
+
+**白盒 (合成 10 包):** 正例 10/10 PASS rc=0; D类(MISSING) rc=1; E类(REVIEW无高层) rc=1;
+--preflight-only 零写 PASS。回归 135 PASS / 0 FAIL。
