@@ -396,4 +396,31 @@ Production 最终语义 (暂定, 待 gap inventory 后定): catalog decision=KEE
 done/cache; catalog=TRANSLATE/APPROVED -> 必须 override/done 有最终译文否则 FAIL;
 不在 catalog -> NEW_SOURCE 不得自动猜译文。
 
+== 增量 translation decision layer (真实 gap inventory 结果, 只处理 C+D) ==
+真实 approved unique source = 3194: A CATALOG_KEEP=1122, B=1310,
+C CATALOG_TRANSLATE_MISSING_RESULT=29 (全部 POSE_DISPLAY_NAME, 影响9包),
+D NEW_SOURCE_NOT_IN_CATALOG=733 (PACK_TITLE=434, PACK_DESCRIPTION=199, POSE_DISPLAY_NAME=103)。
+不改 resolver/writer/coverage/cohort, 不生成 sidecar; 本轮只做 catalog/decision, 不调模型。
+
+C 类 29 条 -> translation_missing_result.csv (只读提取, 已是 frozen TRANSLATE, 不重新分类,
+后续只需补最终译文):
+```
+python scripts\c_extract.py --gap output\gap_inventory.csv --out output\translation_missing_result.csv
+```
+列: translation_id, source_text, source_hash, old_catalog_decision, provenance,
+affected_package_count, packages
+
+D 类 733 unique source -> translation_delta_catalog.csv (用与原 phase2a_catalog.py 完全相同的
+decision 规则 reclassify: 复用 phase2a_samples.classify + classify_with_context, 不重写规则;
+不修改原 translation_catalog.csv):
+```
+python scripts\d_reclassify.py --gap output\gap_inventory.csv --out output\translation_delta_catalog.csv
+```
+列: translation_id, source_text, source_hash, decision, reason, provenance, ref_count,
+package_count, packages; stable ID 继续 T_{source_hash}_g1 (禁 STBL KeyHash);
+同一 source 多 provenance 时仍一条 unique source 但记录全部 provenance。
+输出汇总: D 总数 / TRANSLATE / KEEP / REVIEW / 各 decision 按 provenance 分布 / 各影响 package 数 /
+6 样本 delta decision。决策规则与 frozen 一致 (已验证: 'Pose 1'/'1'->KEEP(NON_SEMANTIC_TAG),
+'Tibo131 Standing Pose Pack #2'->TRANSLATE(SEMANTIC_WITH_NUM), 'Gounafier's Pose Pack'->TRANSLATE)。
+
 **验证要求 (汇报)**: 10 个 sidecar 文件名 / 每包修改 key 数 / writer verify / independent audit / 是否全部 PASS。
