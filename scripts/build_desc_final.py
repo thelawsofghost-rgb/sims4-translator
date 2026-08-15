@@ -7,14 +7,26 @@ build_desc_final.py — DESCRIPTION 190 最终唯一终态 reconciliation (确�
   phrase = 23 ECHO + 2 EMPTY, completion gate 正常)。不再整体重跑模型。17 QA_FAIL
   已人工终态裁决: terminal KEEP 2 + manual final 15 (Dorothy 人工译文)。
 
-precedence (高->低):
-  manual final (15)  >  terminal KEEP (2)  >  accepted model DONE (173)
-  = 190.  17 QA_FAIL 必须全部被 manual(15)+KEEP(2) 覆盖 -> QA_FAIL=0。
+终态 provenance (固定, 用户裁决 2026-08-15):
+  KEEP                 = 2
+  MANUAL_QA_FAIL       = 15
+  CONTENT_CORRECTION   = 37   (configs/desc_content_corrections.c26.csv)
+  ACCEPTED_MODEL       = 136
+  total                = 190
+  content QA: candidates=81  resolved_by_correction=37  resolved_by_allowlist=44
+              unresolved=0  (allowlist 固化于 configs/desc_content_allowlist.c26.txt)
+
+⚠️ 冲突 fail-closed (precedence 只是实现细节, 绝不掩盖配置冲突):
+  manual ∩ corr / manual ∩ keep / corr ∩ keep 任一非0 -> HARD-FAIL;
+  allowlist/corr 含非 candidate tid -> HARD-FAIL; candidate 未 resolve -> HARD-FAIL;
+  duplicate tid (candidates/allowlist/corr) -> HARD-FAIL;
+  缺 --corr (计数不符) -> HARD-FAIL。
 
 输入 (全部 Windows 真实文件, 只读, 绝不覆盖旧证据):
   --done    output/translation_done_batch_desc.csv     (190 行: 173 DONE + 17 QA_FAIL)
   --keep    configs/desc_terminal_keep.c26.csv         (2 terminal KEEP)
   --transl  configs/desc_manual_translate.c26.csv      (15 manual final)
+  --corr    configs/desc_content_corrections.c26.csv   (37 content-qa correction)
   -o        output/translation_done_desc_final.csv     (新 derived, 不覆盖旧证据)
 
 content-QA 闸门 (用户裁决 2026-08-15, fail-closed):
@@ -40,7 +52,7 @@ content-QA 闸门 (用户裁决 2026-08-15, fail-closed):
 
 终态分配 (唯一定, 由真实输入推导, 不硬编码):
   2 terminal KEEP + 15 manual final + 37 correction + 136 accepted model DONE = 190
-  最终必须报告: rows=190 uniqueTid=190 KEEP=2 MANUAL_FINAL=15 CORRECTION=37
+  最终必须报告: rows=190 uniqueTid=190 KEEP=2 MANUAL_QA_FAIL=15 CORRECTION=37
     ACCEPTED_MODEL=136 QA_FAIL=0 PENDING=0 REVIEW=0 empty=0 duplicate=0 source mismatch=0
     核对 2+15+37+136=190 PASS
 
@@ -195,23 +207,39 @@ def main():
         else:
             with open(a.qa_candidates, encoding="utf-8-sig") as _f:
                 _rd = list(csv.DictReader(_f))
+            _cand_dup = [t for t, c in Counter(
+                _u(r.get("translation_id")) for r in _rd if _u(r.get("translation_id"))).items() if c > 1]
+            if _cand_dup:
+                fail(f"qa-candidates duplicate tid: {_cand_dup}")
             for _r in _rd:
                 _t = _u(_r.get("translation_id"))
                 if _t:
                     cand_tids.add(_t)
         allow_tids = set()
-        if _os.path.exists(a.qa_allowlist):
+        _allow_raw = []
+        if a.qa_allowlist and _os.path.exists(a.qa_allowlist):
             with open(a.qa_allowlist, encoding="utf-8-sig") as _f:
                 for _ln in _f:
                     _t = _ln.strip().split(",")[0].strip()
                     if _t and _t.lower() not in ("translation_id", "tid"):
-                        allow_tids.add(_t)
-        else:
+                        _allow_raw.append(_t)
+        elif a.qa_allowlist:
             # 内联逗号分隔 allowlist
-            allow_tids = {x.strip() for x in a.qa_allowlist.split(",") if x.strip()}
+            _allow_raw = [x.strip() for x in a.qa_allowlist.split(",") if x.strip()]
+        _allow_dup = [t for t, c in Counter(_allow_raw).items() if c > 1]
+        if _allow_dup:
+            fail(f"allowlist duplicate tid: {_allow_dup}")
+        allow_tids = set(_allow_raw)
         if a.allow_zero_candidates and not cand_tids:
             print("  [content-qa] 无 suspicious candidate (allow-zero-candidates), resolve 通过。")
         else:
+            # fail-closed: 不允许额外 allowlist/corr TID 吞掉变动后的 candidate 集
+            allow_extra = sorted(allow_tids - cand_tids)
+            if allow_extra:
+                fail(f"allowlist 含非 candidate tid: {allow_extra} (candidate 集变动会被旧 allowlist 静默吞掉, 禁止)")
+            corr_extra = sorted(corr_tids - cand_tids)
+            if corr_extra:
+                fail(f"correction 含非 candidate tid: {corr_extra}")
             # corrected (corr layer) 亦视为已 resolve; 剩余需在 allowlist
             resolved_extra = allow_tids | corr_tids
             unresolved_content_review = sorted(cand_tids - resolved_extra)
@@ -227,10 +255,10 @@ def main():
     rows = []
     for tid in sorted(done_tids):
         if tid in man_by:
-            origin[tid] = "MANUAL_FINAL"
+            origin[tid] = "MANUAL_QA_FAIL"
             tr = man_by[tid].get("translation") or ""
             rows.append({"translation_id": tid, "source_text": done_by[tid].get("source_text"),
-                         "translation": tr, "status": "DONE", "origin": "MANUAL_FINAL"})
+                         "translation": tr, "status": "DONE", "origin": "MANUAL_QA_FAIL"})
         elif tid in corr_by:
             origin[tid] = "CORRECTION"
             tr = corr_by[tid].get("translation") or ""
@@ -254,7 +282,7 @@ def main():
     n_rows = len(rows)
     n_uniq = len({r["translation_id"] for r in rows})
     n_keep = sum(1 for r in rows if r["origin"] == "KEEP")
-    n_man = sum(1 for r in rows if r["origin"] == "MANUAL_FINAL")
+    n_man = sum(1 for r in rows if r["origin"] == "MANUAL_QA_FAIL")
     n_corr = sum(1 for r in rows if r["origin"] == "CORRECTION")
     n_acc = sum(1 for r in rows if r["origin"] == "ACCEPTED_MODEL")
     n_qa = sum(1 for r in rows if r["status"] == "QA_FAIL")
@@ -270,7 +298,7 @@ def main():
     print(f"rows                      = {n_rows}")
     print(f"uniqueTid                 = {n_uniq}")
     print(f"terminal KEEP             = {n_keep}")
-    print(f"MANUAL_FINAL              = {n_man}")
+    print(f"MANUAL_QA_FAIL              = {n_man}")
     print(f"CORRECTION                = {n_corr}")
     print(f"ACCEPTED_MODEL            = {n_acc}")
     print(f"QA_FAIL                   = {n_qa}")

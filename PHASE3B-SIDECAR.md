@@ -1027,3 +1027,24 @@ build_desc_final.py 消费 --corr <correction layer>:
 回归 135 PASS / 0 FAIL。
 说明: 37 条修正译文中的 6 条 (redheadsims / natalia auditore / TheSerenadeOfShadows /
   Moc / Kaley / Natalia Auditore) 含创作者专名, 属结构受保护类, 为人类定稿, 保留原文正确。
+
+---
+== DESC 生产安全点 A/B/C/D (2026-08-15) ==
+
+A. allowlist 固化: configs/desc_content_allowlist.c26.txt (44 unique, 每行一 tid)。
+   不允许 Windows 手工创建。校验 (build_desc_final.py 白盒全绿):
+     candidates=81 unique, corrections=37, allowlist=44, corr∩allow=0,
+     corr∪allow=candidates, 37+44=81; 缺任一 resolve / allow 含非candidate /
+     corr 含非candidate / 任一重复 tid -> HARD-FAIL (不允许额外 allow 吞掉 candidate 变动)。
+B. correction37 进 production overlay: build_override_overlay.py 显式读取
+   configs/desc_content_corrections.c26.csv (第7层 TRANSLATE37), 与所有旧层做
+   (tid,norm_source) conflict/source-mismatch/disjoint 检查。
+   白盒 base114 合成 + 真实7层 disjoint -> 脚本 derived unique=**217** (非硬编码;
+   KEEP=31 TRANSLATE=186 为合成 base 全TRANSLATE之值; 真实 Windows base 会按实际
+   base 动作值计算, unique 恒为 217 若 disjoint)。
+   source_text 空行允许 (correction 真实 source 由 Windows 从 done 填, 见下)。
+C. precedence 只是实现细节: manual ∩ corr / manual ∩ keep / corr ∩ keep 任一非0
+   -> HARD-FAIL (不再靠 precedence 掩盖配置冲突)。
+D. provenance 固定: KEEP=2 MANUAL_QA_FAIL=15 CONTENT_CORRECTION=37 ACCEPTED_MODEL=136
+   total=190; content QA candidates=81 resolved_by_correction=37 resolved_by_allowlist=44
+   unresolved=0。
