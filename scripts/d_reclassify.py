@@ -45,15 +45,26 @@ def main():
     print(f"[gap] {len(rows)} 行")
 
     # 收集 D 类 unique source (按 norm_text 去重; 同一 source 多 provenance 合并)
+    # 空/空白 source_text -> 显式记为 EMPTY_SOURCE_NOOP (KEEP), 绝不静默丢, 也不当翻译缺失
     d = {}
-    dropped = []      # 被显式排除的异常行 (禁止静默)
+    empty_src = []    # EMPTY_SOURCE_NOOP 单独记账
     for r in rows:
         if (r.get("class") or "").strip() != "D":
             continue
         src = (r.get("source_text") or "")
-        if src.strip() == "":
-            # 空/空白 source_text: 不可作为可译文条目; 但绝不静默丢 -> 显式列入 dropped
-            dropped.append({"reason": "EMPTY_OR_WHITESPACE_SOURCE", "row": dict(r)})
+        if norm_text(src) == "":
+            # 窄规则: 仅当 norm_text == '' 才触发 EMPTY_SOURCE_NOOP (KEEP)
+            empty_src.append({
+                "translation_id": (r.get("translation_id") or "").strip(),
+                "source_text": "",
+                "source_hash": (r.get("source_hash") or "").strip(),
+                "decision": "KEEP",
+                "reason": "EMPTY_SOURCE_NOOP",
+                "provenance": (r.get("provenance") or "").strip(),
+                "ref_count": 0,
+                "package_count": (r.get("package_count") or "0").strip(),
+                "packages": (r.get("packages") or "").strip(),
+            })
             continue
         key = norm_text(src)
         e = d.setdefault(key, {
@@ -73,16 +84,7 @@ def main():
         except ValueError:
             pass
 
-    if dropped:
-        # 硬性: 不允许静默丢。发现异常入先行禁止 -> 打印全字段并 fail-fast (rc != 0)
-        print(f"[HARD-FAIL] D 输入含 {len(dropped)} 个空/空白 source_text, 拒绝静默丢弃:")
-        for x in dropped:
-            print("   ", {k: v for k, v in x["row"].items()})
-        raise SystemExit(
-            f"[FAIL] 空/空白 source_text 不得静默丢; 请先裁决这些行 (排除或补 source). "
-            f"现 D 唯一输入 {len(d)} (扣除 {len(dropped)} 异常行) 未输出.")
-
-    print(f"[D] NEW_SOURCE_NOT_IN_CATALOG unique source = {len(d)}")
+    print(f"[D] NEW_SOURCE_NOT_IN_CATALOG unique source = {len(d)} (+ EMPTY_SOURCE_NOOP {len(empty_src)})")
 
     # 重新分类 (与原 catalog 相同的 decision 规则)
     out_rows = []
@@ -117,27 +119,41 @@ def main():
         w = csv.DictWriter(f, ["translation_id", "source_text", "source_hash", "decision",
                                "reason", "provenance", "ref_count", "package_count", "packages"])
         w.writeheader()
-        for o in out_rows:
+        for o in out_rows:      # 普通 D 源 (分类)
+            w.writerow(o)
+        for o in empty_src:     # EMPTY_SOURCE_NOOP (KEEP), 显式写入, 不静默丢
             w.writerow(o)
 
     # ---- 硬 invariant: D 输入 unique == delta catalog 输出 unique (禁 733->732 静默) ----
     from collections import Counter as _C
-    out_key_cnt = _C((o["translation_id"], norm_text(o["source_text"])) for o in out_rows)
+    all_out_rows = out_rows + empty_src
+    out_key_cnt = _C((o["translation_id"], norm_text(o["source_text"])) for o in all_out_rows)
     dup_out = [k for k, n in out_key_cnt.items() if n > 1]
     if dup_out:
         raise SystemExit(f"[INVARIANT-FAIL] delta 输出存在重复 (tid, norm): {dup_out[:5]}")
-    if len(out_rows) != len(d):
+    total_unique = len(d) + len(empty_src)   # D 输入 = 分类源 + EMPTY_SOURCE_NOOP
+    if len(all_out_rows) != total_unique:
         raise SystemExit(
-            f"[INVARIANT-FAIL] D 输入 unique {len(d)} != delta 输出 unique {len(out_rows)}. "
+            f"[INVARIANT-FAIL] D 输入 unique {total_unique} != delta 输出 unique {len(all_out_rows)}. "
             f"不允许静默丢帧; 已停止输出.")
-    print(f"[INVARIANT] D 输入 unique == delta 输出 unique = {len(d)}  PASS")
+    print(f"[INVARIANT] D 输入 unique == delta 输出 unique = {total_unique}  PASS")
+
+    # ---- EMPTY_SOURCE_NOOP 计入 KEEP 的 provenance / package impact ----
+    for o in empty_src:
+        for p in o["provenance"].split("|"):
+            if p:
+                prov_by_dec[("KEEP", p)] += 1
+        for p in o["packages"].split("|"):
+            if p:
+                pkg_impact["KEEP"][o["provenance"]].add(p)
 
     # ---- 汇总 ----
     print("\n================ D 类重新分类汇总 ================")
-    print(f"D 总数: {len(d)}")
+    print(f"D 总数: {total_unique}")
     print(f"  TRANSLATE: {dec_cnt.get('TRANSLATE', 0)}")
-    print(f"  KEEP:      {dec_cnt.get('KEEP', 0)}")
+    print(f"  KEEP:      {dec_cnt.get('KEEP', 0) + len(empty_src)}")
     print(f"  REVIEW:    {dec_cnt.get('REVIEW', 0)}")
+    print(f"  (其中 EMPTY_SOURCE_NOOP = {len(empty_src)})")
     print("\n各 decision 按 provenance 分布:")
     for dec in ("TRANSLATE", "KEEP", "REVIEW"):
         provs = sorted({p for (c, p) in prov_by_dec if c == dec})
@@ -153,6 +169,12 @@ def main():
         detail = ", ".join(f"{p}={len(pkg_impact[dec][p])}" for p in pkg_impact[dec])
         print(f"  {dec}: {len(allp)} 包  | {detail}")
     print("\nreason 分布:", dict(reason_cnt))
+    print("  (另加 EMPTY_SOURCE_NOOP reason)")
+
+    print("\nEMPTY_SOURCE_NOOP 明细:")
+    for o in empty_src:
+        print(f"  tid={o['translation_id']} src={o['source_text']!r} provenance={o['provenance']} "
+              f"packages={o['packages']}")
 
     print("\n================ 6 样本 delta decision ================")
     for s in ["Tibo131 Standing Pose Pack #2", "Pose 1", "Pose 2",
@@ -163,7 +185,7 @@ def main():
         match = next((o for o in out_rows if o["source_text"] == s), None)
         print(f"  {s!r:42} -> {dec:<9} | reason={reason:<24} | tid={tid} | in_delta={match is not None}")
 
-    print(f"\n[out] {a.out}  ({len(out_rows)} unique source)")
+    print(f"\n[out] {a.out}  ({len(all_out_rows)} 行 = {len(out_rows)} 分类 + {len(empty_src)} EMPTY_SOURCE_NOOP)")
 
 
 if __name__ == "__main__":

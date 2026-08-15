@@ -442,4 +442,23 @@ NO_TRANSLATION_ID / NORMALIZATION_OR_TID_COLLISION), 不猜; 尾部 invariant A=
 白盒: 空 source 行触发 HARD-FAIL (不静默), set_diff 定位 A-B=1 且机制=EMPTY_SOURCE_TEXT,
 清洁路径 invariant PASS (输入 unique == 输出 unique)。
 
+== EMPTY_SOURCE_NOOP 裁决 (Windows 实证确认 A-B = T_e3b0c44298fc_g1, src='') ==
+该条 = 结构上 approved 的 player-visible key, 当前 CHS STBL value 为空; production 行为必须是
+原样保留 (非待补 source, 非翻译缺失)。为避免为唯一一条空文本扩展 writer/orchestrator 状态机,
+增量 catalog 显式记为 decision=KEEP, reason=EMPTY_SOURCE_NOOP, 保留
+translation_id/source_hash/provenance/packages。
+
+窄规则 (仅此条件可触发): norm_text(source_text) == '' -> KEEP / EMPTY_SOURCE_NOOP。
+禁止把普通 MISSING / unresolved / unknown 自动降级为 KEEP (非空源仍走 frozen classify,
+never EMPTY_SOURCE_NOOP)。
+
+d_reclassify 已改: 空 text 不再 HARD-FAIL, 而是显式写入 translation_delta_catalog.csv
+(decision=KEEP, reason=EMPTY_SOURCE_NOOP); D 输入/输出 unique invariant 仍严格相等
+(输入 = 分类源 + EMPTY_SOURCE_NOOP); 单独打印 EMPTY_SOURCE_NOOP 计数。
+
+白盒 (全部 PASS): empty source -> KEEP/EMPTY_SOURCE_NOOP 且字段保留;
+ordinary missing non-empty source (居 'Standing Pose Left'/'1' etc) -> 绝不 KEEP/NOOP;
+D 输入 unique == 输出 unique (含 empty 行)。预期重跑: D total=733, TRANSLATE=597,
+KEEP=130, REVIEW=6, EMPTY_SOURCE_NOOP=1。
+
 **验证要求 (汇报)**: 10 个 sidecar 文件名 / 每包修改 key 数 / writer verify / independent audit / 是否全部 PASS。
