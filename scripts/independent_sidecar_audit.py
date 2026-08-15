@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
+# flake8: noqa
+r"""
 independent_sidecar_audit.py —— manifest 驱动的独立只读审计 (run2 retry1 候选成品)
 ================================================================================
 绝不重新 generation, 绝不调用 writer, 绝不写任何 package/sidecar/Mods。
-从磁盘重新读取 9 个 original source package 与 9 个 generated sidecar,
+从磁盘重新读取 original source package 与 generated sidecar,
 对每个实际 sidecar 独立验证 (不复用 generation 内存里的 audit result):
 
 输入 (都是只读):
@@ -15,23 +16,33 @@ independent_sidecar_audit.py —— manifest 驱动的独立只读审计 (run2 r
   -title-final / -desc-final / -production-overlay / -done / -catalog-final
                 (production resolver 的 5 个冻结输入 —— 独立重算最终译文, 不用生成期结果)
 
-每个实际 sidecar 独立断言:
+每个实际 sidecar 独立断言 (contract 拆分: source 与 sidecar 不同约束):
+
+SOURCE package (original Sims package, 可含多 locale STBL, 如 18 个 STBL 属合法, 不得报错):
+  S1 exact target CHS TGI (type=0x220557DA / group / instance=0x01 locale)
+     在 source 中恰出现 1 次  (不从 manifest 硬编码; target_TGI 取 manifest 列)
+  S2 仅解析该 target CHS STBL, parse PASS
+  不要求 source RESOURCE_COUNT==1, 不要求 source STBL_COUNT==1
+
+SIDECAR package (writer 产物):
   R1 RESOURCE_COUNT == 1
   R2 STBL_COUNT == 1
-  R3 sidecar CHS TGI == source existing CHS TGI (type/group/instance 全等)
+  R3 sidecar TGI == source exact target CHS TGI (type/group/instance 全等)
+
+R4-R7 用 selected source CHS STBL vs sole sidecar STBL:
   R4 SOURCE_ENTRIES == OUTPUT_ENTRIES   (no add / no delete)
-  R5 changed keys == manifest/resolver TRANSLATE keys (writer -m 修改的 KeyHash 集合)
+  R5 changed keys == manifest/resolver TRANSLATE keys
      - 每个 TRANSLATE key: source 原文 -> production resolver 最终译文, sidecar 内文本须精确一致
-     - 每个 KEEP key:      sidecar 内文本 == source 原文 (未改)
-     - unrelated keys:     sidecar 内文本 == source 原文 (完全未动)
+     - 每个 KEEP key / unrelated key: sidecar 内文本 == source 原文 (完全未动)
   R6 duplicate key == 0
   R7 parse/audit error == 0
 
 slot NOOP (PASS_NOOP_KEEP_ONLY) 单独验证:
   N1 manifest.writer_verify == PASS_NOOP_KEEP_ONLY
-  N2 manifest.output_sidecar == (无) 且 expected sidecar = none
+  N2 output_sidecar 字段保存的是 planned path, 不代表磁盘有真实产物 ->
+     以磁盘是否实际存在为准 (actual = none)
   N3 磁盘上不存在该 slot 的 sidecar 文件 (actual = none)
-  N4 approved 全部 KEEP (len(mods)==0 == len(approved))
+  N4 无任何源 key 解析到 TRANSLATE 终态 (合法 NOOP)
 
 aggregate 输出:
   manifest packages = 10
@@ -60,12 +71,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 from dbpf_fast import safe_parse
-import audit_sidecar as A
 import audit_canary_pair as AC   # 复用其 canonical zlib 解压 STBL 读取 (cold)
-import pose_coverage as PC  # 同 canonical parser (scan_package) 但不含生成期结果
 
 _STBL_TID = 0x220557DA
-_LOCALE_CHS = 0x01
 _GROUP = 0x80000000
 
 
@@ -81,27 +89,67 @@ class Result:
             self.bad.append(f"{name}: {detail}")
 
 
-def read_pkg_stbl(path):
-    """cold 读取: 返回 (target_tgi, kh_map, dup_keys, errors). 只读磁盘, 不收任何生成期结果.
-    source / sidecar 均可能 zlib 压缩, 用 AC.read_one_stbl (会解压)."""
+def _fmt_tgi(typ, group, inst):
+    return f"0x{typ:08X}/0x{group:08X}/0x{inst:016X}"
+
+
+def read_source_target_stbl(path, typ, group, inst):
+    """cold 读取 SOURCE: 枚举全部 STBL, 要求 exact target (type/group/instance) 恰出现 1 次,
+    然后仅解析该 target CHS STBL。source 可能有多个 locale STBL (如 18 个), 属合法, 不报错。
+    返回 (stbl_total, target_count, target_tgi, kh_map, dup_keys, errors)."""
+    errors = []
+    idx, err = safe_parse(path)
+    if err:
+        return None, None, None, None, [], [f"parse error: {err}"]
+    if idx is None:
+        return None, None, None, None, [], ["DBPFIndex is None"]
+    stbl = [e for e in idx.entries if e.type_id == _STBL_TID]
+    matches = [e for e in stbl if e.type_id == typ and e.group_id == group and e.instance_id == inst]
+    if len(matches) != 1:
+        return len(stbl), len(matches), None, None, [], \
+            [f"exact target TGI match count = {len(matches)} (期望 1; STBL 总数={len(stbl)})"]
+    e = matches[0]
+    target_tgi = _fmt_tgi(e.type_id, e.group_id, e.instance_id)
+    ver, comp, resv, slen, keys, rerr = AC.read_one_stbl(path, e)
+    if rerr is not None or keys is None:
+        return len(stbl), 1, target_tgi, None, [], [f"STBL 读取失败: {rerr}"]
+    dup = sorted({kh for kh, _, _ in keys if sum(1 for k2, _, _ in keys if k2 == kh) > 1})
+    return len(stbl), 1, target_tgi, {kh: (fl, txt) for kh, fl, txt in keys}, dup, []
+
+
+def read_sole_sidecar_stbl(path):
+    """cold 读取 SIDECAR: 要求 RESOURCE_COUNT==1 且 STBL_COUNT==1, 返回 (tgi, kh_map, dup, errors)."""
+    errors = []
     idx, err = safe_parse(path)
     if err:
         return None, None, [], [f"parse error: {err}"]
     if idx is None:
         return None, None, [], ["DBPFIndex is None"]
+    if len(idx.entries) != 1:
+        return None, None, [], [f"RESOURCE_COUNT={len(idx.entries)} != 1"]
     stbl = [e for e in idx.entries if e.type_id == _STBL_TID]
-    chs = [e for e in stbl if ((e.instance_id >> 56) & 0xFF) == _LOCALE_CHS]
-    if not chs:
-        return None, None, [], ["无 0x01 CHS STBL"]
     if len(stbl) != 1:
         return None, None, [], [f"STBL_COUNT={len(stbl)} != 1"]
-    e = chs[0]
-    tgi = f"0x{_STBL_TID:08X}/0x{e.group_id:08X}/0x{e.instance_id:016X}"
+    e = stbl[0]
+    tgi = _fmt_tgi(e.type_id, e.group_id, e.instance_id)
     ver, comp, resv, slen, keys, rerr = AC.read_one_stbl(path, e)
     if rerr is not None or keys is None:
         return None, None, [], [f"STBL 读取失败: {rerr}"]
     dup = sorted({kh for kh, _, _ in keys if sum(1 for k2, _, _ in keys if k2 == kh) > 1})
     return tgi, {kh: (fl, txt) for kh, fl, txt in keys}, dup, []
+
+
+def parse_tgi(s):
+    """解析 '0xTTTT/0xGGGG/0xIIIIIIIIIIII' -> (type, group, inst). 失败返回 None."""
+    if not s:
+        return None
+    parts = [p.strip() for p in s.split("/")]
+    if len(parts) != 3:
+        return None
+    try:
+        return int(parts[0], 16), int(parts[1], 16), int(parts[2], 16)
+    except Exception:
+        return None
 
 
 def main():
@@ -142,44 +190,62 @@ def main():
     R.add(f"MANIFEST NOOP == {a.expect_noop}",
           len(noop_rows) == a.expect_noop, f"got {len(noop_rows)}")
 
+    def source_target(r):
+        """从 manifest target_TGI 取 exact source CHS target (type/group/inst).
+        优先用该 TGI; 若无则回退到 (STBL, GROUP, CHS instance)。"""
+        t = parse_tgi((r.get("target_TGI") or "").strip())
+        if t is None:
+            return _STBL_TID, _GROUP, None
+        return t
+
     # ---- NOOP slot 验证 ----
     for r in noop_rows:
         slot = r.get("cohort_slot")
         R.add(f"[NOOP {slot}] writer_verify=PASS_NOOP_KEEP_ONLY",
               r.get("writer_verify") == "PASS_NOOP_KEEP_ONLY", r.get("writer_verify"))
-        # 磁盘上 target sidecar 不存在
+        # manifest.output_sidecar 保存的是 planned path, 不代表磁盘有真实产物。
+        # contract: PASS_NOOP_KEEP_ONLY -> 磁盘上不得存在该 sidecar 文件 (actual = none)。
         src = r.get("source_package", "")
-        exp_sidecar = None  # NOOP 不应有 expected sidecar 文件
         out_col = (r.get("output_sidecar") or "").strip()
-        R.add(f"[NOOP {slot}] manifest.output_sidecar 为空",
-              out_col == "" or out_col.lower() in ("none", "nan"), out_col)
-        # 用 source 同名推 sidecar 路径
-        if src and exp_sidecar is None:
+        # 磁盘上 target sidecar 不存在 (以 output_sidecar planned path 为准; 若为空则用 source 同名推)
+        cand = ""
+        if out_col and out_col.lower() not in ("none", "nan"):
+            cand = out_col
+        elif src:
             base = os.path.splitext(os.path.basename(src))[0]
             cand = os.path.join(a.retry_dir, f"{base}_chs.package")
+        if cand:
             R.add(f"[NOOP {slot}] 磁盘上无 sidecar (actual=none)",
                   not os.path.exists(cand), cand)
-        # approved 全 KEEP: 冷读 source 并独立 resolve 所有 approved
+        # 冷读 source: 独立解析 exact target CHS STBL, 验证无任何源 key 解析到 TRANSLATE 终态
         if src and os.path.exists(src):
-            tgi, kmap, dup, errs = read_pkg_stbl(src)
-            if kmap is not None:
-                # NOOP 合法性: 没有任何源 key 解析到 TRANSLATE 终态 (OVERRIDE/DONE/CACHE),
-                # 否则生成期应产生 sidecar (NOOP 判定错误)。author/pack 等 metadata key
-                # 解析到 MISSING 属正常 (非 player-visible), 不视为需翻译。
-                any_terminal = False
-                for kh, (fl, txt) in kmap.items():
-                    tr, tag = res.resolve(txt)
-                    if tag in ("OVERRIDE", "DONE", "CACHE"):
-                        any_terminal = True
-                        break
-                R.add(f"[NOOP {slot}] 无任何源 key 解析到 TRANSLATE 终态 (合法 NOOP)",
-                      not any_terminal, "")
+            typ, group, inst = source_target(r)
+            if inst is None:
+                # 无 manifest TGI, 无法定位 target -> ERROR
+                R.add(f"[NOOP {slot}] source exact target TGI 可定位", False,
+                      "manifest target_TGI 缺失/格式错误")
+            else:
+                s_total, s_cnt, stgi, kmap, sdup, errs = read_source_target_stbl(src, typ, group, inst)
+                if kmap is None:
+                    R.add(f"[NOOP {slot}] source target STBL 解析 OK", False, "; ".join(errs) or "unreadable")
+                else:
+                    # NOOP 合法性: 没有任何源 key 解析到 TRANSLATE 终态 (OVERRIDE/DONE/CACHE),
+                    # 否则生成期应产生 sidecar (NOOP 判定错误)。author/pack 等 metadata key
+                    # 解析到 MISSING 属正常 (非 player-visible), 不视为需翻译。
+                    any_terminal = False
+                    for kh, (fl, txt) in kmap.items():
+                        tr, tag = res.resolve(txt)
+                        if tag in ("OVERRIDE", "DONE", "CACHE"):
+                            any_terminal = True
+                            break
+                    R.add(f"[NOOP {slot}] 无任何源 key 解析到 TRANSLATE 终态 (合法 NOOP)",
+                          not any_terminal, "")
                 # 计数与 manifest 对齐
                 R.add(f"[NOOP {slot}] translated_key_count==0",
                       str(r.get("translated_key_count")) in ("0", "", "None"),
                       r.get("translated_key_count"))
-            else:
-                R.add(f"[NOOP {slot}] source 读取 OK", False, "; ".join(errs) or "unreadable")
+        else:
+            R.add(f"[NOOP {slot}] source 存在", src and os.path.exists(src), src)
         R.add(f"[NOOP {slot}] audit_result=SKIP_NO_OUTPUT",
               r.get("audit_result") == "SKIP_NO_OUTPUT", r.get("audit_result"))
 
@@ -193,27 +259,45 @@ def main():
         out = r.get("output_sidecar", "")
         log = Result()
 
-        # 冷读 source + sidecar
-        stgi, skmap, sdup, serr = read_pkg_stbl(src) if src and os.path.exists(src) else (None, None, [], ["source missing"])
-        otgi, okmap, odup, oerr = read_pkg_stbl(out) if out and os.path.exists(out) else (None, None, [], ["sidecar missing"])
+        # 从 manifest 取 exact source target CHS TGI
+        typ, group, inst = source_target(r)
+        if inst is None:
+            log.add("SOURCE exact target TGI 可定位", False,
+                    "manifest target_TGI 缺失/格式错误")
+            typ, group, inst = _STBL_TID, _GROUP, None
 
-        # R1/R2: RESOURCE_COUNT / STBL_COUNT 从源与 sidecar 独立算
-        for lbl, p in (("SRC", src), ("OUT", out)):
-            idx, e2 = safe_parse(p) if p and os.path.exists(p) else (None, "missing")
-            if e2:
-                log.add(f"R1 {lbl} parse OK", False, e2)
-            else:
-                rc = len(idx.entries) if idx else 0
-                stbl_n = sum(1 for x in idx.entries if x.type_id == _STBL_TID) if idx else 0
-                if lbl == "OUT":
-                    log.add("R1 OUT RESOURCE_COUNT==1", rc == 1, f"got {rc}")
-                    log.add("R2 OUT STBL_COUNT==1", stbl_n == 1, f"got {stbl_n}")
+        # ---- SOURCE: 枚举全部 STBL, 要求 exact target 恰出现 1 次, 只解析该 CHS STBL ----
+        if src and os.path.exists(src) and inst is not None:
+            s_total, s_cnt, stgi, skmap, sdup, serr = read_source_target_stbl(src, typ, group, inst)
+            log.add("S1 source exact target TGI exists exactly once",
+                    s_cnt == 1, f"match={s_cnt} (STBL 总数={s_total})")
+            log.add("S2 source target STBL parse OK", skmap is not None,
+                    "; ".join(serr) or "unreadable")
+        else:
+            s_total, s_cnt, stgi, skmap, sdup, serr = None, None, None, None, [], \
+                ["source missing"] if not (src and os.path.exists(src)) else []
+            if not (src and os.path.exists(src)):
+                log.add("S0 source 存在", False, src)
 
-        # R3 TGI 匹配 (sidecar == source CHS TGI)
-        log.add("R3 TGI 匹配", stgi is not None and otgi is not None and stgi == otgi,
-                f"src={stgi} out={otgi}")
+        # ---- SIDECAR: RESOURCE_COUNT==1 / STBL_COUNT==1 / TGI 全等 ----
+        if out and os.path.exists(out):
+            otgi, okmap, odup, oerr = read_sole_sidecar_stbl(out)
+            # read_sole_sidecar_stbl 内部已校验 RESOURCE_COUNT==1 和 STBL_COUNT==1;
+            # 成功 (okmap!=None) 即两者都成立, 失败时 oerr 详列原因。
+            rc_ok = any("RESOURCE_COUNT" in e for e in oerr) or okmap is not None
+            sc_ok = any("STBL_COUNT" in e for e in oerr) or okmap is not None
+            log.add("R1 sidecar RESOURCE_COUNT==1", rc_ok,
+                    "; ".join([e for e in oerr if "RESOURCE_COUNT" in e]) or "ok")
+            log.add("R2 sidecar STBL_COUNT==1", sc_ok,
+                    "; ".join([e for e in oerr if "STBL_COUNT" in e]) or "ok")
+            log.add("R3 sidecar TGI == source exact target CHS TGI",
+                    stgi is not None and otgi is not None and stgi == otgi,
+                    f"src={stgi} out={otgi}")
+        else:
+            otgi, okmap, odup, oerr = None, None, [], ["sidecar missing"]
+            log.add("R0 sidecar 存在", False, out)
 
-        # R5 关键集合: 从 writer -m 语义反推 —— 若 source 与 sidecar 都读到, 由 cold 比较
+        # ---- R4-R7 用 selected source CHS STBL vs sole sidecar STBL ----
         if skmap is not None and okmap is not None:
             log.add("R6 SRC 无重复 KeyHash", len(sdup) == 0, f"dup={sdup}")
             log.add("R6 OUT 无重复 KeyHash", len(odup) == 0, f"dup={odup}")
@@ -264,11 +348,11 @@ def main():
                     mod_cnt == int(r.get("modified_key_count") or 0),
                     f"cold={mod_cnt} man={r.get('modified_key_count')}")
         else:
-            log.add("R4/R5/R6 需 source+sidecar 均可读",
+            log.add("R4/R5/R6 需 source(target)+sidecar 均可读",
                     skmap is not None and okmap is not None,
                     f"serr={serr} oerr={oerr}")
 
-        # R7 无 error
+        # R7 无 error (source target 可读 且 sidecar 可读)
         log.add("R7 无 audit 错误", not serr and not oerr, f"{serr};{oerr}")
 
         # manifest 一致性

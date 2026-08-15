@@ -1463,3 +1463,42 @@ CLI aggregate 期望可配 (--expect-packages/--expect-sidecars/--expect-noop, �
 白盒 (全 13 断言): 9×14 checks PASS; NEG 篡改 TRANSLATE 文本 / 篡改 KEEP 文本 / 新增多余 key /
 stray 未入 manifest .package / NOOP 却存在 sidecar —— 全部正确 FAIL (rc=1)。
 既有回归 test_phase2b_regression(135/0) + test_sidecar_audit_regression(13/0) 保持 PASS。
+
+---
+
+## 🔧 independent audit contract 修正 (2026-08-15, 真实 FAIL 定位)
+
+真实独立审计首次 FAIL 被定位为 **auditor contract 错误**, 非 sidecar 失败。所有 9 个 generated slot
+同型: source STBL_COUNT=18 (original Sims package 本身含多 locale STBL), sidecar STBL_COUNT=1。
+根因: 旧 contract 把 `STBL_COUNT==1` 误套到 source package。
+
+修正 A —— source / sidecar 约束拆分:
+- SOURCE package: 不要求 RESOURCE_COUNT==1, 不要求 STBL_COUNT==1 (多 locale 合法, 如 18 个 STBL)。
+  改为: 枚举 source 全部 STBL, 依据 manifest/sidecar 的 **exact target CHS TGI**
+  (type=0x220557DA / group / instance=locale 0x01), 要求 source 中该 TGI **恰出现 1 次**,
+  然后只解析该 target CHS STBL。
+- SIDECAR package: 维持 RESOURCE_COUNT==1 / STBL_COUNT==1 / sidecar TGI == exact source target CHS TGI。
+- R4-R7 (entry / no-add / no-delete / changed-set / final-text) 用
+  **selected source CHS STBL vs sole sidecar STBL** 比较。
+- 新增判断: source target TGI missing -> FAIL (match=0), same target duplicate -> FAIL (match>1),
+  target unreadable -> ERROR。regression: source 18 STBL + exact CHS 一次 + sidecar 1 STBL -> PASS。
+
+修正 B —— NOOP manifest 语义:
+- 真实 generation: PASS_NOOP_KEEP_ONLY, 实际 sidecar 未生成, 但 manifest.output_sidecar 仍保存
+  **planned path**。term: 不要把"字段非空"误判为"磁盘有输出"。
+- 采用 contract: `output_sidecar` 始终表示"真实生成产物"; 对 NOOP, 字段可存 planned path,
+  auditor 以 **磁盘是否实际存在** 为准 (actual=none)。manifest schema 不改,
+  `planned_output_sidecar` 为可选未来字段。
+
+修正 C —— 不重新生成 sidecar:
+- `output/cohort_sidecars_run2_retry1` 保留不动; 只改 `independent_sidecar_audit.py`;
+  writer 不改, 9 package 不重写, 不进 Mods。修后先对现有 retry1 做独立只读 audit。
+
+顺带清理 `independent_sidecar_audit.py` 的 `"\i"` SyntaxWarning (docstring 改 raw string)。
+
+目标(不变): generated sidecars=9 / NOOP=1 / sidecar PASS=9 / FAIL=0 / ERROR=0 / stray=0
+           -> INDEPENDENT_AUDIT: PASS。
+
+白盒 (v2): A1 source 18 STBL + target 一次 PASS; A2 target 缺失 FAIL; A3 target 重复 FAIL;
+B1 NOOP planned output_sidecar 磁盘不存在 PASS。
+既有回归 test_phase2b_regression(135/0) + test_sidecar_audit_regression(13/0) 保持 PASS。
