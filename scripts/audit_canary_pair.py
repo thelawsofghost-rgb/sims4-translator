@@ -32,11 +32,18 @@
   python scripts/audit_canary_pair.py -source <GOLDEN> -out <CANARY> \
       -exp-inst 0x014EACCF17C8B091 \
       -m 0x763F7534 \
-      -expected-keys 0x30A06E9B:t0nischwartz,0xFDD36EF2:左A,0xC34411E9:右A,0x552CC77A:相拥,0x763F7534:自动测试双人表情包相拥姿势
+      -expected-key 0x30A06E9B:t0nischwartz \
+      -expected-key 0xFDD36EF2:左A \
+      -expected-key 0xC34411E9:右A \
+      -expected-key 0x552CC77A:相拥 \
+      -expected-key 0x763F7534:自动测试双人表情包相拥姿势
+
+每个 -expected-key 是独立 argv token (KEYHASH:TEXT), 翻译文本含逗号/冒号均安全;
+任何 token 缺冒号或 key 非 hex -> HARD-FAIL (rc=2) 并精确报出 offending token。
 
 只读, 绝不改写任何 package。
 """
-import sys, os, struct, argparse
+import sys, os, struct, zlib, argparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -50,17 +57,33 @@ def locale_of(inst: int) -> int:
     return (inst >> 56) & 0xFF
 
 
+def _decompress(data: bytes) -> bytes:
+    """与 pose_coverage._decompress 同一 canonical 解压: zlib 头存在则解压, 否则原样。"""
+    if data[:2] in (b"\x78\x9c", b"\x78\xda", b"\x78\x01"):
+        try:
+            return zlib.decompress(data)
+        except Exception:
+            return data
+    return data
+
+
 def read_one_stbl(path: str, e) -> tuple:
-    """读单个 STBL 资源, 返回 (version, is_compressed, reserved, string_length, [(kh,flags,text)]).
+    """读单个 STBL 资源, 返回 (version, is_compressed, reserved, string_length, [(kh,flags,text)], err).
     Header 布局按 s4pi StblResource (vendored 源码核实): magic@0(u32) version@4(u16)
-    isComp@6(u8) count@7(u64) reserved@15(2B) stringLength@17(u32) entries@21."""
+    isComp@6(u8) count@7(u64) reserved@15(2B) stringLength@17(u32) entries@21。
+
+    资源体可能整体 zlib 压缩 (source package 常见; 体为 zlib 头或 offset 高位 is_compressed),
+    先尝试 canonical 解压再解析。解析失败/非 STBL -> (None,...,err), 由上层按 AUDIT_ERROR 处理,
+    绝不把"读不了"伪装成 SOURCE_ENTRIES=0。"""
+    err = None
     try:
         off = e.offset & 0x7FFFFFFF
         sz = e.size & 0x7FFFFFFF
         with open(path, "rb") as fh:
             fh.seek(off); body = fh.read(sz)
-        if body[0:4] != b"STBL":
-            return None, None, None, None, None
+        body = _decompress(body)
+        if len(body) < 21 or body[0:4] != b"STBL":
+            return None, None, None, None, None, f"body 头非 STBL magic (前4字节={body[0:4]!r}, 长度={len(body)})"
         version = struct.unpack_from("<H", body, 4)[0]
         is_comp = body[6]
         count = struct.unpack_from("<Q", body, 7)[0]
@@ -77,9 +100,9 @@ def read_one_stbl(path: str, e) -> tuple:
             txt = body[o + 7:o + 7 + ln].decode("utf-8", errors="replace")
             keys.append((kh, fl, txt))
             o += 7 + ln
-        return version, is_comp, reserved, string_length, keys
-    except Exception:
-        return None, None, None, None, None
+        return version, is_comp, reserved, string_length, keys, None
+    except Exception as ex:
+        return None, None, None, None, None, f"读取异常: {type(ex).__name__}: {ex}"
 
 
 def calc_stbl_string_data_length(keys) -> int:
@@ -112,18 +135,26 @@ def main():
     ap.add_argument("-out", required=True)
     ap.add_argument("-exp-inst", default=None, help="期望 STBL instance, 如 0x014EACCF17C8B091")
     ap.add_argument("-m", action="append", default=[], help="modified key hash (hex, 可重复)")
-    ap.add_argument("-expected-keys", default="",
-                    help="期望完整 key/value: KEYHASH:TEXT,KEYHASH:TEXT,... (验证输出有这些 key 与精确文本)")
+    ap.add_argument("-expected-key", action="append", default=[],
+                    help="期望完整 key/value: KEYHASH:TEXT (可重复; 每个映射一个独立 argv token)")
     args = ap.parse_args()
 
     src_path = os.path.realpath(args.source)
     out_path = os.path.realpath(args.out)
     exp_inst = int(args.exp_inst, 16) if args.exp_inst else None
     exp_keys = {}
-    if args.expected_keys:
-        for kv in args.expected_keys.split(","):
-            kh_s, txt = kv.split(":", 1)
-            exp_keys[int(kh_s, 16)] = txt
+    for kv in args.expected_key:
+        # 每个映射必须含至少一个冒号; 缺失即 malformed -> HARD-FAIL 并精确报出 offending token。
+        if ":" not in kv:
+            print(f"HARD-FAIL: malformed -expected-key token {kv!r} (缺冒号分隔符)")
+            return 2
+        kh_s, txt = kv.split(":", 1)
+        try:
+            kh = int(kh_s, 16)
+        except ValueError:
+            print(f"HARD-FAIL: malformed -expected-key token {kv!r} (key hash 非 hex: {kh_s!r})")
+            return 2
+        exp_keys[kh] = txt
     modified = {int(x, 16) for x in args.m}
 
     # 解析两个包 (独立 parser)
@@ -142,17 +173,17 @@ def main():
     tgi_err = expect_tgi(out_idx, exp_inst)
     got_inst = out_stbl[0].instance_id if out_stbl else None
 
-    out_version, out_comp, out_res, out_strlen, out_keys = None, None, None, None, None
+    out_version, out_comp, out_res, out_strlen, out_keys, out_err = None, None, None, None, None, None
     if out_stbl:
-        out_version, out_comp, out_res, out_strlen, out_keys = read_one_stbl(out_path, out_stbl[0])
+        out_version, out_comp, out_res, out_strlen, out_keys, out_err = read_one_stbl(out_path, out_stbl[0])
 
     # ---- source CHS STBL (若 source 含 CHS 则取之, 否则取唯一 STBL) ----
     src_stbl = [e for e in src_idx.entries if e.type_id == A.STBL_TID]
     src_chs = [e for e in src_stbl if locale_of(e.instance_id) == LOCALE_CHS]
     src_sel = (src_chs[0] if src_chs else src_stbl[0]) if src_stbl else None
-    src_version, src_comp, src_res, src_strlen, src_keys = None, None, None, None, None
+    src_version, src_comp, src_res, src_strlen, src_keys, src_err = None, None, None, None, None, None
     if src_sel:
-        src_version, src_comp, src_res, src_strlen, src_keys = read_one_stbl(src_path, src_sel)
+        src_version, src_comp, src_res, src_strlen, src_keys, src_err = read_one_stbl(src_path, src_sel)
 
     # ---- 比对 ----
     problems = []
@@ -180,10 +211,14 @@ def main():
         print(f"STRING_LENGTH = {out_strlen}")
         print(f"CALCULATED_STRING_DATA_LENGTH = {out_calc}")
 
-    # entries 数量
-    SOURCE_ENTRIES = len(src_keys) if src_keys else 0
+    # entries 数量 —— source 读不了是 AUDIT_ERROR (带 detail), 绝不伪装成 SOURCE_ENTRIES=0
+    if src_keys is None:
+        problems.append("SOURCE_AUDIT_ERROR: source STBL 无法读取: " + (src_err or "未知"))
+        SOURCE_ENTRIES = None
+    else:
+        SOURCE_ENTRIES = len(src_keys)
     OUTPUT_ENTRIES = len(out_keys) if out_keys else 0
-    if OUTPUT_ENTRIES != SOURCE_ENTRIES:
+    if src_keys is not None and OUTPUT_ENTRIES != SOURCE_ENTRIES:
         problems.append(f"OUTPUT_ENTRIES={OUTPUT_ENTRIES} != SOURCE_ENTRIES={SOURCE_ENTRIES}")
 
     # expected key/value 全集
@@ -195,10 +230,12 @@ def main():
             elif out_map[kh][1] != want_txt:
                 problems.append(f"key 0x{kh:08X} value {out_map[kh][1]!r} != expected {want_txt!r}")
 
-    # source vs output 逐项
+    # source vs output 逐项 —— 仅当 source 可读时才能做完整 clone/no-add 语义比对
     CHANGED_KEYS = []
     UNTOUCHED_MISMATCHES = []
-    if src_keys is not None and out_keys is not None:
+    if src_keys is None:
+        problems.append("AUDIT_ERROR: 无法读取 source STBL, 无法完成 complete-clone / no-add 语义比对")
+    elif out_keys is not None:
         # KeyHash 顺序
         src_hashes = [kh for kh, _, _ in src_keys]
         out_hashes = [kh for kh, _, _ in out_keys]
@@ -228,7 +265,8 @@ def main():
             if kh not in {h for h, _, _ in out_keys}:
                 problems.append(f"output 删除 key 0x{kh:08X}")
     else:
-        problems.append("无法读取 source 或 output STBL entries")
+        # out_keys is None: canary 输出 STBL 读不了 -> AUDIT_ERROR (带 detail)
+        problems.append("AUDIT_ERROR: 无法读取 output STBL: " + (out_err or "未知"))
 
     # 无额外 resource
     if len(out_idx.entries) != len([e for e in out_idx.entries if e.type_id == A.STBL_TID]):
@@ -239,7 +277,7 @@ def main():
     print(f"STBL_COUNT = {STBL_COUNT}")
     if got_inst is not None:
         print(f"TGI = 0x{A.STBL_TID:08X} / 0x80000000 / 0x{got_inst:016X}")
-    print(f"SOURCE_ENTRIES = {SOURCE_ENTRIES}")
+    print(f"SOURCE_ENTRIES = {SOURCE_ENTRIES}" + (" (AUDIT_ERROR, source 无法读取)" if SOURCE_ENTRIES is None else ""))
     print(f"OUTPUT_ENTRIES = {OUTPUT_ENTRIES}")
     print(f"CHANGED_KEYS = " + (",".join(f"0x{h:08X}" for h in CHANGED_KEYS) if CHANGED_KEYS else "(none)"))
     if UNTOUCHED_MISMATCHES:

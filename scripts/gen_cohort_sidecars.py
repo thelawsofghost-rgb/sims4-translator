@@ -398,6 +398,21 @@ def run_one(slot, src_path, out_dir, writer_exe, resolver, overrides_path):
     # modified_key_count == translated_key_count
     row["modified_key_count"] = str(len(mods))
 
+    # ---- 2b) KEEP-only NOOP: 所有 approved 都是 KEEP, 无需改任何中文值, 不调 writer ----
+    # 合法情形: A>0 且 len(mods)==0 且 len(keeps)==len(approved)。生成一个与 source 完全
+    # 相同的 STBL clone 无意义 (且会造成游戏内重复/覆盖), 故禁 writer + 禁 audit,
+    # 计入 PASS_NOOP_KEEP_ONLY, sidecar_generated = 0。
+    if len(approved) > 0 and len(mods) == 0 and len(keeps) == len(approved):
+        row["writer_verify"] = "PASS_NOOP_KEEP_ONLY"
+        row["audit_result"] = "SKIP_NO_OUTPUT"
+        row["error"] = ""
+        if out_sidecar.exists():
+            try:
+                out_sidecar.unlink()
+            except Exception:
+                pass
+        return row
+
     # ---- 3) writer CLI ----
     inst = target_tgi.split("/")[-1]
     args = [
@@ -438,13 +453,20 @@ def run_one(slot, src_path, out_dir, writer_exe, resolver, overrides_path):
                   "-exp-inst", inst]
         for kh, _, _, _ in mods:
             a_args += ["-m", f"0x{kh:08X}"]
-        a_args += ["-expected-keys",
-                   ",".join(f"0x{kh:08X}:{tr}" for kh, _, tr, _ in mods)]
+        # expected key/value: 每个映射一个独立 argv token (kh:txt), split(",") 不再出现,
+        # 翻译文本含逗号/冒号均安全 (仅按第一个冒号切分一次)。
+        for kh, _, tr, _ in mods:
+            a_args += ["-expected-key", f"0x{kh:08X}:{tr}"]
         a = subprocess.run(a_args, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=120)
         aout = (a.stdout or "") + "\n" + (a.stderr or "")
         if "AUDIT=PASS" in aout and a.returncode == 0:
             row["audit_result"] = "PASS"
+        elif "HARD-FAIL" in aout:
+            # audit 自身硬失败 (如 malformed -expected-key token / SOURCE_AUDIT_ERROR)
+            row["audit_result"] = "ERROR"
+            snippet = aout.strip().replace("\n", " | ")[:400]
+            row["error"] = (row["error"] + "; " if row["error"] else "") + f"audit HARD-FAIL: {snippet}"
         elif "AUDIT=FAIL" in aout:
             row["audit_result"] = "FAIL"
             snippet = aout.strip().replace("\n", " | ")[:400]
@@ -553,7 +575,8 @@ def main():
                      resolver, a.overrides)
         results.append(mr)
         # 终端逐包 summary
-        status = "✔" if (mr["writer_verify"] == "PASS" and mr["audit_result"] == "PASS") else "✘"
+        status = "✔" if ((mr["writer_verify"] == "PASS" and mr["audit_result"] == "PASS")
+                        or mr["writer_verify"] == "PASS_NOOP_KEEP_ONLY") else "✘"
         print(f"[{status}] slot={mr['cohort_slot']:>2} {Path(path).name:<36} "
               f"A={mr['approved_key_count'] or '-'} T={mr['translated_key_count'] or '-'} "
               f"K={mr['keep_key_count'] or '-'} writer={mr['writer_verify'] or '-'} "
@@ -569,9 +592,15 @@ def main():
 
     # 汇总
     total = len(results)
-    full = sum(1 for m in results if m["writer_verify"] == "PASS" and m["audit_result"] == "PASS")
+    full = sum(1 for m in results
+               if (m["writer_verify"] == "PASS" and m["audit_result"] == "PASS")
+               or m["writer_verify"] == "PASS_NOOP_KEEP_ONLY")
+    noop = sum(1 for m in results if m["writer_verify"] == "PASS_NOOP_KEEP_ONLY")
+    generated = sum(1 for m in results
+                    if m["writer_verify"] == "PASS" and m["audit_result"] == "PASS")
     print(f"\nmanifest: {manifest}")
-    print(f"汇总: {total} 包, 全 PASS = {full}, 失败 = {total - full}")
+    print(f"汇总: {total} 包, 全 PASS = {full}, 失败 = {total - full}, "
+          f"生成 sidecar = {generated}, KEEP-only NOOP = {noop}")
     return 0 if full == total and total > 0 else 1
 
 

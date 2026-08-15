@@ -1390,3 +1390,42 @@ aggregate: unresolved=0 source_mismatch=0 policy_conflict=0 dup-KeyHash=0 CHS_TG
 **白盒 (build_run2_keep24 + overlay 集成):** 合法24→写 layer/disjoint EXIT=0; 注入 `Pose A`
 (不合正则)→HARD-FAIL rc=2; overlay 含 `Pose 5`(相交)→HARD-FAIL rc=2; shadow 集成
 base114+各层+run2KEEP24 → 241/59/182/0 EXIT=0, run2 层与其余各层 pairwise 交集全 0。
+
+---
+
+## 🔧 run2 generation 修复 (2026-08-15, 真实 10 包: slot5/slot7/slot10)
+
+真实 run2 generation: cohort=10, full PASS=7, failure=3。
+`output/cohort_sidecars_run2` 保留为失败证据 (禁止删除/覆盖); retry 将用新 out-dir。
+
+### A. slot5 (Gentlemanly Elegance) —— KEEP-only NOOP
+真实 A=5 / T=0 / K=5 —— 所有 approved 全 KEEP, 无任何中文值要覆盖, 不应生成 STBL clone。
+`gen_cohort_sidecars.py` 新增分支 (A>0 且 T==0 且 K==A):
+  writer_verify = PASS_NOOP_KEEP_ONLY / audit_result = SKIP_NO_OUTPUT / 不调 writer / 不生成 sidecar
+汇总区分: generated sidecars (真 PASS) 与 KEEP-only NOOP 分开计数。
+目标 cohort: packages handled=10 / generated sidecars=9 / NOOP=1 / failed=0。
+
+### B. slot7 (_Kritical_BrainwashingMachine1g) —— 压缩 source STBL 误报 SOURCE_ENTRIES=0
+根因: `audit_canary_pair.read_one_stbl` 只读原始字节不做 zlib 解压; 源 STBL 整体
+zlib 压缩 (body 头 0x78 0x9c, 索引 is_compressed 可能为 False) 时, 原始字节头≠STBL
+-> 旧逻辑返回 None -> 伪造 SOURCE_ENTRIES=0。
+修复: `read_one_stbl` 先做 canonical zlib 解压 (与 pose_coverage._decompress 同一实现),
+再解析。且“读不了 source”不再伪造 0: 显式 `SOURCE_ENTRIES=None (AUDIT_ERROR)` +
+`SOURCE_AUDIT_ERROR: <detail>` / `AUDIT_ERROR: 无法读取 source STBL` -> AUDIT 判定 FAIL。
+新增只读诊断 `scripts/audit_source_diag.py` (source vs output): 打印 exact 路径 / CHS TGI /
+offset/size / is_compressed / body 头字节 / 解压结果 / version / iscomp / header+parsed 条数,
+区分“parser 不支持压缩(1 型, 已修)” vs “source 确实为空/unreadable(2 型, HARD-FAIL)”。
+complete-clone / no-add 不变式绝不因 writer 自报 VERIFY=PASS 而放行。
+
+### C. slot10 (WalkingInOnPoses) —— -expected-keys 逗号拼接被译文逗号破坏
+根因: audit 的 `-expected-keys` 用 `,` 连接 `KEYHASH:TEXT`; 译文含逗号 -> 分割后出现
+无冒号 token -> `kv.split(":",1)` ValueError (not enough values to unpack)。
+修复: 改为可重复 `-expected-key KEYHASH:TEXT` 独立 argv token (与 `-m` 同模式),
+译文含逗号/冒号均安全 (仅按第一个冒号切分一次)。malformed token (缺冒号 / key 非 hex)
+-> HARD-FAIL rc=2 精确报出 offending token, 绝不 try/except 跳过。
+`gen_cohort_sidecars.py` audit 调用同步改为逐 key `-expected-key`。
+
+### 回归
+新增 `scripts/test_sidecar_audit_regression.py`: A(noop) / B(压缩源解压 + AUDIT_ERROR +
+no-add FAIL) / C(逗号冒号译文 PASS + malformed HARD-FAIL) 全绿 (13/13)。
+既有 `test_phase2b_regression.py` 135/0 保持 PASS。
