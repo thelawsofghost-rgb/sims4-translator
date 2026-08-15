@@ -33,11 +33,18 @@ production base (frozen, 唯一, byte/content 必须不变):
   - 增量层间 同 key 不同值                       -> HARD-FAIL
   - 缺必需层 / 缺 source_text / action 非法       -> HARD-FAIL
   - 报告各 layer 行数 + 各增量层 vs base 的交集 + 最终 unique (由真实输入验证, 不硬编码)
+  - 生产成品 invariant gate: 默认 expect=217,35,182,0 (unique,KEEP,TRANSLATE,REVIEW);
+    不符即 HARD-FAIL 并逐层报告 action counts + 冲突来源 (可 --expect 覆盖; 空串关闭门) 。
+    注意: base 若含 KEEP 行(真实 Windows base 有 4 个 KEEP), 则最终 KEEP=35/TRANSLATE=182;
+    白盒用 base 全 TRANSLATE 时会是 31/186 —— 是 base action 分布差异, 非 correction37 改变 KEEP。
+    correction37 层只含 TRANSLATE, 恒不改 KEEP。
   - 归一用 norm_text (与下游 load_overrides/override_for 一致)
   - 不调 LLM / 不改 cache / 不 write package
 
 用法:
   python scripts/build_override_overlay.py <out_dir> [--out <path>] [--no-write]
+  python scripts/build_override_overlay.py <out_dir> --expect "217,35,182,0"
+  python scripts/build_override_overlay.py <out_dir> --expect ""   # 关闭 invariant gate (仅报告)
 """
 import sys, os, csv, argparse
 from pathlib import Path
@@ -103,6 +110,8 @@ def main():
     ap.add_argument("out_dir")
     ap.add_argument("--out", default=None, help="derived overlay 输出路径 (缺省 out_dir/translation_overrides.production.csv)")
     ap.add_argument("--no-write", action="store_true", help="dry-run, 只校验不写")
+    ap.add_argument("--expect", default="217,35,182,0",
+                    help="生产成品 invariant: unique,KEEP,TRANSLATE,REVIEW (fail-closed; 不符即 HARD-FAIL)")
     a = ap.parse_args()
     out_dir = Path(a.out_dir)
     if not out_dir.is_dir():
@@ -194,6 +203,37 @@ def main():
     n_rev = sum(1 for r in merged.values() if r["action"] == "REVIEW")
     print(f"\n最终 unique (tid,norm_source) = {len(merged)}  "
           f"(KEEP={n_keep}, TRANSLATE={n_tr}, REVIEW={n_rev})")
+
+    # 生产成品 invariant gate (fail-closed): 不符即 HARD-FAIL, 不写文件
+    # --expect "" 关闭门 (仅报告); 默认 217,35,182,0 为生产期望
+    if (a.expect or "").strip():
+        try:
+            exp_unique, exp_keep, exp_tr, exp_rev = [int(x) for x in a.expect.split(",")]
+        except Exception:
+            print(f"[HARD-FAIL] --expect 格式错 {a.expect!r} (需 'unique,KEEP,TRANSLATE,REVIEW')")
+            return 3
+        got = (len(merged), n_keep, n_tr, n_rev)
+        if got != (exp_unique, exp_keep, exp_tr, exp_rev):
+            print("[HARD-FAIL] derived overlay 与生产 invariant 不符:")
+            print(f"  expect unique={exp_unique} KEEP={exp_keep} TRANSLATE={exp_tr} REVIEW={exp_rev}")
+            print(f"  got    unique={got[0]} KEEP={got[1]} TRANSLATE={got[2]} REVIEW={got[3]}")
+            # 逐层 action counts 定位来源
+            print("  各层 action counts:")
+            for label, _p, _req in layers:
+                try:
+                    rows = load_rows(_p, label, _req)
+                except HardFail as e:
+                    print(f"    {label}: <Err {e}>")
+                    continue
+                acc = {}
+                for r in rows:
+                    acc[r["action"]] = acc.get(r["action"], 0) + 1
+                print(f"    {label:<38}: {sum(acc.values()):3d} 行 {dict(acc)}")
+            print("  -> frozen base 未被修改; 无 derived 文件写出。请核对层/冲突后重跑。")
+            return 2
+    else:
+        print("[info] --expect 为空, 跳过 production invariant gate (仅报告)。")
+
 
     if a.no_write:
         print("[dry-run] --no-write: 未生成文件。校验通过 (无 HARD-FAIL)。")
