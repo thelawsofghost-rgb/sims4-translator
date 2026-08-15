@@ -245,6 +245,11 @@ def main():
                 "parse_error": "",
             })
 
+    # 修正统计语义: 'active source packages' 只计【source 包】(A/B/C/MODS_SCAN),
+    # 绝不把 SIDE_A/SIDE_B staging sidecar 计入 active source。
+    active_sources = len({pstr for pstr, info in all_maps.items()
+                          if info.get("tag") not in ("SIDE_A", "SIDE_B") and info.get("map") is not None})
+
     # ---- 4) key 分类 ----
     # 取 A/B/C 的 map; C 可能不存在/无 TGI
     def _map(tag):
@@ -360,7 +365,8 @@ def main():
     L.append(f"- mods_root     : `{mods_root}`")
     L.append("")
     L.append("## active source packages with exact TGI")
-    L.append(f"- count = {len(all_maps)}")
+    L.append(f"- active source count (excludes staging sidecars) = {active_sources}")
+    L.append(f"- 含 staging sidecar 的全部 TGI 命中包 (证据)        = {len(all_maps)}")
     for pstr, info in sorted(all_maps.items()):
         m = info["map"]
         L.append(f"  - `{pstr}`  tag={info.get('tag','SCAN')}  sha={info.get('sha','')[:16]}…  "
@@ -420,7 +426,8 @@ def main():
         L.append(f"- `0x{kh:08X}`  {cls[kh]}  {source_vals.get(kh, {})!r}")
     L.append("")
     L.append("## 终局")
-    L.append(f"active source packages with exact TGI = {len(all_maps)}")
+    L.append(f"active source packages with exact TGI = {active_sources}")
+    L.append(f"  (SIDE_A/SIDE_B staging sidecar 不计入 active source)")
     L.append(f"union keys = {union_keys}")
     L.append(f"overlapping keys = {n_overlap}")
     L.append(f"overlapping keys same text = {n_overlap_same}")
@@ -433,7 +440,7 @@ def main():
 
     # stdout
     print(f"## verdict = {verdict}")
-    print(f"active source packages with exact TGI = {len(all_maps)}")
+    print(f"active source packages with exact TGI = {active_sources}  (excludes staging sidecars)")
     print(f"union keys = {union_keys}")
     print(f"overlapping keys = {n_overlap}")
     print(f"overlapping keys same text = {n_overlap_same}")
