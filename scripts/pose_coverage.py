@@ -556,11 +556,47 @@ def _classify(row: dict) -> dict:
     # strong_object_footprint=1 仅作附加诊断 (不覆盖 provenance, 不为了凑数)。
     if _strong and row["status"] == "ELIGIBLE_EXISTING_CHS":
         row["status"] = "SKIP_FALSE_POSITIVE_INTERNAL_POSE"
+        row["decision_subtype"] = "AUTO_STRONG_OBJECT_FOOTPRINT"
         row["reason"] = (
             f"STRONG_OBJECT_FOOTPRINT: OBJD={row['OBJD_count']} AND COBJ={row['COBJ_count']} "
             f"AND (RSLT={row['RSLT_count']} OR FTPT={row['FTPT_count']}) —— 功能物品内置 pose, "
             f"非独立 Pose Pack (448 census 唯一命中即 Kritical)")
+
+    # ---- manual adjudication (最末层, 精确 SHA256 身份匹配) ----
+    # production precedence: baseline -> strong auto gate -> manual (本层)。
+    # manual 只能作用于【精确匹配的 frozen package identity】; 不按 basename/author/path。
+    # 命中 manual registry 且 decision=SKIP -> 强制 SKIP_FALSE_POSITIVE_INTERNAL_POSE,
+    # reason 标 MANUAL_REVIEW_CONFIRMED。registry 不存在/不命中 -> 无影响。
+    row.setdefault("manual_adjudicated", 0)
+    row.setdefault("manual_sha256", "")
+    row.setdefault("manual_decision", "")
+    row.setdefault("manual_basis", "")
+    row.setdefault("manual_evidence", "")
+    try:
+        _ma = _get_manual_adj()
+        if _ma is not None:
+            _applied, _hit = _ma.apply(row)
+    except Exception as ex:
+        # manual 层失败不阻断扫描 (registry 缺失/损坏按无裁决处理), 记录诊断
+        row["status"] = row.get("status", "ERROR")
+        row["reason"] = (row.get("reason", "") + f" | manual_adj_error: {ex}").strip()
     return row
+
+
+# 懒加载的 manual adjudicator (模块级缓存, key=registry path)
+_MANUAL_CACHE = {}
+
+def _get_manual_adj():
+    """按默认 registry 路径懒加载 ManualAdjudicator; 缺失/损坏 -> None (不阻塞扫描)。"""
+    from manual_adjudication import ManualAdjudicator, DEFAULT_REGISTRY
+    if not os.path.isfile(DEFAULT_REGISTRY):
+        return None
+    if DEFAULT_REGISTRY not in _MANUAL_CACHE:
+        try:
+            _MANUAL_CACHE[DEFAULT_REGISTRY] = ManualAdjudicator(DEFAULT_REGISTRY).load()
+        except Exception:
+            return None
+    return _MANUAL_CACHE[DEFAULT_REGISTRY]
 
 
 def _classify_baseline(row: dict) -> None:
@@ -896,6 +932,8 @@ def _write_cohort(path, cols, picks):
         w = csv.writer(f)
         w.writerow(cols)
         for slot, why, r in picks:
+            if r is None:
+                continue
             d = _cohort_detail(r)
             w.writerow([slot, why, d["package_path"], d["status"],
                         d["CHS_target_TGI(s)"], d["CHS_entry_count"], d["CHS_unique_key_hash_count"],
@@ -988,7 +1026,8 @@ def main():
 
     # ---- cohort: 冻结保护 + roster-change 报告 ----
     picks, coh_notes = pick_cohort(rows)
-    _paths_new = [r["package_path"] for _, _, r in picks]
+    # 防退化: 无 ELIGIBLE 时槽位 r 可能为 None (0 ELIGIBLE 边界), 不崩溃。
+    _paths_new = [r["package_path"] for _, _, r in picks if r is not None]
     _dcount_new = len(set(_paths_new))
     frozen_coh = out_dir / "cohort_selection.csv"
 
@@ -1063,6 +1102,8 @@ def main():
                 " title | desc | pdn | non_a | long | rep | tgt_comp | pkg_comp | PPI | multi_fam |\n")
         f.write("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
         for slot, why, r in picks:
+            if r is None:
+                continue
             d = _cohort_detail(r)
             f.write(f"| {slot} | {why} | {Path(d['package_path']).name} | {d['status']} | "
                     f"{d['CHS_target_TGI(s)']} | {d['CHS_entry_count']} | {d['CHS_unique_key_hash_count']} | "
@@ -1093,6 +1134,8 @@ _COLS = ["package_path", "file_size", "PosePackInstance_count", "STBL_count_tota
          "non_ascii_source_present", "long_string_present", "repeated_source_text_present",
          "OBJD_count", "COBJ_count", "RSLT_count", "FTPT_count",
          "strong_object_footprint",
+         "manual_adjudicated", "manual_sha256", "manual_decision", "manual_basis", "manual_evidence",
+         "decision_subtype",
          "multiple_target_STBL_families", "status", "reason"]
 
 

@@ -175,9 +175,11 @@ def evidence_one(path, status):
         row["PACK_TITLE_source"] = src["display_name"]
         row["PACK_DESCRIPTION_source"] = src["description"]
         row["POSE_DISPLAY_NAME_source"] = src["pose_display_name"]
-        # 功能性交互轮廓 (evidence, 不裁决)
-        has_func = (fc["interaction"] > 0 or fc["action"] > 0 or fc["animation_component"] > 0
-                    or fc["CLIP_count"] > 0)
+        # 功能性 gameplay 信号 = 仅 interaction/action/animation (visual object gameplay 参数)。
+        # CLIP/ANIM_RCOL 是 animation assets (动画剪辑本体/RCOL 属性), 单独标记, 不算 gameplay functional signal。
+        has_func = (fc["interaction"] > 0 or fc["action"] > 0
+                    or fc["animation_component"] > 0)
+        has_anim_assets = (fc["CLIP_count"] > 0 or fc["ANIM_RCOL_count"] > 0)
         missing_pack = (not src["display_name"] or row["PACK_TITLE_ref_count"] == 0)
         profile = []
         if missing_pack: profile.append("缺PACK_TITLE")
@@ -186,6 +188,8 @@ def evidence_one(path, status):
         if row["POSE_DISPLAY_NAME_ref_count"] > 0: profile.append("有内部POSE_DISPLAY_NAME")
         if has_func:
             profile.append("有功能资源")
+        if has_anim_assets:
+            profile.append("有animation assets(CLIP/ANIM_RCOL,非gameplay信号)")
         if row["interaction"] > 0: profile.append(f"interaction={row['interaction']}")
         if row["action"] > 0: profile.append(f"action={row['action']}")
         if row["animation_component"] > 0: profile.append(f"animation={row['animation_component']}")
@@ -195,6 +199,8 @@ def evidence_one(path, status):
             row["evidence_note"] += " STRONG_OBJECT_FOOTPRINT命中(功能物品内置pose证据)".strip()
         if missing_pack and has_func and row["pose_root_count"] > 0:
             row["evidence_note"] += " 功能交互/override内部动画容器轮廓(缺pack可见信息+有功能资源)".strip()
+        if missing_pack and not has_func and has_anim_assets and row["pose_root_count"] > 0:
+            row["evidence_note"] += " 仅animation assets(CLIP/RCOL)无gameplay资源, 不如属override容器, 需人工核".strip()
         if row["PosePackInstance_count"] > 0 and not has_func and missing_pack:
             row["evidence_note"] += " 纯PosePackInstance但缺pack可见信息, 需人工核".strip()
     except Exception as ex:
