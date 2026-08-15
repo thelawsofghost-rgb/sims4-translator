@@ -548,6 +548,14 @@ Phase2B 分批执行建议 (workset=626 + batch manifest PASS 后再启动):
   每批完成后跑 invariant: 该批已译 + manual 5 不重翻; 无重复 tid。模型只产译文草稿,
   final QA 须过 glossary+protected spans+人工 review, cache 仅作草稿参考不作最终。
 
+== scope 修正 (2026-08-15): --done 按批隔离 ==
+phase2b_translate 原逻辑: --id-from-file/ONLY_ID 只过滤 need_translate(待翻译子集),
+但 done 由所有 decided 行组装 -> 用整份 manifest+定位某批时, done 会泄出其它 batch 的行
+(空译文 PENDING), 破坏按批隔离与 union-dup 校验。
+修正: 当 ONLY_ID/ONLY_REGEX/ONLY_CATEGORY 任一启用, 计算 scope_tids(全部 decided 中命中 filter 的 tid),
+done 仅写命中行, 其余不写出。未启用定位时 scope=None 全量, 旧行为不变。
+白盒: 623 行 manifest + 29 POSE 定位 -> done=29 行、非 pose 泄出=0; 回归 69/69 不受影响。batch plan 冻结未改。
+
 == Phase2B 最小改动接入 manifest (不另写翻译器) ==
 phase2b_translate.py 新增两个 CLI flag (不新增翻译引擎, 不建新层):
   --todo <csv>  默认仍是 output/translations_todo.csv; 传入则直接以该文件为 workset/todo 源

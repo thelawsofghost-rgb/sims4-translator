@@ -1021,6 +1021,29 @@ def main():
         print(f"[过滤] CLI 定位: {before} -> {len(need_translate)} 行 "
               + (f"(id={ONLY_ID} regex={ONLY_REGEX} cat={ONLY_CATEGORY})" if (ONLY_ID or ONLY_REGEX or ONLY_CATEGORY) else "(only-changed 语义由 cache 指纹保证)"))
 
+    # ---- 作用域 (scope): 当使用 CLI 定位时, done 只写命中的 tid,
+    #      而非整份 todo。否则 --done 会泄出其它 batch 的行 (PENDING 空译文),
+    #      破坏按批隔离/union-dup 校验。未启用过滤时 scope=None = 全量。 ----
+    scope_tids = None
+    if ONLY_ID or ONLY_REGEX or ONLY_CATEGORY:
+        id_set2 = set(x.strip() for x in ONLY_ID.split(",")) if ONLY_ID else None
+        rx2 = re.compile(ONLY_REGEX) if ONLY_REGEX else None
+        sset = set()
+        for r, _m, _z, _st, _l in decided:
+            tid = r.get("translation_id", "")
+            src = norm_text(r.get("source_text", ""))
+            cat = (r.get("category") or r.get("decision") or "")
+            if id_set2 is not None and tid not in id_set2:
+                continue
+            if rx2 is not None and not rx2.search(src):
+                continue
+            if ONLY_CATEGORY is not None and cat != ONLY_CATEGORY:
+                continue
+            sset.add(tid)
+        if sset:
+            scope_tids = sset
+            print(f"[scope] done 仅写 {len(scope_tids)} 个命中 tid (其余不写出)")
+
     # 翻译引擎: 默认本机 Ollama (并发/批大小可由 CLI 覆盖)
     if NO_LLM or (SAMPLE is None and len(need_translate) == 0):
         eng = NoopTranslator()
@@ -1153,6 +1176,8 @@ def main():
     done_rows = []
     try:
         for r, mode, zh, status, lang in decided:
+            if scope_tids is not None and r.get("translation_id") not in scope_tids:
+                continue  # CLI 定位下只写命中 tid, 不泄其它 batch
             text = norm_text(r.get("source_text"))
             if mode in ("OVERRIDE_T", "OVERRIDE_K"):
                 # 人工 override 终态 (不写 cache, 不写 .package)
