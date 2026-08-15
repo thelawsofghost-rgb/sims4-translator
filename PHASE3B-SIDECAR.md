@@ -1773,3 +1773,47 @@ EXACT PLAN 建成 123/113 且 audit parity 236/236, 再审 sidecar。
 - 白盒 resolver fixture 需满足冻结行数 (overlay=241 title=407 desc=190 done=1888
   catalog=3540); KEEP 决策通过 catalog (status=KEEP), payload 通过 overlay 等源层表达
   —— 这是 production resolver 与 legacy resolver 语义差异的自然结果。
+
+## 🔒 659 ELIGIBLE 判定 gate + STRONG_OBJECT_FOOTPRINT + 复核队列 + 人工裁决 registry (2026-08-15)
+
+### 背景: 全流程已冻结的只读判定链
+coverage/cohort/writer/resolver/sidecar/manifest 逐层冻结。本段记录 659 包上
+"是否真实 Pose Player pack 该翻" 的判定 gate 演进, 全部**只读** (不改 447 集合,
+不生成新 sidecar 批, 不动翻译 payload)。
+
+### 1) STRONG_OBJECT_FOOTPRINT 自动 gate (冻结, 不再扩大)
+真实 448 census (用户 Windows) 唯一命中即 Kritical: 该包带完整
+`OBJD+COBJ+(RSLT|FTPT)` 功能物品轮廓。命中 -> baseline 若可 ELIGIBLE 则升级为
+`SKIP_FALSE_POSITIVE_INTERNAL_POSE` (功能物品内置 pose, 非独立 Pose Player pack)。
+- VERIFIED type ids: OBJD=0xC0DB5AE7 COBJ=0x319E4F1D RSLT=0xD3044521 FTPT=0xD382BF57
+- 只作用于 baseline==ELIGIBLE_EXISTING_CHS; baseline 已是 skip 的保留 provenance,
+  `strong_object_footprint=1` 仅诊断 (不覆盖 skip 来源)。
+- **不扩大**: 不用 interaction/action/animation 单列、>=2/>=3 signal、任意 signal、
+  文件名、作者名作 gate。gate 冻结。
+
+### 2) 8 包复核证据 (review_queue_evidence_8.py) — 只读证据交 Dorothy 裁决
+6 weak-signal (simkatu_*) + 2 LOW_CONF (Cry/CHERISI):
+- 不因文件名含 interactions/override/nap/phone 直接 SKIP。
+- 证明功能交互/override 内部动画容器: 缺 PACK_TITLE/DESCRIPTION + 有内部
+  POSE_DISPLAY_NAME + 有 verified interaction(0xE882D22F)/action(0x0C772E27)/
+  animation(0xEE17C6AD) gameplay 资源。
+- CLIP(0x6B20C4F3)/ANIM_RCOL(0xBC4A5044) 是 **animation assets**, 单独标记,
+  **不算「有功能资源」** gameplay 信号 (word fix)。
+- 2 LOW_CONF 不因 pose_display_refs=1 自动 SKIP (小 Pose Pack 可能只 1 姿势)。
+
+### 3) 人工终审 (用户 2026-08-15 23:51) — 显式人工裁决 registry
+结果: 6 SKIP (SKIP_FALSE_POSITIVE_INTERNAL_POSE / MANUAL_REVIEW_CONFIRMED) +
+2 KEEP_ELIGIBLE (Cry/CHERISI, 不建排除规则)。
+- registry: `configs/pose_manual_adjudications.csv`
+- **匹配身份 = package SHA256** (唯一、frozen); basename/path 仅可读诊断, 永不匹配。
+- 内容更新 -> hash 变 -> 旧裁决不继承 -> fail conservative / 重新 review。
+- production precedence (最末层): `baseline -> strong auto gate -> exact manual`.
+- `decision_subtype`: AUTO_STRONG_OBJECT_FOOTPRINT / MANUAL_REVIEW_CONFIRMED。
+- 工具: `manual_adjudication.py` (加载/校验/匹配/apply),
+  `build_manual_registry.py` (Windows 一次性冻结 6 SKIP SHA256),
+  `verify_manual_registry_rerun.py` (659 核验: 状态/FP分布/SHA256 exact-match/cohort diff)。
+- 边界: pick_cohort 全 SKIP (0 ELIGIBLE) 时槽位 r=None 不再崩溃。
+
+### 预期真实 rerun (不硬编码, 以真实核验为准)
+ELIGIBLE=441 / FP=7 (AUTO=1+MANUAL=6) / NO_CHS=199 / AMBIG=5 / MAPPING=4 / DUP=2 /
+MISSING=1 / ERROR=0 / total=659。
