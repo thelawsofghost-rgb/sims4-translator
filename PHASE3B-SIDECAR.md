@@ -461,4 +461,43 @@ ordinary missing non-empty source (居 'Standing Pose Left'/'1' etc) -> 绝不 K
 D 输入 unique == 输出 unique (含 empty 行)。预期重跑: D total=733, TRANSLATE=597,
 KEEP=130, REVIEW=6, EMPTY_SOURCE_NOOP=1。
 
+== 人工 REVIEW 裁决层 (6 条) + 最终待补清单合并 (631) ==
+d_reclassify 的 6 条 REVIEW 已人工裁决: 5->TRANSLATE(附译文) + 1->KEEP(@ninawhims 作者handle)。
+只新增一个增量人工裁决层, 不改 frozen translation_catalog.csv / coverage / cohort / writer / resolver。
+
+1) scripts/m_review.py — 记录 6 条人工裁决 (只读合并 provenance/packages):
+   输入 config/manual_review.tsv (tab: translation_id可空|source_text|final_decision|translation|reason)
+   输出 output/translation_manual_review.csv (translation_id/source_text/source_hash/
+   final_decision/translation/reason/provenance/package_count/packages)
+   stable id 仍 T_{source_hash}_g1, 不信任手填 tid。窄校验 fail-fast: 源必须确为 delta REVIEW
+   (禁止非 REVIEW 改判); final_decision 仅 TRANSLATE/KEEP; TRANSLATE 必须非空译文; KEEP 译文必空;
+   输入==输出无重复。
+```
+python scripts\m_review.py --review config\manual_review.tsv --gap output\gap_inventory.csv --delta output\translation_delta_catalog.csv --out output\translation_manual_review.csv
+```
+
+2) scripts/final_todo.py — 合并 C + D-TRANSLATE + manual REVIEW->TRANSLATE 为最终待补清单:
+   C(29, translation_missing_result.csv) + D TRANSLATE(597, translation_delta_catalog.csv)
+   + manual TRANSLATE(5, translation_manual_review.csv) = 631。输出 output/translation_final_todo.csv
+   (translation_id/source_text/source_hash/decision/reason/translation/provenance/package_count/packages)。
+   硬 invariant fail-fast: todo unique 严格 == 29+597+5=631; REVIEW 未裁决必须 0 (delta REVIEW
+   全部被人工裁决覆盖, TRANSLATE|KEEP 皆算覆盖); 组间 (tid,norm) 无重复; 631 不成立 -> 打印
+   差异来源并停止, 不自动补数据。报告 REVIEW->KEEP=1, remaining REVIEW=0。
+```
+python scripts\final_todo.py --missing output\translation_missing_result.csv --delta output\translation_delta_catalog.csv --manual output\translation_manual_review.csv --out output\translation_final_todo.csv
+```
+
+人工裁决内容 (config/manual_review.tsv, 6 条):
+  !Aylin Moss_Заразная любовь -> TRANSLATE !Aylin Moss_传染的爱 (T_e14c9f042f51_g1)
+  @ninawhims -> KEEP (T_429855a0e4e8_g1)
+  bedposes -> TRANSLATE 床上姿势 (T_dd992d915086_g1)
+  solopose -> TRANSLATE 单人姿势 (T_4aba8e9d6dce_g1)
+  разговорные позы в кровати, РЫЦАРЬ В ЦЕНТР КРОВАТИ! / talking poses in bed,... -> TRANSLATE 床上交谈姿势，骑士位于床中央！ (T_851d01b43295_g1)
+  требуется стакан! (браслет справа) / need plastic cup (right bracelet) -> TRANSLATE 需要塑料杯！（右手手镯） (T_571dfb8eeb80_g1)
+
+预期: manual out 6 (5T+1K, REVIEW=0); final todo unique=631 (C=29, D_TR=597, MAN_T=5),
+REVIEW->KEEP=1, remaining REVIEW=0, MISSING 未裁决=0。全尺度白盒 PASS (合成 C=29/D_TR=597/REV=6/KEEP=1/NOOP=1 -> 631 严格成立)。
+
+本轮只生成 decision 与 todo 清单; 不调用模型批量翻译, 不生成 sidecar, 不重跑10包。
+
 **验证要求 (汇报)**: 10 个 sidecar 文件名 / 每包修改 key 数 / writer verify / independent audit / 是否全部 PASS。
