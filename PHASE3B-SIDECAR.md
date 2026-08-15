@@ -586,6 +586,30 @@ QA/invariant 每批:
 白盒: Phase2B 直接吞 manifest (decision 缺省 TRANSLATE, detected 自动) 且不碰 frozen
   translations_todo.csv/translation_done.csv; 旧路径回归 69/69 不受影响。
 
+== C26 批次1 决策 reconciliation (2026-08-15, 用户裁决) ==
+批1 real 运行: scope=26, output=26, unique=26, pending=0, KEEP=0, empty=0,
+但 QA 发现 26/26 translation==source —— 全是编号/性别/版本/变体/占位技术 pose label。
+
+裁决: KEEP=26, TRANSLATE=0, REVIEW=0。KEEP 权威依据 = 内容层
+translate_mode_for() 实际语义证据 (semantic_tokens==[] / _is_technical_identifier 命中),
+不采用旧 classify_meta() 初筛 (SEMANTIC_WITH_NUM×23 / ENGLISH_SEMANTIC×3)。
+reason 统一: 23×NON_SEMANTIC_TAG + 3×TECHNICAL_LABEL
+(intro-obj / intro-npc / placeholderIntro => TECHNICAL_LABEL)。
+
+新增 frozen terminal 层 output/translation_overrides.c26_pose_keep.csv (26 行 action=KEEP),
+不改旧 frozen translation_catalog.csv, 不改 translation_overrides.csv/.final2.csv。
+translation_done_batch_pose.csv 仅为 canary 诊断产物, 禁止 merge。
+
+重建命令在 c_extract/final_todo 传入 --overrides output\translation_overrides.c26_pose_keep.csv
+(与缺省的 overrides.csv/.final2.csv 一并传入)。
+
+重建后预期数字 (wb_c26_reconcile 16/16 PASS):
+  C 真待补=0  D=597  manual=5  final_todo=602  manual pretranslated=5  workset=597
+  batches POSE=0/TITLE=407/DESC=190  union=597  inter=0  missing=0  duplicate=0
+  authoritative workset ∩ terminal KEEP = 0; 26 tid 均不在 workset/batch/tids。
+
+未改 Phase2B: scope-at-load / --authoritative / POLICY-CONFLICT 全保留。
+
 == terminal-KEEP reconciliation (2026-08-15, 生产级) ==
 真实 Windows 全量 audit: workset TRANSLATE=626, terminal KEEP override=4, conflicts=3:
   T_2a2ce211e44a_g1 sofa_footrest / T_37fdb2d0d954_g1 Smh / T_655ec0d7e2ec_g1 loop-obj
