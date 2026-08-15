@@ -523,6 +523,35 @@ def test_bug4_title_creator_protection():
         pending = {p["t"].strip() for p in P.glossary_resolve(segs)[1]}
         check(f"BUG4 no-overprotect: {src!r}", pending == exp_pending, f"pending={pending}")
 
+    # BUG4 edge (2026-08-15 用户新诊断): 尾部 separator 前缀 (NA_) 字面起始匹配,
+    # 不要求末尾 word-boundary (否则 _A 间无 \\b 导致 NA_ 命中失败)。
+    for src, exp_prot, exp_pending in [
+        ("NA_Arrested posepack", {"NA_"}, {"Arrested posepack"}),
+        ("NA_Tender love posepack", {"NA_"}, {"Tender love posepack"}),
+    ]:
+        prot, _ = P.title_creator_protection(src)
+        segs, _ = P.split_semantic_spans(src, force_prot_spans=prot)
+        pending = {p["t"].strip() for p in P.glossary_resolve(segs)[1]}
+        prot_segs = {s["t"].strip() for s in segs if s["kind"] == "prot"}
+        check(f"BUG4 NA_ prot: {src!r} -> pending",
+              pending == exp_pending, f"pending={pending} want={exp_pending}")
+        check(f"BUG4 NA_ prot: {src!r} -> prot_segs",
+              exp_prot <= prot_segs, f"prot_segs={prot_segs} want={exp_prot}")
+    # 负例: 普通含下划线语义标题 不得因 _ 自动 prot (只有 frozen NA_ 才 prot)
+    prot, _ = P.title_creator_protection("Arrested_Tender posepack")
+    segs, _ = P.split_semantic_spans("Arrested_Tender posepack", force_prot_spans=prot)
+    pending = {p["t"].strip() for p in P.glossary_resolve(segs)[1]}
+    check("BUG4 NA_ no-overprotect: Arrested_Tender posepack 整串 pending (非因 _ 自动 prot)",
+          pending == {"Arrested_Tender posepack"}, f"pending={pending}")
+    # 负例: 未 frozen 的 X_ 前缀不得自动 prot (拒绝宽泛 ^[A-Z]+_)
+    prot, _ = P.title_creator_protection("X_Pose Pack")
+    check("BUG4 NA_ no-overprotect: 未 frozen X_ 不产生 creator prot span",
+          prot == [], f"prot={prot}")
+    segs, _ = P.split_semantic_spans("X_Pose Pack", force_prot_spans=prot)
+    pending = {p["t"].strip() for p in P.glossary_resolve(segs)[1]}
+    check("BUG4 NA_ no-overprotect: X_ 语义段仍 required (未被吞掉)",
+          len(pending) > 0, f"pending={pending}")
+
 
 # ---------------- 入口 ----------------
 def main():

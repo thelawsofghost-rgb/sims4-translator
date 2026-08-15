@@ -627,7 +627,13 @@ def title_creator_protection(text: str):
         # 情况 A: 前缀位于文本起始 (最常见 creator 前缀)
         if t.startswith(pre):
             after = len(pre)
-            if after >= len(t) or not t[after].isalnum():
+            # 末尾 separator 前缀 (如 NA_ / Loulicorn- / xcreator_) 是刻意连排的
+            # creator token (NA_Arrested = NA_ + Arrested), 用字面起始匹配,
+            # 不要求末尾 word-boundary (否则 _A 间无 \b 导致 NA_ 命中失败)。
+            # 非 separator 前缀 (如 Loulicorn / Siimplysims) 仍要求后接非字母数字,
+            # 避免误伤 Simplerposes 之类更大标识符。
+            _pre_tail_sep = pre and (not pre[-1].isalnum())
+            if _pre_tail_sep or after >= len(t) or not t[after].isalnum():
                 # 扩展: 吞掉 creator 后的分隔符/空白 (保持 rebuild 边界空格, 如 "(simmer_creator) ",
                 # "Loulicorn - "), 使剩余部分从干净语义词开始切分。
                 _sepchars = "-:/\\),]"

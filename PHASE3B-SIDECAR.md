@@ -693,6 +693,16 @@ BUG3 authoritative unchanged gate:
   - 生产路径 (jobs build) + materialize_from_cache + diag 全部先 title_creator_protection
     再 glossary/pending -> creator 不 required_translate、不 echo 假阳性、rebuild 原样保留。
   - 负例白盒: Simpler/xcreator/Pretty Smile Poses 不被动 (无过度保护)。
+**NA_ edge (2026-08-15 用户新诊断, 已修)**: matcher 原先对所有 creator prefix
+  统一要求末尾 word-boundary。NA_ 末尾是下划线 (word-char), 故 NA_Arrested 的
+  _ 与 A 间无 \b -> NA_ 命中失败, 整串判 required+echo。修复: 对以明确 separator
+  (_ / - 等) 结尾的 frozen prefix 用字面起始匹配, 不要求末尾 word-boundary。
+  结果 (实测):
+    NA_Arrested posepack       -> protected=NA_ / required=Arrested posepack
+    NA_Tender love posepack    -> protected=NA_ / required=Tender love posepack
+  负例: 普通含下划线语义标题 (Arrested_Tender posepack) / 未 frozen 的 X_ 前缀
+  不因 _ 自动 prot (仍 source-specific + frozen-config driven, 拒绝宽泛 ^[A-Z]+_)。
+  regression: 86->93 PASS (含 NA_ x2, 负例 x3)。
 手动终态 +2 (manual 2->4): 用户裁决这2条不再交模型:
   T_1296d0b19078_g1 [Raspberrywhimss] Sweet Like Cinammon -> [Raspberrywhimss] 肉桂般甜蜜
     (旧模型错译"香草味肉桂")
