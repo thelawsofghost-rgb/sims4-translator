@@ -676,6 +676,35 @@ BUG3 authoritative unchanged gate:
 验证: test_phase2b_regression.py 74 PASS (含 BUG1/2/3 回归); e2e --engine none
   严格 QA_FAIL + re-translate 白盒 PASS; diag stuck-echo 捕获 PASS。
 
+--- BUG4 (2026-08-15 用户新诊断) ---
+问题: required_translate / j["pending"] 对 PACK_TITLE creator/identifier 保护不完整。
+      创作 token (simmer_creator)/(UNI)/creator prefixes 被当可译语义 -> 假 echo QA_FAIL。
+  真实假阳性: (simmer_creator) - Male poses #1 / (UNI) Emotion Poses Adult;
+  真实漏译照常: Wait... It's You! - Pose Pack(Pose Pack 未翻) / Emotions - Sad(Sad 未翻)。
+修复 (精确可审计, 非宽泛启发式; 禁止: 首英文==作者/下划线都KEEP/title-case都翻):
+  - 新增 frozen config configs/title_creator_prefix.c26.csv: 逐 source 锁定 creator 前缀
+    (simmer_creator / (UNI) / xLienaEnna(post-bracket, 方括号已prot故只prot作者token) /
+    Siimplysims / Loulicorn / Grownasssimmer(+Kaley 双词) / NA_ / Acha /
+    RosieSimsie / motherlode / simonly)。
+  - title_creator_protection(text) -> (prot_spans, reasons): 精确词首匹配 + 词边界,
+    吞后置分隔符/空白保 rebuild 空界; 方括号 token 已由 _BRACKET_TAG 整体 prot 不重复。
+  - split_semantic_spans(force_prot_spans): 起始前缀整体 prot + 剩余递归切分;
+    中置 creator(如 ]xLienaEnna) 按段 token demote prot。
+  - 生产路径 (jobs build) + materialize_from_cache + diag 全部先 title_creator_protection
+    再 glossary/pending -> creator 不 required_translate、不 echo 假阳性、rebuild 原样保留。
+  - 负例白盒: Simpler/xcreator/Pretty Smile Poses 不被动 (无过度保护)。
+手动终态 +2 (manual 2->4): 用户裁决这2条不再交模型:
+  T_1296d0b19078_g1 [Raspberrywhimss] Sweet Like Cinammon -> [Raspberrywhimss] 肉桂般甜蜜
+    (旧模型错译"香草味肉桂")
+  T_438c8bd18eda_g1 [ROSELIPA] 2AM -> [ROSELIPA] 凌晨2点 (无语义可翻段)
+结构重算 (用户裁决, 真实输入推导非硬编码): KEEP=3 manual=4 retry=36 clean=364 total=407;
+  production overlay 若四层仍 disjoint: 145->147 (由真实输入计算)。
+preflight 不再硬编码 145/38: 期望值从当前 production overlay (len(ovr)) 与 retry manifest
+  (requested/authoritative) 实际推导; 硬校验 = KEEP/manual 不入 retry + authoritative==retry
+  行数 + scope 不丢行。build_title_retry 硬编码 38/3/2 移除 -> 自洽推导。
+diag_retry_segments 输出新增 protected/reason 列; 要求输出每个 echo segment 的
+  tid/source_phrase/protected=yes-no/required_translate/reason, 确认 creator 不再真失败。
+
 A/D evidence 由 diag_title_qa 自动落盘 (不手工构造, 2026-08-15):
   python scripts/diag_title_qa.py output --done <done> --also-failed \
       --a-out output/title_A_tids.csv --d-out output/title_D_tids.csv

@@ -491,6 +491,39 @@ def test_bug_fixes():
     check("BUG fix: 正常行 T_ok1 DONE", r5["status"] == "DONE", f"status={r5['status']!r}")
 
 
+# ================================================================
+# 12. BUG4: TITLE creator/identifier 保护 (2026-08-15 用户裁决)
+#    required_translate/pending 不能把 creator token 当可译语义 -> 假 echo QA_FAIL。
+# ================================================================
+def test_bug4_title_creator_protection():
+    print("\n== 12. BUG4: PACK_TITLE creator/identifier 保护 ==")
+    # 单元: 精确 protection 不伤语义主段
+    cases = [
+        # (source, 期望 pending 的 semantic 段, 期望被保护的 creator token)
+        ("(simmer_creator) - Male poses #1", {"Male poses #"}, {"(simmer_creator)"}),
+        ("(UNI) Emotion Poses Adult", {"Emotion Poses Adult"}, {"(UNI)"}),
+        ("Loulicorn - Pretty Smile Poses", {"Pretty Smile Poses"}, {"Loulicorn"}),
+        ("Grownasssimmer Kaley - Pose Pack", {"Pose Pack"}, {"Grownasssimmer Kaley"}),
+        ("[Jarride]xLienaEnna - Pretty Smile Poses", {"Pretty Smile Poses"}, {"xLienaEnna"}),
+    ]
+    for src, exp_pending, exp_prot in cases:
+        prot, reasons = P.title_creator_protection(src)
+        segs, _ = P.split_semantic_spans(src, force_prot_spans=prot)
+        pending = {p["t"].strip() for p in P.glossary_resolve(segs)[1]}
+        prot_segs = {s["t"].strip() for s in segs if s["kind"] == "prot"}
+        contained = any(any(pr.strip().startswith(c) or c in pr for c in exp_prot) for pr in prot_segs)
+        check(f"BUG4 prot: {src!r} semantic={sorted(exp_pending)}",
+              pending == exp_pending, f"pending={pending} want={exp_pending}")
+        check(f"BUG4 prot: creator protected", contained, f"prot_segs={prot_segs} want={exp_prot}")
+    # 负例: 不得过度保护 (精确, 非宽泛启发式)
+    for src, exp_pending in [("Simpler Poses 1", {"Simpler Poses"}),
+                             ("Pretty Smile Poses", {"Pretty Smile Poses"})]:
+        prot, _ = P.title_creator_protection(src)
+        segs, _ = P.split_semantic_spans(src, force_prot_spans=prot)
+        pending = {p["t"].strip() for p in P.glossary_resolve(segs)[1]}
+        check(f"BUG4 no-overprotect: {src!r}", pending == exp_pending, f"pending={pending}")
+
+
 # ---------------- 入口 ----------------
 def main():
     print("Phase 2B regression + cache/resume 验证")
@@ -506,6 +539,7 @@ def main():
     test_normalize_model_output()
     test_override()
     test_bug_fixes()
+    test_bug4_title_creator_protection()
     print(f"\n==== 结果: PASS={len(PASS)}  FAIL={len(FAIL)} ====")
     if FAIL:
         print("失败项:", *FAIL, sep="\n  - ")

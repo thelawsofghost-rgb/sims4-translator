@@ -5,3 +5,4 @@ output/
 lib/
 testdata/
 canary_hold/
+translation_cache.db

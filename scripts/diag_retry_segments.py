@@ -40,6 +40,7 @@ glossary_resolve = pt.glossary_resolve
 rebuild = pt.rebuild
 normalize_model_output = pt.normalize_model_output
 restore_protected = pt.restore_protected
+title_creator_protection = pt.title_creator_protection
 
 
 def main():
@@ -86,7 +87,7 @@ def main():
     rows_affected = set()
     n_echo_rows_set = set()
 
-    print("tid\trow_status\tseg_idx\tseg_type\tsource_phrase\tresolved\tresolution\trequired_translate\techo")
+    print("tid\trow_status\tseg_idx\tseg_type\tsource_phrase\tresolved\tresolution\trequired_translate\techo\tprotected\treason")
     for r in rows:
         tid = (r.get("translation_id") or "").strip()
         text = norm_text(r.get("source_text") or "")
@@ -95,7 +96,9 @@ def main():
         translation = (r.get("translation") or "").strip()
         auth = tid in auth_tids
 
-        segs, _ = split_semantic_spans(text)
+        # BUG4: 应用与 translator 同源的 TITLE creator/identifier 保护, 再判 required_translate。
+        prot_spans, prot_reasons = title_creator_protection(text)
+        segs, _ = split_semantic_spans(text, force_prot_spans=prot_spans)
         gloss, pending = glossary_resolve(segs)
         pending = [p for p in pending if p["t"].strip()]
         ctx = []  # 诊断无 ctx (与 cache 写入时一致; 有 ctx 的 fingerprint 查不到属正常差异)
@@ -121,13 +124,30 @@ def main():
         seg_idx = 0
         for si, s in enumerate(segs):
             if s["kind"] == "prot":
-                print(f"{tid}\t{status}\t{si}\tsem? no\t{s['t']}\t{s['t']}\tprotected\tno\techo=na")
+                # prot 段: 区分"creator/identifier 保护"与"通用格式保护"
+                _reason = ""
+                _protected = "no"
+                _pt = s["t"].strip()
+            if s["kind"] == "prot":
+                # prot 段: 区分"creator/identifier 保护"与"通用格式保护"
+                _reason = ""
+                _protected = "no"
+                _pt = s["t"].strip()
+                for span, why in prot_reasons.items():
+                    _sub = norm_text(text)[span[0]:span[1]].strip()
+                    if span[0] == 0 or (_sub and (_sub == _pt or _pt == _sub or
+                                                  _pt.startswith(_sub) or _sub.startswith(_pt))):
+                        _protected = "yes"
+                        _reason = why
+                print(f"{tid}\t{status}\t{si}\tprot\t{s['t']}\t{s['t']}\tprotected\tno\tno\t{_protected}\t{_reason}")
                 continue
             # sem
             seg_idx += 1
             src = s["t"].strip()
             rv = resolved.get(s.get("key"))
             req = "yes" if s.get("key") in [q.get("key") for q in pending] else "no"
+            protected = "no"
+            reason = ""
             if req == "yes":
                 if rv is None or not str(rv).strip():
                     res_src = "UNRESOLVED"
@@ -148,12 +168,12 @@ def main():
                         rows_affected.add(tid)
                         n_echo_rows_set.add(tid)
                 echo = "yes" if (resolved_txt and resolved_txt == src) else "no"
-                print(f"{tid}\t{status}\t{si}\tsem\t{src}\t{resolved_txt}\t{res_src}\tyes\t{echo}")
+                print(f"{tid}\t{status}\t{si}\tsem\t{src}\t{resolved_txt}\t{res_src}\tyes\t{echo}\t{protected}\t{reason}")
             else:
                 # glossary 直译 (零模型) 的 sem 段 -> required_translate=no
                 resolved_txt = str(rv).strip() if rv is not None else ""
                 echo = "yes" if (resolved_txt and resolved_txt == src) else "no"
-                print(f"{tid}\t{status}\t{si}\tsem\t{src}\t{resolved_txt}\tglossary\tno\t{echo}")
+                print(f"{tid}\t{status}\t{si}\tsem\t{src}\t{resolved_txt}\tglossary\tno\t{echo}\t{protected}\t{reason}")
 
     n_echo_rows = len(n_echo_rows_set)
     print("\n===== 汇总 =====")

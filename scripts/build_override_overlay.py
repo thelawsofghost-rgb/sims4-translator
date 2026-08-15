@@ -9,7 +9,7 @@ production base (frozen, 唯一, byte/content 必须不变):
 增量层 (仅以下, action/translation 定稿, 非递增叠加在其上, 后列覆盖先列):
   configs/translation_overrides.c26_pose_keep.csv    -> 26 pose C26 KEEP
   configs/title_terminal_keep.c26.csv                ->  3 title terminal KEEP
-  configs/title_manual_translate.c26.csv             ->  2 title manual final TRANSLATE
+  configs/title_manual_translate.c26.csv             ->  4 title manual final TRANSLATE
 
 输出 (新 derived 文件, 绝不触碰 frozen base 及其余任何文件):
   output/translation_overrides.production.csv

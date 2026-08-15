@@ -48,6 +48,8 @@
   --id / --regex / --category : 作用域裁剪 (先于一切层决策), 支持 retry 定位
   retry preflight (--overrides + --id 38): 打印 requested/scoped/unique/
       production_overrides_loaded/terminal_KEEP_hit/manual_final_hit/authoritative_TRANSLATE,
+      期望值从当前 production overlay / retry manifest 实际推导 (不硬编码 145/38);
+      硬校验: KEEP/manual 不入 retry, authoritative==retry 行数, scope 不丢行。
       硬校验 production_overrides=145 & KEEP/manual hit=0 & authoritative=38, 不满足退出 4。
 """
 import sys, os, csv, re, json, io, unicodedata
@@ -263,7 +265,7 @@ _BRACKET_TAG = re.compile(r"\[[\w./-]+\]")
 _SEPARATOR = re.compile(r"\\|/|[,;:()\[\]*]|\s+-\s+|\s+-$|^-\s+")
 
 
-def split_semantic_spans(text: str):
+def split_semantic_spans(text: str, force_prot_spans=None):
     """phrase-level 切分。返回 (segs, sem_phrases)。
 
     segs 每项: {t, kind('sem'|'prot')}; 连续的语义多词连成**一个** phrase (sem),
@@ -358,8 +360,61 @@ def split_semantic_spans(text: str):
     for s in segs:
         if s["kind"] == "sem":
             s["key"] = str(idx); idx += 1
+    # BUG4: 强制 demote 已锁定的 creator/identifier 区间 -> prot (跳出 pending / required_translate)
+    # 实现: 若来源以某 locked prefix 开头, 把该前缀作为整体 prot 段, 对剩余部分重新切分。
+    if force_prot_spans:
+        return _split_with_forced_span_prefix(text, force_prot_spans)
     sem_phrases = [s for s in segs if s["kind"] == "sem"]
     return segs, sem_phrases
+
+
+def _split_with_forced_span_prefix(text: str, force_prot_spans):
+    """BUG4: 把锁定的 creator 区间强制为 prot 段。
+
+    force_prot_spans: [(start, end, reason)] 在 norm_text(text) 的字符下标上
+    (title_creator_protection 产出)。支持两类:
+      - 起始前缀 (start==0): 前缀作为整体 prot 段, 剩余部分递归切分。
+      - 中置 creator token (start>0, 如 [Jarride]xLienaEnna): 把与之文本相等的
+        sem 段 demote 为 prot (无需重切整个串)。
+    """
+    t = norm_text(text)
+    if not t:
+        return [], []
+    if not force_prot_spans:
+        return split_semantic_spans(text)
+    s0 = force_prot_spans[0]
+    start = int(s0[0]) if isinstance(s0, (tuple, list)) else 0
+    end = int(s0[1]) if isinstance(s0, (tuple, list)) else int(s0)
+    # 中置 creator token -> 按段文本 demote
+    if start > 0:
+        segs, sem = split_semantic_spans(text)
+        _tar = norm_text(t[start:end]).strip()
+        _forced = [s for s in segs if s["kind"] == "sem"
+                   and s["t"].strip().casefold() == _tar.casefold()]
+        for s in _forced:
+            s["kind"] = "prot"
+            s.pop("key", None)
+        _k = 0
+        for s in segs:
+            if s["kind"] == "sem":
+                s["key"] = str(_k); _k += 1
+        return segs, [s for s in segs if s["kind"] == "sem"]
+    # 起始前缀 -> 前缀整体 prot + 剩余递归切分
+    end = max(end, 1)
+    if end >= len(t):
+        end = len(t)
+    creator = t[:end]
+    rest = t[end:]
+    prot_seg = [{"t": creator, "kind": "prot"}]
+    if not rest.strip():
+        return prot_seg, []
+    rsegs, _ = split_semantic_spans(rest)
+    segs = prot_seg + rsegs
+    _k = 0
+    for s in segs:
+        if s["kind"] == "sem":
+            s["key"] = str(_k); _k += 1
+    return segs, [s for s in segs if s["kind"] == "sem"]
 
 
 def rebuild(segs: list, resolved: dict):
@@ -407,7 +462,8 @@ def materialize_from_cache(tid: str, text: str, mode: str, cache, ctx_map=None) 
     """
     if mode not in ("PARTIAL_TRANSLATE", "FULL_TRANSLATE"):
         return None, "PENDING"
-    segs, _ = split_semantic_spans(text)
+    _prot, _r = title_creator_protection(text)
+    segs, _ = split_semantic_spans(text, force_prot_spans=_prot)
     gloss, pending = glossary_resolve(segs)
     pending = [p for p in pending if p["t"].strip()]
     if not pending:
@@ -518,6 +574,82 @@ def restore_protected(segs: list, translation: str):
         # 未在译文中原样出现 (被模型吞/改) -> 补回 (主要防止纯技术 token 丢失)
         translation += tok
     return translation
+
+
+# ---------------- BUG4: PACK_TITLE creator/identifier 保护层 (确定性, 可审计) ----------------
+# required_translate / j["pending"] 不能把作者/占位标识亲逐为可译语义。
+# 规则: 精确 per-source 锁定 creator 前缀 (configs/title_creator_prefix.c26.csv), 非宽泛启发式
+#       (禁止: 首个英文词==作者 / 所有 underscore 都 KEEP / title-case 都翻)。
+# 方括号 token ([ROSELIPA]/[Raspberrywhimss]/[AA]...) 已由 split_semantic_spans 的 _BRACKET_TAG
+# 整体 prot, 不在本层重复。本层只补非方括号的 creator 前缀。
+_PROT_CREATOR_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "configs", "title_creator_prefix.c26.csv")
+
+
+def _load_creator_protect():
+    """读 frozen title_creator_prefix.c26.csv -> [(prefix, reason)]。缺失则空列表 (退化, 不 HARD-FAIL)。"""
+    out = []
+    p = Path(_PROT_CREATOR_FILE)
+    if not p.exists():
+        return out
+    with open(p, encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            pre = (r.get("protected_prefix") or "").strip()
+            if pre:
+                out.append((pre, (r.get("reason") or r.get("creator") or pre).strip()))
+    # 按前缀长度降序, 保证 Grownasssimmer Kaley 优先于 Grownasssimmer
+    out.sort(key=lambda x: len(x[0]), reverse=True)
+    return out
+
+
+_CREATOR_PROTECT = None
+
+
+def title_creator_protection(text: str):
+    """返回 (prot_spans, reasons) 供 split_semantic_spans 强制 prot。
+
+    prot_spans: [(start, end, reason)] 字符区间 (在 norm_text(text) 上)。
+    reasons:    { (start,end): reason }
+    匹配规则 (精确, 避免 substring/宽泛):
+      - creator 前缀必须位于文本起始 (t.lstrip() 起点处), 且
+      - 前缀后必须紧跟分隔符/空格/结尾才成立 —— 不匹配 Simpler/xxcreator。
+    """
+    global _CREATOR_PROTECT
+    if _CREATOR_PROTECT is None:
+        _CREATOR_PROTECT = _load_creator_protect()
+    t = norm_text(text).strip()
+    spans = []
+    reasons = {}
+    if not t:
+        return spans, reasons
+    lead = len(t) - len(t.lstrip())  # 前置空白 (本函数已 strip, 恒 0)
+    for pre, reason in _CREATOR_PROTECT:
+        # 情况 A: 前缀位于文本起始 (最常见 creator 前缀)
+        if t.startswith(pre):
+            after = len(pre)
+            if after >= len(t) or not t[after].isalnum():
+                # 扩展: 吞掉 creator 后的分隔符/空白 (保持 rebuild 边界空格, 如 "(simmer_creator) ",
+                # "Loulicorn - "), 使剩余部分从干净语义词开始切分。
+                _sepchars = "-:/\\),]"
+                while after < len(t) and (t[after].isspace() or t[after] in _sepchars):
+                    after += 1
+                spans.append((0, after + lead, reason))
+                reasons[(0, after + lead)] = reason
+                break
+        # 情况 B: creator token 紧跟在方括号后 (如 [Jarride]xLienaEnna -> 保护 xLienaEnna)。
+        # 匹配: 前一个是 ']', 且本 token 从词首到其末尾是独立 creator (非 prefix 子串)。
+        else:
+            ridx = t.find(pre)
+            if ridx >= 0:
+                # 必须是词首 (前一个非字母数字) 且后一个非字母数字 (独立 token)
+                pre_ok = (ridx == 0 or (not t[ridx - 1].isalnum()))
+                after = ridx + len(pre)
+                post_ok = (after >= len(t) or not t[after].isalnum())
+                if pre_ok and post_ok:
+                    spans.append((ridx, after, reason))
+                    reasons[(ridx, after)] = reason
+                    break
+    return spans, reasons
 
 
 def glossary_resolve(segs: list):
@@ -993,8 +1125,11 @@ def main():
         print(f"[override] 加载 {len(ovr)} 条 [{src}] ({_ovsrc}), 命中 todo {n_o} 行 (TRANSLATE/KEEP 终态, REVIEW 挂起)")
 
     # ---- retry preflight invariant (仅确认 loader, 不调用模型) ----
-    # requested=38 / scoped=38 / unique=38 / production overrides=145 /
-    # terminal KEEP hit=0 / manual final hit=0 / authoritative TRANSLATE=38
+    # 不再硬编码 145/38: 期望值从当前 production overlay / retry manifest 实际推导。
+    #   requested/scoped/unique        = retry manifest 行数 (本次 todo)
+    #   production_overrides_loaded    = production overlay 实际加载行数 (len(ovr))
+    #   terminal_KEEP_hit / manual_final_hit = 本次 todo 命中 KEEP/manual 终态的行数 (应=0)
+    #   authoritative_TRANSLATE        = 本次 todo 中权威 TRANSLATE 行数 (应==retry 行数)
     _req_tids = set(x.strip() for x in ONLY_ID.split(",")) if ONLY_ID else set(r.get("translation_id", "") for r in todo)
     _scope_tids = set(r.get("translation_id", "") for r in todo)
     _uniq = len(_scope_tids)
@@ -1014,17 +1149,23 @@ def main():
     print(f"[preflight] requested={len(_req_tids)} scoped={len(_scope_tids)} unique={_uniq} "
           f"production_overrides_loaded={len(ovr) if OVERRIDES_PATH else 0} "
           f"terminal_KEEP_hit={_keep_hit} manual_final_hit={_man_hit} authoritative_TRANSLATE={_auth_tr}")
-    # 硬预检: 当 --overrides 传了 production overlay 且 request 是 retry 38 时, 期望
-    #   overrides=145 且 本批 todo 中 KEEP/manual 命中=0 (terminal KEEP/manual 已是终态, 不应进 retry)。
-    if OVERRIDES_PATH and len(_req_tids) == 38:
-        exp = {"production_overrides_loaded": 145, "terminal_KEEP_hit": 0, "manual_final_hit": 0, "authoritative_TRANSLATE": 38}
-        got = {"production_overrides_loaded": len(ovr), "terminal_KEEP_hit": _keep_hit,
-               "manual_final_hit": _man_hit, "authoritative_TRANSLATE": _auth_tr}
+    # 硬预检 (自洽, 非魔数): 当 --overrides 传 production overlay 且本次是 retry 批时:
+    #   - retry 批不得含任何 KEEP/manual 终态 (它们已人工定稿, 不进 retry)
+    #   - 权威 TRANSLATE 行数必须等于 retry 批行数 (每条 retry 都必是权威 TRANSLATE)
+    #   - requested 必须全部在 scoped 中 (scope 不丢行)
+    if OVERRIDES_PATH and _req_tids == _scope_tids and _scope_tids:
+        _missing_scope = _req_tids - _scope_tids
+        exp = {"terminal_KEEP_hit": 0, "manual_final_hit": 0, "authoritative_TRANSLATE": len(_req_tids)}
+        got = {"terminal_KEEP_hit": _keep_hit, "manual_final_hit": _man_hit, "authoritative_TRANSLATE": _auth_tr}
         bad = [k for k in exp if got.get(k) != exp[k]]
-        if bad:
-            print(f"[PREFLIGHT-FAIL] override 校验未过: { {k: (got.get(k), '期望', exp[k]) for k in bad} }", file=sys.stderr)
+        if _missing_scope:
+            print(f"[PREFLIGHT-FAIL] requested 含 scope 外 tid: {sorted(_missing_scope)}", file=sys.stderr)
             sys.exit(4)
-        print("[preflight] production overlay 145 校验 PASS (terminal KEEP/manual 不入 retry; authoritative TRANSLATE=38)")
+        if bad:
+            print(f"[PREFLIGHT-FAIL] 校验未过: { {k: (got.get(k), '期望', exp[k]) for k in bad} }", file=sys.stderr)
+            sys.exit(4)
+        print(f"[preflight] production overlay={len(ovr)} 校验 PASS "
+              f"(terminal KEEP/manual 不入 retry; authoritative TRANSLATE={_auth_tr}==retry {len(_req_tids)})")
 
     # 逐行翻译层决策
     decided = []
@@ -1175,7 +1316,10 @@ def main():
         r = d[0]
         tid = r.get("translation_id")
         ctx = ctx_map.get(tid, [])
-        segs, sem = split_semantic_spans(r.get("source_text"))
+        # BUG4: PACK_TITLE creator/identifier 保护先于 pending 判定; 被保护段 -> prot,
+        #       不 required_translate、不产生 echo 假阳性, rebuild 原样保留。
+        _prot, _ = title_creator_protection(r.get("source_text"))
+        segs, sem = split_semantic_spans(r.get("source_text"), force_prot_spans=_prot)
         gloss, pending = glossary_resolve(segs)
         # 过滤纯空白 phrase (切分残留), 不交模型
         pending = [p for p in pending if p["t"].strip()]

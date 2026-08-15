@@ -8,24 +8,27 @@ build_title_retry.py — TITLE retry manifest 构造 (确定性, 只读, 零模�
   D unresolved phrase=5 (D∩A=4, D−A=1).
   engine failed=8, 但仅 5 unresolved 可确定; 另 3 未解释, 不得声称已解决。
 
-人工终态 (B 类审结 = 3 KEEP + 2 manual final TRANSLATE, 禁止再送模型):
+人工终态 (B 类审结 = 3 KEEP + 4 manual final TRANSLATE, 禁止再送模型):
   terminal KEEP (configs/title_terminal_keep.c26.csv):
     simonly_VixenPoster#1/#2/#3  (3)
   manual final TRANSLATE (configs/title_manual_translate.c26.csv):
     RosieSimsie_NSFW_CouplePoses_AllYours -> RosieSimsie_NSFW_情侣姿势_全属于你
-    motherlode_fight -> motherlode_打斗     (2)
+    motherlode_fight -> motherlode_打斗
+    [Raspberrywhimss] Sweet Like Cinammon -> [Raspberrywhimss] 肉桂般甜蜜 (旧模型错译)
+    [ROSELIPA] 2AM -> [ROSELIPA] 凌晨2点 (无语义可翻段)  (4)
 
-retry set (2026-08-15 修正口径, 用户裁决):
+retry set (2026-08-15 修正口径, 用户裁决; 2026-08-15 BUG4 后 +2 manual):
   retry = (A − terminal_KEEP − manual_final_TRANSLATE) ∪ (D − A)
-  = (42 − 3 − 2) ∪ (1)  =  37 ∪ 1  =  38 unique tid
-  预期: retry unique=38, duplicate=0, terminal KEEP∩=0, manual final∩=0。
+  = (42 − 3 − 4) ∪ (1)  =  35 ∪ 1  =  36 unique tid
+  预期: retry unique=36, duplicate=0, terminal KEEP∩=0, manual final∩=0。
+  计数必须由真实输入推导, 不硬编码 (上传配置变化自动重算)。
 
 核对 (407):
-  3 terminal KEEP + 2 manual final + 38 retry + 364 clean changed/QA = 407
-authoritative TITLE = 404; manual pretranslated = 2; model retry = 38; terminal KEEP = 3。
+  3 terminal KEEP + 4 manual final + 36 retry + 364 clean changed/QA = 407
+authoritative TITLE = 404; manual pretranslated = 4; model retry = 36; terminal KEEP = 3。
 
 不会仅凭 underscore/camelCase 判 PACK_TITLE technical KEEP (用户禁止)。
-manual final 2 条绝不回 model workset。
+manual final 4 条绝不回 model workset。
 
 输入 (真实 A/D 证据文件由 diag_title_qa.py --a-out/--d-out 自动生成, 不手工构造):
   --done <done_csv>              draft done (407 行)
@@ -94,7 +97,7 @@ def main():
     missing = retry_ids - set(done_by.keys())
     total = len(retry_ids)
 
-    # 期望: retry=38, KEEP=3, MANUAL=2, clean changed/QA=364
+    # 期望由真实输入推导 (非硬编码): KEEP / MANUAL / retry / clean 之和 == done 行数
     clean_changed = len(done) - len(KEEP) - len(MANUAL) - total
     sanity = len(KEEP) + len(MANUAL) + total + clean_changed
 
@@ -110,10 +113,10 @@ def main():
     print(f"clean changed / QA = {clean_changed}")
     print(f"核对 KEEP{len(KEEP)} + MANUAL{len(MANUAL)} + retry{total} + clean{clean_changed} = {sanity} (done rows={len(done)})")
 
-    ok = (total == 38 and dup == 0 and len(keep_inter) == 0 and len(manual_inter) == 0
-          and len(missing) == 0 and len(KEEP) == 3 and len(MANUAL) == 2 and sanity == len(done))
-    print(f"INVARIANT retry==38 / dup==0 / KEEP∩==0 / MANUAL∩==0 / 407核对: "
-          f"{'PASS' if ok else 'FAIL'}")
+    ok = (dup == 0 and len(keep_inter) == 0 and len(manual_inter) == 0
+          and len(missing) == 0 and sanity == len(done))
+    print(f"INVARIANT dup==0 / KEEP∩retry==0 / MANUAL∩retry==0 / 全部 retry 在 done 中 / "
+          f"KEEP+MANUAL+retry+clean==done 核对: {'PASS' if ok else 'FAIL'}")
 
     rows_out = []
     for tid in sorted(retry_ids):
@@ -131,7 +134,7 @@ def main():
     with open(a.out, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["translation_id", "source_text", "retry_reason"])
         w.writeheader(); w.writerows(rows_out)
-    print(f"[写出] {a.out}  ({len(rows_out)} 行 retry, 不含 3 KEEP / 2 manual final)")
+    print(f"[写出] {a.out}  ({len(rows_out)} 行 retry, 不含 {len(KEEP)} KEEP / {len(MANUAL)} manual final)")
     return 0 if ok else 1
 
 

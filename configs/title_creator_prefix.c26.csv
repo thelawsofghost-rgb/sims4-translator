@@ -1,0 +1,13 @@
+translation_id,source_marker,protected_prefix,creator,reason
+PROT_001,simmer_creator,(simmer_creator),simmer_creator,PACK_TITLE creator token 保护: (simmer_creator) 是作者/占位标识, 送模型无语义, echo 假阳性
+PROT_002,UNI,(UNI),UNI,PACK_TITLE creator token 保护: (UNI) 作者标识, 非玩家可见独立语义
+PROT_003,xLienaEnna,xLienaEnna,Jarride]xLienaEnna,PACK_TITLE creator token 保护: ]xLienaEnna 拼进方括号后的作者名 (方括号已prot), 仅保护作者token本身
+PROT_004,Siimplysims,Siimplysims,Siimplysims,PACK_TITLE creator token 保护: Siimplysims 作者前缀 (连字符含于前缀)
+PROT_005,Loulicorn,Loulicorn,Loulicorn,PACK_TITLE creator token 保护: Loulicorn 作者前缀
+PROT_006,Grownasssimmer,Grownasssimmer,Grownasssimmer,PACK_TITLE creator token 保护: Grownasssimmer 作者前缀 (含 Kaley 变体, 见 PROT_007)
+PROT_007,Grownasssimmer Kaley,Grownasssimmer Kaley,Grownasssimmer Kaley,PACK_TITLE creator token 保护: Grownasssimmer Kaley 双词作者前缀
+PROT_008,NA_,NA_,NA_,PACK_TITLE creator token 保护: NA_ 作者/标识前缀 (下划线限于该已知token, 非同一般下划线启发式)
+PROT_009,Acha,Acha,Acha,PACK_TITLE creator token 保护: Acha 作者前缀
+PROT_010,RosieSimsie,RosieSimsie,RosieSimsie,PACK_TITLE creator token 保护: RosieSimsie 作者前缀 (NSFW 包)
+PROT_011,motherlode,motherlode,motherlode,PACK_TITLE creator token 保护: motherlode 作者前缀
+PROT_012,simonly,simonly,simonly,PACK_TITLE creator token 保护: simonly 作者前缀 (VixenPoster)
