@@ -586,6 +586,44 @@ QA/invariant 每批:
 白盒: Phase2B 直接吞 manifest (decision 缺省 TRANSLATE, detected 自动) 且不碰 frozen
   translations_todo.csv/translation_done.csv; 旧路径回归 69/69 不受影响。
 
+== TITLE 407 reconciliation + retry manifest + completion gate 修复 (2026-08-15) ==
+真实统计 (Windows 运行) + 用户裁决:
+  A SAME_AS_SOURCE_SEMANTIC = 37
+  B SAME_AS_SOURCE_NONSEMANTIC candidate = 5
+  C TRANSLATED = 365
+  D unresolved cache-miss phrase = 5   (D∩A=4, D−A=1, A∪D=38)
+  engine run failed=8, 但 cache 重建仅确定 5 unresolved; 另 3 未经解释, 不声称已解决。
+  后续翻译运行必须直接持久化 failed_phrase 明细, 不再靠 cache 反推。
+
+B 类 5 条人工裁决 (output/title_terminal_keep.csv + title_manual_translate.csv):
+  T_4735a1455d27_g1 simonly_VixenPoster#1          -> KEEP
+  T_a6c7c5d41cc4_g1 simonly_VixenPoster#2          -> KEEP
+  T_4dae944ecd3c_g1 simonly_VixenPoster#3          -> KEEP
+  T_84515fb8cf5f_g1 RosieSimsie_NSFW_CouplePoses_AllYours -> TRANSLATE manual = RosieSimsie_NSFW_情侣姿势_全属于你
+  T_df49e145de09_g1 motherlode_fight               -> TRANSLATE manual = motherlode_打斗
+  B→KEEP=3, B→TRANSLATE=2, REVIEW=0
+  禁止仅凭 underscore/camelCase 判 PACK_TITLE 为 technical KEEP。
+
+retry set (build_title_retry.py):
+  retry = (A∪D) ∪ B→TRANSLATE = 38 + 2 = 40 unique tid, 3 个 B→KEEP 不进 retry。
+  白盒: retry unique=40, dup=0, terminal KEEP∩=0, 不在 done=0  -> PASS。
+
+completion gate 修复 (phase2b_translate.py, 2026-08-15):
+  对 authoritative TRANSLATE:
+    1) 任一 model-required semantic phrase unresolved/engine failed -> QA_FAIL/PENDING
+       (禁止原文 fallback 后仍 DONE)
+    2) semantic 最终译文 == semantic source (模型 echo / 缓存 echo) -> QA_FAIL/PENDING
+       (模型回显不叫成功, 不入 cache final)
+    3) 仅 protected/glossary/明确 non-semantic terminal evidence 才允许 unchanged DONE/KEEP
+  _on_done() 不再丢弃 [ERR/空/echo]: 失败 key 记入 fail_map -> completion gate + 持久化报告。
+  每运行新增持久化失败报告: output/translation_phrase_failures_<batch>.csv
+    (translation_id, segment_index, source_phrase, error)。白盒 9/9 PASS。
+  materialize_from_cache 路径同样堵 echo (缓存物化译文==原文且含 pending -> QA_FAIL)。
+
+production workset: 排除 3 个 terminal KEEP 后 407 -> 404 (不硬塞回 407)。
+Phase2B scope-at-load / authoritative / POLICY-CONFLICT 全保留。
+translation_done_batch_title.csv 仍为 draft, 禁止直接 merge。DESC 190 继续暂停。
+
 == TITLE 407 QA 统计口径修正 (2026-08-15) ==
 用户裁决: diag_title_qa 仅作证据采集器, 不自动 reconciliation, 不改 completion gate。
 统计口径改为正交双维度:

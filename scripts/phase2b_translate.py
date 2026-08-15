@@ -1162,6 +1162,7 @@ def main():
 
     # ---- 缓存感知翻译: fingerprint hit->复用(不调 Ollama); miss->调模型并立即写库 ----
     phrase_res = {}
+    phrase_failures = {}   # ck -> error (completion gate + 持久化失败报告用)
     cache = PhraseCache(out_dir, model=getattr(eng, "model", None))
     try:
         n_hit = n_miss = 0
@@ -1185,23 +1186,40 @@ def main():
             now = _t.strftime("%Y-%m-%d %H:%M:%S")
             # 每个成功 phrase 校验后立即 callback 写库 + commit (checkpoint/resume 根本);
             # 由引擎在每批完成时同步调用, 崩溃/重启用库内已落盘条目续跑。
+            # 失败 phrase (含模型 echo) 不入 cache, 记入 fail_map 供 completion gate + 持久化报告。
             committed = set()
+            fail_map = {}   # ck -> error 字符串 {completion gate 用; 也写持久化报告}
+            def _record_fail(ck, err):
+                nonlocal fail_map
+                if not err:
+                    return
+                if ck in committed or ck in fail_map:
+                    return
+                if ck not in phrase_map:
+                    return
+                fail_map[ck] = err
             def _on_done(ck, z):
                 if ck in committed:
                     return
                 if ck not in phrase_map:
                     return
-                z = str(z or "").strip()
+                z = normalize_model_output(str(z or "").strip())
+                tid, orig_key, src_phrase, fp, gh = phrase_map[ck]
+                # echo 保护: 模型返回 == 原文且 phrase 带可译 semantic token -> 记失败, 不缓存
+                if z and z == src_phrase:
+                    _record_fail(ck, "ECHO")
+                    return
                 if not z or z.startswith("[ERR"):
+                    _record_fail(ck, z or "EMPTY")
                     return
                 committed.add(ck)
-                tid, orig_key, src_phrase, fp, gh = phrase_map[ck]
                 cache.put(
                     fingerprint=fp, translation_id=tid, segment_index=int(orig_key),
                     source_phrase=src_phrase, source_hash=source_hash(src_phrase),
                     translation=z, now=now)
                 phrase_res.setdefault(tid, {})[orig_key] = z
 
+            raw = {}
             if hasattr(eng, "translate_batch"):
                 try:
                     raw = eng.translate_batch(
@@ -1209,14 +1227,41 @@ def main():
                 except TypeError:
                     # 老接口 (FakeTranslator / NoopTranslator) 不接受 on_done: 退回后置补写
                     raw = eng.translate_batch(todo_items)
-                    for ck, out_txt in (raw or {}).items():
-                        _on_done(ck, out_txt)
+                    for ck, out_txt in (raw or {}).items(): _on_done(ck, out_txt)
             else:
                 raw = eng.translate_batch(todo_items)
-                for ck, out_txt in (raw or {}).items():
-                    _on_done(ck, out_txt)
+                for ck, out_txt in (raw or {}).items(): _on_done(ck, out_txt)
+            # 引擎返回值里未被 _on_done 采纳的 [ERR/空/echo] → 统一记入 fail_map (持久化失败明细)
+            for ck, out_txt in (raw or {}).items():
+                if ck not in phrase_map:
+                    continue
+                if ck in committed:
+                    continue
+                z = normalize_model_output(str(out_txt or "").strip())
+                tid, orig_key, src_phrase, fp, gh = phrase_map[ck]
+                if z and z == src_phrase:
+                    _record_fail(ck, "ECHO")
+                elif (not z) or z.startswith("[ERR"):
+                    _record_fail(ck, z or "EMPTY")
             print("[翻译] 完成。")
-        print(f"[缓存] 本轮: hit={n_hit} miss={n_miss} 库总条数={cache.count()}")
+            # 持久化失败报告 (本次运行独立文件, 不靠 cache 反推)
+            if fail_map:
+                _batch_label = DONE.stem
+                if _batch_label.startswith("translation_done_"):
+                    _batch_label = _batch_label[len("translation_done_"):]
+                fail_path = out_dir / f"translation_phrase_failures_{_batch_label or 'default'}.csv"
+                with open(fail_path, "w", encoding="utf-8-sig", newline="") as _f:
+                    _w = csv.writer(_f)
+                    _w.writerow(["translation_id", "segment_index", "source_phrase", "error"])
+                    for ck, err in sorted(fail_map.items()):
+                        tid, orig_key, src_phrase, fp, gh = phrase_map[ck]
+                        _w.writerow([tid, orig_key, src_phrase, err])
+                print(f"[失败报告] 持久化 {len(fail_map)} 个 unresolved failed phrase -> {fail_path}")
+            else:
+                print("[失败报告] 本运行 0 个 unresolved failed phrase")
+            # 把 fail_map 暴露给 completion gate
+            phrase_failures.update(fail_map)
+            print(f"[缓存] 本轮: hit={n_hit} miss={n_miss} 库总条数={cache.count()}")
     except Exception:
         cache.close()
         raise
@@ -1247,10 +1292,30 @@ def main():
                 resolved.update(phrase_res.get(r.get("translation_id"), {}))
                 translation = rebuild(j["segs"], resolved)
                 translation = restore_protected(j["segs"], translation)
-                if any(v.startswith("[ERR") for v in resolved.values()):
-                    status = "PENDING"
+                # ===== completion gate (2026-08-15 裁决) =====
+                # 1) 任一 model-required phrase unresolved/engine failed -> QA_FAIL/PENDING,
+                #    禁止原文 fallback 后仍 DONE。
+                # 2) semantic 最终译文 == semantic source (模型 echo / 缓存 echo) -> QA_FAIL/PENDING,
+                #    模型回显/未变化不叫成功。
+                # 3) 仅 protected/glossary/明确 non-semantic terminal evidence 才允许 unchanged DONE/KEEP。
+                # 判断该行是否有任何 model-required pending phrase 落入 fail_map
+                row_has_failed_phrase = any(
+                    f"{r.get('translation_id')}:::{p['key']}" in phrase_failures
+                    for p in j["pending"]
+                )
+                if row_has_failed_phrase:
+                    status = "QA_FAIL"
                 elif translation.strip():
-                    status = "DONE"
+                    # 有译文
+                    if translation.strip() == text.strip():
+                        # 译文==原文: 有 pending phrase 则说明 semantic 未译(echo) -> QA_FAIL;
+                        # 无 pending(全 glossary/protected) 且 terminal 合法 -> DONE
+                        if j["pending"]:
+                            status = "QA_FAIL"
+                        else:
+                            status = "DONE"
+                    else:
+                        status = "DONE"
                 else:
                     status = "PENDING"
             else:
@@ -1259,6 +1324,12 @@ def main():
                 if translation is None:
                     translation = ""
                     status = "PENDING"
+                elif status == "DONE" and mode in ("PARTIAL_TRANSLATE", "FULL_TRANSLATE"):
+                    # echo 保护: 缓存物化后译文==原文且该行有可译 semantic -> 判定 QA_FAIL
+                    # (旧 buggy 运行可能把 echo 写进 cache; 不能因 cache 有值就标 DONE)
+                    _chg = translation.strip() and translation.strip() == text.strip()
+                    if _chg:
+                        status = "QA_FAIL"
             psp = protected_spans(text) if mode == "PARTIAL_TRANSLATE" else ""
             done_rows.append({
                 "translation_id": r.get("translation_id"),
