@@ -33,11 +33,16 @@ content-QA 闸门 (用户裁决 2026-08-15, fail-closed):
   (打印 TEST 标记并跳过 content-QA 闸门)。production 默认必须 fail-closed,
   绝不因缺少 candidate 而允许静默放行。
 
+  --corr <correction layer csv> (configs/desc_content_corrections.c26.csv, 37):
+    独立 content-QA correction layer, 修正 DONE173 内 REVIEW_CANDIDATE 的错译;
+    不改旧 desc manual15 / KEEP2。precedence: manual > corr > keep > accepted DONE。
+    corr 只能指向 done status=DONE 的 accepted-model tid; 与 manual/keep 互斥。
+
 终态分配 (唯一定, 由真实输入推导, 不硬编码):
-  2 terminal KEEP + 15 manual final + 173 accepted model DONE = 190
-  最终必须报告: rows=190 uniqueTid=190 KEEP=2 MANUAL_FINAL=15 ACCEPTED_MODEL=173
-    QA_FAIL=0 PENDING=0 REVIEW=0 empty translation=0 duplicate=0 source mismatch=0
-    核对 2+15+173=190 PASS
+  2 terminal KEEP + 15 manual final + 37 correction + 136 accepted model DONE = 190
+  最终必须报告: rows=190 uniqueTid=190 KEEP=2 MANUAL_FINAL=15 CORRECTION=37
+    ACCEPTED_MODEL=136 QA_FAIL=0 PENDING=0 REVIEW=0 empty=0 duplicate=0 source mismatch=0
+    核对 2+15+37+136=190 PASS
 
 HARD-FAIL (source mismatch / duplicate tid / 不明覆盖):
   - 任一 tid 在输出中重复                     -> FAIL
@@ -79,7 +84,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--done", required=True, help="DESC run done CSV (190 行: 173 DONE + 17 QA_FAIL)")
     ap.add_argument("--keep", required=True, help="DESC terminal KEEP CSV (2)")
-    ap.add_argument("--transl", required=True, help="DESC manual final TRANSLATE CSV (15)")
+    ap.add_argument("--transl", required=True, help="DESC manual final TRANSLATE CSV (15, QA_FAIL 裁决)")
+    ap.add_argument("--corr", default=None,
+                    help="DESC content-qa correction layer CSV (configs/desc_content_corrections.c26.csv, 37)")
     ap.add_argument("--qa-candidates", default=None,
                     help="content QA 的 REVIEW_CANDIDATE csv (production 必填, fail-closed 于脚本内强制)")
     ap.add_argument("--qa-allowlist", default=None,
@@ -94,6 +101,7 @@ def main():
     done = _read(a.done, required=("translation_id", "source_text", "status"))
     keep = _read(a.keep, required=("translation_id", "source_text"))
     transl = _read(a.transl, required=("translation_id", "source_text", "translation"))
+    corr = _read(a.corr, required=("translation_id", "source_text", "translation")) if a.corr else []
 
     dfail = []
 
@@ -127,30 +135,43 @@ def main():
         if tid in keep_by:
             fail(f"keep duplicate tid: {tid}")
         keep_by[tid] = r
+    corr_by = {}
+    for r in corr:
+        tid = _u(r.get("translation_id"))
+        if tid in corr_by:
+            fail(f"corr duplicate tid: {tid}")
+        corr_by[tid] = r
     man_tids = set(man_by)
     keep_tids = set(keep_by)
+    corr_tids = set(corr_by)
 
-    # ---- 悬空终态: manual/keep tid 不在 done ----
-    dangling = sorted((man_tids | keep_tids) - done_tids)
+    # ---- 悬空终态: manual/keep/corr tid 不在 done ----
+    dangling = sorted((man_tids | keep_tids | corr_tids) - done_tids)
     if dangling:
-        fail(f"manual/keep tid 不在 done (悬空终态): {dangling}")
+        fail(f"manual/keep/corr tid 不在 done (悬空终态): {dangling}")
 
     # ---- 未裁决 QA_FAIL: done QA_FAIL tid 不在 manual|keep ----
     unresolved_qa = sorted(set(qa_fail_tids) - man_tids - keep_tids)
     if unresolved_qa:
         fail(f"done QA_FAIL tid 未被 manual|keep 裁决: {unresolved_qa}")
 
-    # ---- manual ∩ keep 冲突 ----
-    conflict = sorted(man_tids & keep_tids)
+    # ---- manual ∩ keep / manual ∩ corr / keep ∩ corr 冲突 ----
+    conflict = sorted((man_tids & keep_tids) | (man_tids & corr_tids) | (keep_tids & corr_tids))
     if conflict:
-        fail(f"manual ∩ keep 冲突 tid: {conflict}")
+        fail(f"manual/keep/corr 相互冲突 tid: {conflict}")
 
-    # ---- source mismatch (done vs manual/keep) ----
-    for tid in man_tids | keep_tids:
+    # ---- corr 只能指向 DONE (非 QA_FAIL) 的 accepted-model tid ----
+    corr_not_done = sorted(t for t in corr_tids if done_status.get(t) != "DONE")
+    if corr_not_done:
+        fail(f"corr tid 的 done status != DONE (correction 只能修正已接受模型): {corr_not_done}")
+
+    # ---- source mismatch (done vs manual/keep/corr) ----
+    for tid in man_tids | keep_tids | corr_tids:
         if tid not in done_by:
             continue
         d_src = _norm(done_by[tid].get("source_text"))
-        src = _norm((man_by.get(tid) or keep_by.get(tid) or {}).get("source_text"))
+        cfg = (man_by.get(tid) or keep_by.get(tid) or corr_by.get(tid) or {})
+        src = _norm(cfg.get("source_text"))
         if d_src != src:
             fail(f"source mismatch: {tid} done={done_by[tid].get('source_text')!r} "
                  f"config={src!r}")
@@ -191,14 +212,17 @@ def main():
         if a.allow_zero_candidates and not cand_tids:
             print("  [content-qa] 无 suspicious candidate (allow-zero-candidates), resolve 通过。")
         else:
-            unresolved_content_review = sorted(cand_tids - allow_tids)
+            # corrected (corr layer) 亦视为已 resolve; 剩余需在 allowlist
+            resolved_extra = allow_tids | corr_tids
+            unresolved_content_review = sorted(cand_tids - resolved_extra)
             if unresolved_content_review:
                 fail(f"unresolved_content_review > 0: {unresolved_content_review} "
                      f"(content-QA suspicious 未 resolve, 禁止记 ACCEPTED_MODEL)")
             else:
-                print(f"  [content-qa] 全部 {len(cand_tids)} 个 suspicious candidate 已 resolve (allowlist)。")
+                print(f"  [content-qa] 全部 {len(cand_tids)} 个 suspicious candidate 已 resolve "
+                      f"(corr {len(corr_tids & cand_tids)} + allowlist {len(allow_tids & cand_tids)})")
 
-    # ---- 组装终态 (precedence: manual > keep > accepted DONE) ----
+    # ---- 组装终态 (precedence: manual > corr > keep > accepted DONE) ----
     origin = {}
     rows = []
     for tid in sorted(done_tids):
@@ -207,6 +231,11 @@ def main():
             tr = man_by[tid].get("translation") or ""
             rows.append({"translation_id": tid, "source_text": done_by[tid].get("source_text"),
                          "translation": tr, "status": "DONE", "origin": "MANUAL_FINAL"})
+        elif tid in corr_by:
+            origin[tid] = "CORRECTION"
+            tr = corr_by[tid].get("translation") or ""
+            rows.append({"translation_id": tid, "source_text": done_by[tid].get("source_text"),
+                         "translation": tr, "status": "DONE", "origin": "CORRECTION"})
         elif tid in keep_by:
             origin[tid] = "KEEP"
             rows.append({"translation_id": tid, "source_text": done_by[tid].get("source_text"),
@@ -226,6 +255,7 @@ def main():
     n_uniq = len({r["translation_id"] for r in rows})
     n_keep = sum(1 for r in rows if r["origin"] == "KEEP")
     n_man = sum(1 for r in rows if r["origin"] == "MANUAL_FINAL")
+    n_corr = sum(1 for r in rows if r["origin"] == "CORRECTION")
     n_acc = sum(1 for r in rows if r["origin"] == "ACCEPTED_MODEL")
     n_qa = sum(1 for r in rows if r["status"] == "QA_FAIL")
     n_pending = sum(1 for r in rows if r["status"] == "PENDING")
@@ -241,6 +271,7 @@ def main():
     print(f"uniqueTid                 = {n_uniq}")
     print(f"terminal KEEP             = {n_keep}")
     print(f"MANUAL_FINAL              = {n_man}")
+    print(f"CORRECTION                = {n_corr}")
     print(f"ACCEPTED_MODEL            = {n_acc}")
     print(f"QA_FAIL                   = {n_qa}")
     print(f"PENDING                   = {n_pending}")
@@ -249,14 +280,15 @@ def main():
     print(f"duplicate                 = {n_dup}")
     print(f"source mismatch           = {len([m for m in dfail if m.startswith('source mismatch')])}")
     print(f"unresolved_content_review = {len([m for m in dfail if m.startswith('unresolved_content_review')])}")
-    sumok = (n_keep + n_man + n_acc == n_rows)
-    print(f"核对 {n_keep}+{n_man}+{n_acc} = {n_keep + n_man + n_acc}  (rows={n_rows})  {'PASS' if sumok else 'FAIL'}")
+    sumok = (n_keep + n_man + n_corr + n_acc == n_rows)
+    print(f"核对 {n_keep}+{n_man}+{n_corr}+{n_acc} = {n_keep + n_man + n_corr + n_acc}  (rows={n_rows})  {'PASS' if sumok else 'FAIL'}")
 
     unresolved_review = any(m.startswith("unresolved_content_review") for m in dfail)
     ok = (n_rows == 190 and n_uniq == 190 and n_keep == 2 and n_man == 15
-          and n_acc == 173 and n_qa == 0 and n_pending == 0 and n_review == 0
+          and n_corr == 37 and n_acc == 136 and n_qa == 0 and n_pending == 0 and n_review == 0
           and n_empty == 0 and n_dup == 0 and not unresolved_review and not dfail and sumok)
-    print(f"FINAL_HARD_GATE: {'PASS' if ok else 'FAIL'}  (期望 rows=190 uniq=190 KEEP=2 MANUAL=15 ACCEPTED=173 QA/PENDING/REVIEW=0)")
+    print(f"FINAL_HARD_GATE: {'PASS' if ok else 'FAIL'}  "
+          f"(期望 rows=190 uniq=190 KEEP=2 MANUAL=15 CORR=37 ACCEPTED=136 QA/PENDING/REVIEW=0)")
 
     if dfail:
         print("\n[HARD-FAIL 明细]:")

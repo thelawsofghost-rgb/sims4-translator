@@ -1003,3 +1003,27 @@ gate C — DESC 两层接进 production overlay:
     两者都有 + 全 resolve                       -> PASS 190=2+15+173
     candidate 未 resolve                        -> FAIL unresolved_content_review>0 EXIT=1
   不再 build DESC final, 等 Windows 真实 173 DONE content QA 人工复核完成后再跑。
+
+---
+== PACK_DESCRIPTION 190: DESC content-qa 人工裁决 + correction layer (2026-08-15) ==
+
+Windows 上真实 173 DONE content QA -> 81 REVIEW_CANDIDATE:
+  37 MANUAL_CORRECTION (新独立 correction layer)
+  44 ALLOWLIST (人工复核 OK, 译文保持不变)
+  0  UNRESOLVED
+新增独立 correction layer, 不修改旧 desc manual15 / KEEP2:
+  configs/desc_content_corrections.c26.csv (37 行, action=TRANSLATE)
+  tid 与 desc manual15 / KEEP2 全 disjoint; 只修正 DONE173 内的 accepted-model 错译。
+build_desc_final.py 消费 --corr <correction layer>:
+  precedence: manual > corr > keep > accepted DONE
+  新 origin CORRECTION + 计数: 190 = 2 KEEP + 15 MANUAL + 37 CORR + 136 ACCEPTED
+  content-QA gate: unresolved = candidates - (allowlist ∪ corr_tids)
+  校验: corr 只能指向 done status=DONE; corr 与 manual/keep 互斥; corr 悬空 -> FAIL
+测试矩阵 (realistic done190):
+  A) corr37+allow44 全 resolve       -> PASS 190=2+15+37+136
+  B) 缺 --corr                       -> FAIL (ACCEPTED=173 非 136)
+  C) candidate 未 resolve (5 个)      -> FAIL unresolved_content_review>0
+  D) corr 悬空 GHOST_TID             -> FAIL 悬空终态
+回归 135 PASS / 0 FAIL。
+说明: 37 条修正译文中的 6 条 (redheadsims / natalia auditore / TheSerenadeOfShadows /
+  Moc / Kaley / Natalia Auditore) 含创作者专名, 属结构受保护类, 为人类定稿, 保留原文正确。
