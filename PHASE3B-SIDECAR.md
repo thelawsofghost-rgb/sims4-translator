@@ -1048,3 +1048,60 @@ C. precedence 只是实现细节: manual ∩ corr / manual ∩ keep / corr ∩ k
 D. provenance 固定: KEEP=2 MANUAL_QA_FAIL=15 CONTENT_CORRECTION=37 ACCEPTED_MODEL=136
    total=190; content QA candidates=81 resolved_by_correction=37 resolved_by_allowlist=44
    unresolved=0。
+
+## 🚀 Phase 3B2 run2 — cohort sidecar (resolver/production-input preflight 先行)
+
+**冻结终态 (2026-08-15, 真实 Windows FINAL_HARD_GATE PASS, 不再改除非真实游戏证据):**
+  - `output/translation_done_title_final.csv` = 407
+  - `output/translation_done_desc_final.csv`  = 190
+  - `output/translation_overrides.production.csv` = 217  (derived overlay, 层全 disjoint)
+
+**run2 resolver 必须只用这 3 份 production final 作生产终态源。**
+禁止作为 production final source (只能作历史证据/缓存, 不能覆盖 final):
+  `translation_done_batch_title.csv` / `translation_done_batch_title_retry.csv`
+  / `translation_done_batch_title_retry_v2.csv` / `translation_done_batch_desc.csv`
+  / `translation_cache.db`
+
+**新增 `scripts/production_resolver.py`** (`ProductionResolver`, fail-closed):
+  - 载入 3 production final: schema 缺列 / 文件不存在 / 0 行 / 行数 != 冻结值(407/190/217)
+    -> HARD-FAIL (启动即 FAIL)。
+  - **禁止源黑名单**: 若把 batch/retry/desc-done/cache 文件名当 production source 传入
+    -> HARD-FAIL。
+  - **多源一致性**: 同一 `(tid,norm_source)` 出现在 ≥2 个 production source 时,
+    action 类别 (TRANSLATE vs KEEP 互斥) 与 translation 必须一致; 任何不一致
+    -> HARD-FAIL (绝不"后加载覆盖前加载"解决)。白盒: 跨源译文不一致 / action 冲突
+    均已拦截。
+  - `resolve(source_text)` 优先级: production terminal override(overlay) -> final TITLE
+    -> final DESCRIPTION -> 旧 frozen catalog terminal; 仅当 key 只在单一源出现时生效
+    (多源出现已被一致性校验保证)。
+  - resolve tag: KEEP(合法不译) / TRANSLATE / SOURCE_MISMATCH(fail-fast) / MISSING(fail-fast)。
+
+**新增 `scripts/run2_preflight.py`** (零写 preflight, 不建 package / 不改 Mods / 不写 sidecar):
+  - 报告: cohort packages=10 / real source paths=10 / missing paths=0;
+    每包 approved / KEEP / TRANSLATE / unresolved / source mismatch / duplicate KeyHash gate
+    / exact existing CHS TGI gate; 聚合 unresolved=0 / source mismatch=0 / policy conflict=0
+    / duplicate target skipped as frozen rule。
+  - **run1 9 MISSING 消除证明**: `--run1-missing <file>` 列出 run1 MISSING tid, 逐一必须
+    已被当前 production final resolver 覆盖 (出现在 final key 集); 任一未覆盖 -> HARD-FAIL,
+    证明是 resolver 消除而非 writer 层绕过。
+  - 负例: approved 缺译文(unresolved>0) / banned source / stale 非空 out-dir ->
+    FAIL/HARD-FAIL (rc=2)。
+  - `--report <path>` 显式写纯文本报告 (缺省 stdout)。
+
+**`gen_cohort_sidecars.py` 新增 run2 模式** (向后兼容 run1):
+  - `--run2` + `--title-final/--desc-final/--production-overlay` (+可选 `--catalog-final`
+    / `--run1-missing`) -> 用 ProductionResolver。
+  - `--preflight-only` -> 零写跑 run2_preflight, 不建 out-dir / 不生成 / 不改 Mods。
+  - writer 不变 (仍 SidecarBuilder.exe 安全版), 每个 sidecar 仍满足:
+    one resource only / exact existing CHS TGI / complete STBL clone / approved values only
+    / no add-delete-reorder flags / reopen+verify / 独立 audit_canary_pair AUDIT=PASS。
+
+**白盒验证 (本机, 合成 10 包 ELIGIBLE_EXISTING_CHS):**
+  - 全 TRANSLATE: preflight PASS 10/10, approved=50, TRANSLATE=50, unresolved=0, rc=0。
+  - KEEP 路径: 仅 overlay 持 Left/Right/Kiss=KEEP (跨源一致) -> PASS, KEEP=30 TRANSLATE=20,
+    10/10。KEEP 不误报 missing。
+  - 负例: resolved 缺3/23 -> FAIL rc=2; banned batch 作 source -> HARD-FAIL rc=2;
+    跨源译文/action 不一致 -> HARD-FAIL; stale out-dir -> HARD-FAIL rc=2;
+    run1-missing 未消除 -> HARD-FAIL rc=2; run1 缺 --overrides 仍拦。
+  - `--run2 --preflight-only` 端到端 PASS 且未建 out-dir (零写真证)。
+  - 回归 135 PASS / 0 FAIL。

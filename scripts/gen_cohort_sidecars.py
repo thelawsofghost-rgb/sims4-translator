@@ -469,7 +469,15 @@ def main():
     ap.add_argument("--cohort", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--writer", required=True)
-    ap.add_argument("--overrides", required=True)
+    ap.add_argument("--run2", action="store_true",
+                    help="run2 生产模式: 用 3 个 frozen production final 作 resolver 源")
+    ap.add_argument("--preflight-only", action="store_true", help="只做 resolver/production preflight, 零写不生成")
+    ap.add_argument("--title-final", default="")
+    ap.add_argument("--desc-final", default="")
+    ap.add_argument("--production-overlay", default="")
+    ap.add_argument("--catalog-final", default="")
+    ap.add_argument("--run1-missing", default="")
+    ap.add_argument("--overrides", default="")
     ap.add_argument("--done", default="")
     ap.add_argument("--cache", default="")
     a = ap.parse_args()
@@ -478,20 +486,56 @@ def main():
     out_dir = Path(a.out_dir)
 
     # ---- 0) 强 preflight: asset 加载失败/0行/schema 不兼容 -> 启动即 FAIL (不建 out-dir) ----
+    from production_resolver import make_production_resolver
     try:
-        resolver = TranslationResolver(a.overrides, a.done, a.cache)
+        if a.run2:
+            if not (a.title_final and a.desc_final and a.production_overlay):
+                raise RuntimeError("run2 模式必须给 --title-final/--desc-final/--production-overlay")
+            resolver = make_production_resolver(
+                a.title_final, a.desc_final, a.production_overlay,
+                catalog=a.catalog_final or None)
+            print(f"[assets run2] title_final({len(resolver.title)}) desc_final({len(resolver.desc)}) "
+                  f"overlay({len(resolver.overlay)})" +
+                  (f" catalog({len(resolver.catalog)})" if resolver.catalog else ""))
+            print(f"[assets run2] 一致性冲突 = {len(resolver.consistency_errors)}")
+        else:
+            if not a.overrides:
+                raise RuntimeError("非 run2 模式必须给 --overrides")
+            resolver = TranslationResolver(a.overrides, a.done, a.cache)
+            print(f"[assets] overrides: {resolver.overrides_loaded}/{resolver.overrides_total_rows} 行; "
+                  f"done: {resolver.done_loaded}/{resolver.done_total_rows} 行; "
+                  f"cache_db: {'载入' if resolver.cache_db else '未传/不存在'}")
     except RuntimeError as ex:
         print(f"[PREFLIGHT-FAIL] {ex}")
         return 2
-    print(f"[assets] overrides: {resolver.overrides_loaded}/{resolver.overrides_total_rows} 行; "
-          f"done: {resolver.done_loaded}/{resolver.done_total_rows} 行; "
-          f"cache_db: {'载入' if resolver.cache_db else '未传/不存在'}")
 
     # ---- 1) 防 stale: 目标 out-dir 已存在且非空 -> refuse / fail-fast (不自动删旧文件) ----
     if out_dir.exists() and any(out_dir.iterdir()):
         print(f"[FAIL-FAST] 目标 out-dir 非空: {out_dir}")
         print("   已存在文件/子目录, refuse —— 不会自动删除。请手动清空或换 --out-dir 后重试。")
         return 2
+
+    # ---- 1b) run2 preflight-only: 零写跑 per-package 预检, 不建 out-dir / 不生成 ----
+    if a.preflight_only:
+        import run2_preflight as RP
+        sys.argv = [sys.argv[0],
+                    "--cohort", a.cohort,
+                    "--title-final", a.title_final,
+                    "--desc-final", a.desc_final,
+                    "--production-overlay", a.production_overlay]
+        if a.catalog_final:
+            sys.argv += ["--catalog", a.catalog_final]
+        if a.run1_missing:
+            sys.argv += ["--run1-missing", a.run1_missing]
+        if out_dir.exists():
+            sys.argv += ["--out-dir", str(out_dir)]
+        rc = RP.main()
+        if rc == 0:
+            print("\n[preflight-only] PREFLIGHT PASS — 未生成任何 sidecar / 未建 out-dir (零写)。")
+        else:
+            print("\n[preflight-only] PREFLIGHT FAIL — 不生成 sidecar。")
+        return rc
+
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
