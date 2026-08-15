@@ -45,7 +45,7 @@ KEEP-only package -> outcome = PASS_NOOP_KEEP_ONLY (允许, 但 preflight 阶段
   output/production_preflight_441_report.md  汇总
   (目标已存在 -> rc=1 refuse, --force 覆盖)
 """
-import sys, os, csv
+import sys, os, csv, re, ast
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -53,6 +53,56 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from production_resolver import make_production_resolver, EXPECTED_ROWS
 from gen_cohort_sidecars import approved_pv_refs, resolve_all_approved
+from phase2a_catalog import norm_text
+
+
+def _layer_441_overlay(resolver, path):
+    """把 441 专用 terminal overlay (241 无损复制 + 111 explicit) 作为最高优先级层
+    注入 resolver.overlay (layer composition, 不修改 ProductionResolver 类本身)。
+    返回 (added, keep_srcs, trans_srcs):
+      keep_srcs  : 441 KEEP 决策的 norm_text(src) 集合
+      trans_srcs : 441 TRANSLATE 决策的 norm_text(src) 集合
+    行非法/非 KEEP/TRANSLATE 且空 translation -> HARD-FAIL。"""
+    p = Path(path)
+    if not p.exists():
+        raise RuntimeError(f"preflight FAIL: --production-overlay-441 不存在: {p}")
+    added = 0
+    keep_srcs = set()
+    trans_srcs = set()
+    with open(p, encoding="utf-8-sig") as f:
+        rdr = csv.DictReader(f)
+        hdr = list(rdr.fieldnames or [])
+        for need in ("translation_id", "source_text", "translation", "action"):
+            if need not in hdr:
+                raise RuntimeError(f"preflight FAIL: 441 overlay 缺列 {need!r}; 实际列={hdr}")
+        for r in rdr:
+            tid = (r.get("translation_id") or "").strip()
+            src_text = (r.get("source_text") or "")
+            src = src_text.strip()
+            if not tid:
+                continue
+            act = (r.get("action") or r.get("status") or "").strip().upper()
+            tr = (r.get("translation") or "").strip()
+            nsrc = norm_text(src_text)
+            if act == "KEEP":
+                key = (tid, nsrc)
+                resolver.overlay[key] = {
+                    "translation": "", "status": "KEEP", "is_keep": True,
+                    "source_text": src_text, "from": "production_overlay_441"}
+                keep_srcs.add(nsrc)
+                added += 1
+            elif act == "TRANSLATE":
+                if not tr:
+                    raise RuntimeError(f"preflight FAIL: 441 overlay TRANSLATE 行空 translation: tid={tid} src={src_text!r}")
+                key = (tid, nsrc)
+                resolver.overlay[key] = {
+                    "translation": tr, "status": "TRANSLATE", "is_keep": False,
+                    "source_text": src_text, "from": "production_overlay_441"}
+                trans_srcs.add(nsrc)
+                added += 1
+            else:
+                raise RuntimeError(f"preflight FAIL: 441 overlay action 非法 {act!r} (tid={tid})")
+    return added, keep_srcs, trans_srcs
 
 _OUT_COLS = [
     "package_path",
@@ -89,6 +139,8 @@ def main():
     ap.add_argument("--desc-final", required=True, help="output/translation_done_desc_final.csv (190)")
     ap.add_argument("--production-overlay", required=True,
                     help="output/translation_overrides.production.csv (241)")
+    ap.add_argument("--production-overlay-441", default="",
+                    help="output/translation_overrides.production.441.csv (可选, 241无损+111 explicit, 最高优先级层)")
     ap.add_argument("--done", default="", help="output/translation_done.csv (historical final nonempty unique 1888)")
     ap.add_argument("--catalog", default="", help="output/translation_catalog.csv (decision/index only 3540)")
     ap.add_argument("--expect-eligible", type=int, default=441,
@@ -113,10 +165,17 @@ def main():
                    (a.catalog, "translation_catalog")]:
         if not Path(p).exists():
             print(f"[HARD-FAIL] {lab} 文件不存在: {p}"); return 3
+    if a.production_overlay_441 and not Path(a.production_overlay_441).exists():
+        print(f"[HARD-FAIL] production_overlay_441 文件不存在: {a.production_overlay_441}"); return 3
     try:
         resolver = make_production_resolver(
             a.title_final, a.desc_final, a.production_overlay,
             translation_done=a.done, translation_catalog=a.catalog)
+        layered441 = 0
+        keep441 = set()
+        trans441 = set()
+        if a.production_overlay_441:
+            layered441, keep441, trans441 = _layer_441_overlay(resolver, a.production_overlay_441)
     except RuntimeError as ex:
         print(str(ex)); return 2
 
@@ -169,7 +228,24 @@ def main():
 
         per["approved_ref_count"] = len(approved)
         agg["approved"] += len(approved)
+        # empty/whitespace-only source: ProductionResolver 恒返 MISSING; 只有 441 overlay 的
+        # KEEP_EMPTY_DISPLAY 决策 (按 norm_text(src) 匹配) 才能把它定为 KEEP, 否则算 unresolved。
         mods, keeps, errs2 = resolve_all_approved(approved, resolver, a.production_overlay)
+        # 由 441 overlay 冻结为 KEEP 的 unresolved (含空源) 转为 KEEP:
+        keep441_rescued = []
+        if keep441:
+            new_errs = []
+            for e in errs2:
+                m = re.search(r"key 0x([0-9A-Fa-f]+).*?source=('[^']*'|\"[^\"]*\")", e)
+                if m:
+                    kh = int(m.group(1), 16)
+                    src = ast.literal_eval(m.group(2)) if m.group(2).startswith(("'", '"')) else m.group(2)
+                    if norm_text(src) in keep441:
+                        keep441_rescued.append((kh, src))
+                        continue
+                new_errs.append(e)
+            errs2 = new_errs
+        keeps = keeps + keep441_rescued
         per["translate_count"] = len(mods); agg["translate"] += len(mods)
         per["keep_count"] = len(keeps); agg["keep"] += len(keeps)
         per["unresolved_count"] = len([e for e in errs2 if "缺译文/unresolved" in e])
@@ -220,6 +296,8 @@ def main():
     out.append("# 441 Production Preflight (zero-write)")
     out.append("")
     out.append(f"- coverage authority: {a.coverage}")
+    if a.production_overlay_441:
+        out.append(f"- 441 terminal overlay: {a.production_overlay_441} (注入 {layered441} 行最高优先级层)")
     out.append(f"- ELIGIBLE input/processed = {agg['processed']} / {agg['processed']}")
     out.append(f"- skipped unexpectedly    = {agg['skip']}")
     out.append(f"- ERROR                    = {agg['error']}")
