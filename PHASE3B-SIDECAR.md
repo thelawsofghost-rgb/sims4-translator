@@ -612,12 +612,39 @@ retry set (build_title_retry.py, 2026-08-15 修正口径):
   白盒: retry unique=38, dup=0, terminal KEEP∩=0, manual final∩=0, 407核对 PASS。
   manual final 2 条绝不回 model workset。
 
-TITLE 两层 reconciliation 下游可读 (merge_title_reconciliation.py, 白盒 PASS):
-  合并进 canonical output/translation_overrides.csv (幂等; 冲突 STOP 不写):
-    phase2b_translate.load_overrides()         -> 读 3 KEEP + 2 TRANSLATE 定稿 (不经模型)
-    c_extract/final_todo.load_terminal_keep_tids() -> 读 3 KEEP (排除 terminal)
-    audit_override_workset_conflicts()         -> 读 override 流
-  CLI: python scripts/merge_title_reconciliation.py <out_dir>
+TITLE 两层 reconciliation 下游可读 (2026-08-15 二次修正, 非破坏):
+  禁止修改 frozen output/translation_overrides.csv (22 条基线, byte/content 不变)。
+  新 derived 文件由 build_override_overlay.py 生成 (只读 frozen, 可 repeatable --overrides):
+    output/translation_overrides.production.csv
+      = frozen translation_overrides.csv(22)
+      + frozen translation_overrides.final2.csv(38, 完全 superset, 同 tid 值全相同 0 冲突)
+      + c26 pose KEEP (26)
+      + title terminal KEEP (3)  + title manual TRANSLATE (2)
+      = 最终 unique (tid,norm_source) = 69 (KEEP=33, TRANSLATE=36)
+  合并保证 (用户裁决): deterministic + 幂等;
+     同 (tid,norm_source) 不同 action/translation, 且**非** frozen<->final2 既有 precedence
+        -> HARD-FAIL (exit!=0, 不写);
+     同 tid 不同 source (source mismatch)          -> HARD-FAIL;
+     缺必需层 / 缺 source_text / action 非法         -> HARD-FAIL;
+     报告各 layer 行数 + 最终 unique 数;
+     frozen<->final2 为既有 precedence (final2 superset>frozen, 覆盖不算冲突)。
+  实测真实数据: frozen 22 ⊆ final2 38 (同 key 值全相同); TITLE 5 tid 均不在 final2;
+    poseKEEP 与 final2 0 同tid异值 -> 真实输出无 HARD-FAIL, unique=69 (KEEP=33,TRANSLATE=36)。
+  CLI: python scripts/build_override_overlay.py output [--extra <layer.csv> ...] [--no-write]
+  下游显式传 .production.csv 读取 (不是改 frozen)。
+
+A/D evidence 由 diag_title_qa 自动落盘 (不手工构造, 2026-08-15):
+  python scripts/diag_title_qa.py output --done <done> --also-failed \
+      --a-out output/title_A_tids.csv --d-out output/title_D_tids.csv
+  A 文件: translation_id, source_text        (A unique tid 硬=42)
+  D 文件: translation_id, source_text, segment_index, source_phrase (D unique=5)
+  built-in invariant 门: A=42 / D=5 / D∩A=4 / D−A=1, 不满足则拒绝 (不喂 retry)。
+  build_title_retry --a title_A_tids.csv --d title_D_tids.csv 直接消费 (不手工做)。
+
+TITLE 两层 reconciliation 下游可读 (原记录, merge_title_reconciliation 已废弃):
+  合并进 canonical output/translation_overrides.csv 的旧方案已替换为以上非破坏 overlay。
+  phase2b_translate.load_overrides() / c_extract+final_todo.load_terminal_keep_tids() /
+  conflict audit 改为从 .production.csv (显式 --overrides) 读取。
 
 completion gate 修复 (phase2b_translate.py, 2026-08-15):
   对 authoritative TRANSLATE:

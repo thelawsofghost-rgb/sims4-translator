@@ -25,7 +25,14 @@ B 的合法保持原文证据 (强证据, 旧 translate_mode_for() 不可靠, �
 
 用法:
   python diag_title_qa.py <out_dir> --done <done_csv> [--also-failed]
+        [--a-out output/title_A_tids.csv] [--d-out output/title_D_tids.csv]
 输出 A/B/C 计数+列表 与 D failed flag 明细。不写任何 decision 文件, 不 merge。
+
+--a-out / --d-out: (2026-08-15 新增) 从真实 done + cache 确定性落盘证据文件:
+  A 文件列: translation_id, source_text        (A unique tid 硬 invariant=42)
+  D 文件列: translation_id, source_text, segment_index, source_phrase
+            (D unique tid 硬 invariant=5; D∩A=4; D−A=1)
+  build_title_retry.py 直接消费这两个文件, 不手工构造。
 """
 import sys, os, csv, re, argparse
 from collections import Counter
@@ -98,6 +105,8 @@ def main():
     ap.add_argument("out_dir")
     ap.add_argument("--done", default=None)
     ap.add_argument("--also-failed", action="store_true")
+    ap.add_argument("--a-out", default=None, help="A evidence CSV 输出 (translation_id,source_text)")
+    ap.add_argument("--d-out", default=None, help="D evidence CSV 输出 (translation_id,source_text,segment_index,source_phrase)")
     a = ap.parse_args()
     out = a.out_dir
     done_path = a.done
@@ -192,6 +201,40 @@ def main():
             st = row_by_tid[tid].get("_state")
             for d in ds:
                 print(f"  {tid}  state={st}  seg={d['segment_index']}  phrase={d['source_phrase']!r}")
+
+    # ---- 2026-08-15: 确定性落盘 A / D 证据文件 (供 build_title_retry 消费) ----
+    if a.a_out or a.d_out:
+        a_unique = {r.get("translation_id") for r in A}
+        d_unique = {d["translation_id"] for d in D_failed}
+        print(f"\n=== 证据文件硬 invariant 校验 ===")
+        print(f"A unique tid = {len(a_unique)}   (期望 42)")
+        print(f"D unique tid = {len(d_unique)}   (期望 5)")
+        print(f"D∩A            = {len(d_unique & a_unique)}   (期望 4)")
+        print(f"D−A            = {len(d_unique - a_unique)}   (期望 1)")
+        ok_inv = (len(a_unique) == 42 and len(d_unique) == 5
+                  and len(d_unique & a_unique) == 4 and len(d_unique - a_unique) == 1)
+        print(f"证据硬 invariant: {'PASS' if ok_inv else 'FAIL'}")
+
+        if a.a_out:
+            rows_a = sorted(A, key=lambda r: r.get("translation_id") or "")
+            with open(a.a_out, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.writer(f); w.writerow(["translation_id", "source_text"])
+                for r in rows_a:
+                    w.writerow([r.get("translation_id"), r.get("source_text")])
+            print(f"[写出 A] {a.a_out}  ({len(rows_a)} 行, unique tid {len(a_unique)})")
+        if a.d_out:
+            rows_d = sorted(D_failed, key=lambda d: (d["translation_id"] or "", d["segment_index"] or ""))
+            with open(a.d_out, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["translation_id", "source_text", "segment_index", "source_phrase"])
+                for d in rows_d:
+                    w.writerow([d["translation_id"], d["source_text"],
+                                d["segment_index"], d["source_phrase"]])
+            print(f"[写出 D] {a.d_out}  ({len(rows_d)} 行, unique tid {len(d_unique)})")
+        if not ok_inv:
+            print("\n[FAIL] 证据硬 invariant 未通过, 请勿将 A/D 文件喂给 retry。")
+            return 1
+    return 0
 
 
 if __name__ == "__main__":

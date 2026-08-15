@@ -27,10 +27,10 @@ authoritative TITLE = 404; manual pretranslated = 2; model retry = 38; terminal 
 不会仅凭 underscore/camelCase 判 PACK_TITLE technical KEEP (用户禁止)。
 manual final 2 条绝不回 model workset。
 
-输入:
+输入 (真实 A/D 证据文件由 diag_title_qa.py --a-out/--d-out 自动生成, 不手工构造):
   --done <done_csv>              draft done (407 行)
-  --a <a_tids.csv>               列 translation_id 的 A 集合 (42)
-  --d <d_tids.csv>               列 translation_id 的 D unresolved 集合 (5)
+  --a <a_tids.csv>               列 translation_id 的 A 集合 (42, 来自 --a-out)
+  --d <d_tids.csv>               列 translation_id 的 D unresolved 集合 (5, 来自 --d-out)
   --keep <configs/title_terminal_keep.c26.csv>      3 terminal KEEP
   --transl <configs/title_manual_translate.c26.csv> 2 manual final TRANSLATE
   -o <out_retry.csv>
