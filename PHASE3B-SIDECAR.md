@@ -1429,3 +1429,37 @@ complete-clone / no-add 不变式绝不因 writer 自报 VERIFY=PASS 而放行�
 新增 `scripts/test_sidecar_audit_regression.py`: A(noop) / B(压缩源解压 + AUDIT_ERROR +
 no-add FAIL) / C(逗号冒号译文 PASS + malformed HARD-FAIL) 全绿 (13/13)。
 既有 `test_phase2b_regression.py` 135/0 保持 PASS。
+
+---
+
+## 🔍 run2 retry1 候选成品 —— manifest 驱动独立只读审计
+
+真实 run2 retry1 generation 结果 (用户确认):
+packages handled = 10 / generated sidecars = 9 / PASS_NOOP_KEEP_ONLY = 1 / failures = 0。
+`output/cohort_sidecars_run2_retry1` 为候选成品证据, 禁止删除/覆盖; 再次运行触发 FAIL-FAST refuse。
+
+新增 `scripts/independent_sidecar_audit.py`: manifest 驱动独立只读审计 (绝不重新 generation /
+不调 writer / 不写任何 package/sidecar/Mods)。
+
+驱动: manifest (10 slot / source / output / NOOP / 计数) +
+       production resolver 5 个冻结输入 (overlay/done/title/desc/catalog-final)。
+冷读 source + sidecar 各 9 个 (走 `audit_canary_pair.read_one_stbl` 的 canonical zlib 解压,
+不依赖 generation 内存结果), 每个实际 sidecar 独立断言:
+  R1 RESOURCE_COUNT == 1
+  R2 STBL_COUNT == 1
+  R3 sidecar TGI == source CHS TGI (type/group/instance 全等)
+  R4 SOURCE_ENTRIES == OUTPUT_ENTRIES (no add / no delete)
+  R5 changed set == TRANSLATE set: 每个 TRANSLATE 键真等于 production resolver 最终译文;
+     KEEP / unrelated (MISSING, 含 author/pack 元数据键) 必须保持 source 原文完全不变 (verbatim copy)
+  R6 duplicate key == 0
+  R7 parse/audit error == 0
+slot NOOP (PASS_NOOP_KEEP_ONLY) 单独验证:
+  N1 writer_verify=PASS_NOOP_KEEP_ONLY / N2 manifest.output_sidecar 空 /
+  N3 磁盘无该 slot sidecar (actual=none) / N4 无任何源 key 解析到 TRANSLATE 终态 (合法 NOOP)
+aggregate: manifest packages=10 / generated=9 / NOOP=1 / sidecar audit PASS=9 FAIL=0 ERROR=0 /
+           stray/unmanifested .package=0 -> INDEPENDENT_AUDIT: PASS (rc=0)
+
+CLI aggregate 期望可配 (--expect-packages/--expect-sidecars/--expect-noop, 默认 10/9/1)。
+白盒 (全 13 断言): 9×14 checks PASS; NEG 篡改 TRANSLATE 文本 / 篡改 KEEP 文本 / 新增多余 key /
+stray 未入 manifest .package / NOOP 却存在 sidecar —— 全部正确 FAIL (rc=1)。
+既有回归 test_phase2b_regression(135/0) + test_sidecar_audit_regression(13/0) 保持 PASS。
