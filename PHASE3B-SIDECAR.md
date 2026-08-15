@@ -1665,3 +1665,65 @@ A2 存于 overlay -> 两路皆 TRANSLATE/OVERRIDE (一致)。INPUT/TID DIFFER=0 
 按用户指示暂时只诊断。后续若要收敛 123/114, 二选一(待决策): (a) auditor 增加 cache layer
 使两路一致; (b) 修 gen_cohort_sidecars 使其不再消费 cache.db (符合 frozen “cache 禁止作
 payload” ruling), 则 manifest 会降为 114。当前不改。
+
+---
+
+## 🔬 run2_exact_plan.py —— 修正计划性 parity: 真实 run2 planner 重建 (2026-08-15 第二轮)
+
+### 推翻第一轮 run2_plan_parity.py 的结论 (根因判断有误, 已弃用该工具)
+第一轮 parity "generator" replay 误用 legacy `TranslationResolver(overrides, done, cache)`,
+得到 T=117 K=119 (非真实 123/113), 且报 3 个 cache divergence —— 那是**错误的诊断路径**制造的
+假象, 不是真实 generation。已删除 `run2_plan_parity.py`, 由 `run2_exact_plan.py` 取代。
+
+### 真实 run2 --run2 generation call graph (静态核证, 第一步)
+`gen_cohort_sidecars.py` main() 行 ~510-518:
+```
+resolver = make_production_resolver(a.title_final, a.desc_final, a.production_overlay,
+                                    translation_done=a.done or None,
+                                    translation_catalog=a.catalog_final or None)
+```
+1. resolver class = **production_resolver.ProductionResolver**
+2. constructor 输入 = title_final, desc_final, production_overlay, translation_done, translation_catalog
+3. title_final 进入 = YES (第2参)    4. desc_final 进入 = YES (第3参)
+5. production_overlay 进入 = YES     6. done 进入 = YES     7. catalog 进入 = YES (decision only)
+8. **cache.db 进入 = NO** —— run2 分支无 --cache 使用; 行 527 的
+   `TranslationResolver(a.overrides, a.done, a.cache)` 属**非 run2 legacy 分支**, 与 run2
+   sidecar 生成无关。ProductionResolver 五源架构不含 cache。
+9. 每 approved key 最终 planning function = `approved_pv_refs(src)` ->
+   `resolve_all_approved(approved, resolver, ...)` -> `ProductionResolver.resolve(src)`。
+
+per-key tag (ProductionResolver.resolve): TRANSLATE / KEEP / SOURCE_MISMATCH / MISSING / MISSING_REVIEW。
+final payload 源 precedence: overlay > title > desc > done; catalog 仅作 decision (KEEP/TRANSLATE/REVIEW), 不作 payload。
+
+### 第二步: exact-plan replay (硬门) —— 复用真实 planner, 禁止自造 precedence
+- resolver = 同一 `make_production_resolver` (五个冻结源)。
+- 每 slot 期望取 **manifest 自身行** (approved_key_count/translated_key_count/keep_key_count),
+  与 replay 的 slot_agg 精确相等; 总计亦然。
+- 任一 slot MISMATCH 或 replay_error -> **HARD-FAIL (rc=2), 不输出 root-cause/provenance/parity**。
+- 真实预期: approved=236 / TRANSLATE=123 / KEEP=113; 分 slot:
+  s1 T2K0 / s2 T14K70 / s3 T2K8 / s4 T6K0 / s6 T1K11 / s7 T1K8 / s8 T20K16 / s9 T70K0 / s10 T7K0。
+
+### 第三步: provenance —— 每个 TRANSLATE key 的真实最终 source layer
+对每个 mod (kh,src,tr), 依 precedence 只读查找持有该 tr 的源层 (overlay/title/desc/done),
+计数; 无任何源层匹配 -> UNATTRIBUTED (ProductionResolver 无 cache, 正常不应出现)。
+真实应: overlay/title/desc/done 合计 123, UNATTRIBUTED=0 —— 证明 **cache 未进入真实 run2 plan**,
+第一轮 3 个 cache divergence 只是 legacy 路径假象。
+
+### 第四步: auditor 重建 (同五源 frozen resolver) 逐 key parity
+auditor 用**同一 ProductionResolver**(五源) + build_approved(approved 集) + 冷读 exact CHS
+文本 resolve。目标:
+  GENERATION EXACT PLAN = 123/113
+  AUDITOR RECONSTRUCTED PLAN = 123/113
+  per-key ACTION parity = 236/236
+  per-key FINAL   parity = 236/236
+
+### 白盒 (EXACT_PLAN_WB OK)
+独立包 approved {K1,K2}: K1 overlay 有 payload -> TRANSLATE(overlay); K2 仅 catalog KEEP -> KEEP。
+- manifest A2 T1 K1 (正确) -> rc=0, EXACT rebuild == manifest, provenance overlay=1, parity 2/2。
+- manifest A2 T2 K0 (错误) -> rc=2 HARD-FAIL, 不输出 root-cause/provenance。
+全部回归保持绿 (135/0, 13/0, approved_set_v3, v2, POS)。
+
+### 生效状态
+`scripts/run2_exact_plan.py` 只读诊断; writer/resolver/sidecar 未改; 未重新 generation。
+cache.db 仍未作 final payload (frozen ruling 保持)。下一步: 用户跑真实 Windows 数据, 若
+EXACT PLAN 建成 123/113 且 audit parity 236/236, 再审 sidecar。
