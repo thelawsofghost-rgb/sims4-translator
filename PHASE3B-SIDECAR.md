@@ -500,4 +500,31 @@ REVIEW->KEEP=1, remaining REVIEW=0, MISSING 未裁决=0。全尺度白盒 PASS (
 
 本轮只生成 decision 与 todo 清单; 不调用模型批量翻译, 不生成 sidecar, 不重跑10包。
 
+== 增量翻译 workset (626) ==
+decision 层冻结后, 真正需翻译流水线生成译文的只有:
+  final todo = 631; manual pretranslated = 5 (已有人工最终译文, 禁再送模型);
+  实际 model workset = C29 + D_TRANSLATE597 = 626;  626 + 5 = 631。
+KEEP (manual KEEP @ninawhims / EMPTY_SOURCE_NOOP / D KEEP) 全部禁止进翻译。
+
+script: scripts/bake_workset.py
+  输入 --todo translation_final_todo.csv(631) + --manual translation_manual_review.csv(6)
+  输出 output/translation_incremental_workset.csv (626)
+  逻辑: workset = todo 中 decision==TRANSLATE 且非 manual pretranslated (按 stable tid+norm 精确排除);
+  硬 invariant fail-fast: workset 严格==626; 626+5==631; (tid,norm) 无重复; source_text/source_hash exact
+  (不重算不改, 直接透传); workset 全 TRANSLATE。manual pretranslated 保留在 final merge (不丢)。
+  不调用模型 / 不生成 sidecar / 不重跑包; 复用 frozen glossary/overrides/protected spans/translation policy
+  (Phase2B 翻译时沿用); 不重新生成旧译文; cache 不当 final QA 译文。
+```
+python scripts\bake_workset.py --todo output\translation_final_todo.csv --manual output\translation_manual_review.csv --out output\translation_incremental_workset.csv
+```
+白盒 PASS: todo=631(含5 manual-T) -> workset=626, 626+5==631, KEEP 排除, manual-T 排除,
+source_text/source_hash exact 对应, provenance 分布报告。
+
+Phase2B 分批执行建议 (workset=626 严格 PASS 后再启动):
+  沿用现有 translation 流水线 (glossary/overrides/protected spans/policy 不变)。建议按
+  provenance 分批: 先 POSE_DISPLAY_NAME 批 (103 属 D 中的 pose 源, 含人工已锁的 pose 语义),
+  再 PACK_TITLE (434) 与 PACK_DESCRIPTION (199) 批; 每批完成后跑一次 invariant 校验
+  (batch translated + manual 5 不重翻; 无重复 tid)。模型只产译文草稿, final QA 须过
+  glossary+protected spans+人工 review, cache 仅作草稿参考不作最终。
+
 **验证要求 (汇报)**: 10 个 sidecar 文件名 / 每包修改 key 数 / writer verify / independent audit / 是否全部 PASS。
