@@ -1216,3 +1216,43 @@ Windows 用法 (真实审计, 先 cd 仓根, 短路径):
 
 状态 (2026-08-15 17:55): 未生成 sidecar; 未改 writer; 未降 unresolved gate;
 未删 catalog; 未用 translation_cache.db 作为 final。resolver 尚未改 —— 等 audit 结果。
+
+## 🔒 resolver source roles 裁定 + old resolved source audit (2026-08-15)
+
+**根因 (真实 Windows PREFLIGHT-FAIL):** `output/translation_catalog.csv` 是历史 **decision catalog**
+(决策目录), 不是 final translation source。catalog TRANSLATE + translation='' 大量与 production overlay
+最终中文译文重叠; 且存在 old catalog TRANSLATE -> later audited production overlay KEEP (历史决策被后续
+人工终态覆盖)。绝不能把这些解释为同级 production conflict, 也不能通过忽略所有冲突来修。
+
+**resolver source roles (权威层级, 由高到低):**
+  1. production_overlay    = 最高权威显式 terminal override
+  2. title_final / desc_final = 新批次最终译文
+  3. historical final translation source = 旧 overrides(114) + final2 + done 的**非空 translation**
+  4. translation_catalog   = decision/index ONLY (不提供 translation payload)
+
+**catalog 语义:**
+  - KEEP      -> 若无更高层 override, 终态 KEEP
+  - TRANSLATE -> 仅说明该 source 需要翻译; catalog 自身不能提供译文, 必须去 historical final
+                 translation source (overrides+done) 找已完成译文
+  - REVIEW    -> 若无更高人工终态覆盖, 则 unresolved
+  - **catalog 的空 translation 绝不与 final 中文译文做 translation-equality conflict**
+
+**catalog vs 更高层不一致 (非同级冲突, 但不静默):**
+  - catalog TRANSLATE -> overlay KEEP / overlay TRANSLATE(final text) = 后续人工裁决 => higher wins,
+    但必须记录: catalog_superseded_action = N, catalog_superseded_translation_requirement = N
+
+**真正必须 HARD-FAIL 的冲突 (同一 (tid,norm_source) 真正 final sources 之间):**
+  production_overlay vs title_final / production_overlay vs desc_final / title_final vs desc_final /
+  historical final translation vs 同级/更高 final — 若给出不同最终 translation/action -> HARD-FAIL
+
+**old resolved source audit (`scripts/old_resolved_source_audit.py`, 只读):**
+  - join key = 稳定 translation_id + normalized source_text
+  - 输入: --catalog + --overrides + --overrides2(final2) + --done (+可选 --list ELIGIBLE 包)
+  - 输出: catalog rows/status 分布, catalog TRANSLATE 计数, 各 final source rows,
+    CATALOG_KEEP / CATALOG_TRANSLATE_RESOLVED / CATALOG_TRANSLATE_MISSING / NEW_SOURCE_NOT_IN_CATALOG
+  - final 译文口径与 gap_inventory.load_final_translations 同源 (overrides+final2+done 非空 translation)
+  - **translation_cache.db 禁止**作为 authoritative final source (WARN + 拒绝)
+  - **catalog 自带非空 translation 不作为 final 证据** (白盒: catalog 内带译文但 overrides/done 无 ->
+    仍 MISSING)
+  - 白盒: 3 TRANSLATE + 1 APPROVED + 2 KEEP + 1 REVIEW catalog, overrides(2)+done(2) 非空 =>
+    RESOLVED=4 MISSING=1 KEEP=2 NEW=0 EXIT=0
