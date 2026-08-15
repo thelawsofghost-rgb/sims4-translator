@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
+r"""
 Phase 3B2-SIDECAR —— Production-style CHS sidecar 批量生成器 (frozen 10-cohort)
 
 目标 (用户 2026-08-15 定案, cohort_selection.csv 已冻结):

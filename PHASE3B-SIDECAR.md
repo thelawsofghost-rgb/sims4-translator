@@ -1141,3 +1141,78 @@ D. provenance 固定: KEEP=2 MANUAL_QA_FAIL=15 CONTENT_CORRECTION=37 ACCEPTED_MO
   - 回归 135 PASS / 0 FAIL
   - 注: 上述 30b4747 中 preflight 的 --run1-missing 强制要求已移除; 新 preflight
     不再需要/不再接受该参数。
+
+## 🔒 resolver source roles 重新定义 (2026-08-15, 真实 preflight FAIL 根因后定案)
+
+真实 Windows PREFLIGHT-FAIL 是**有效安全门** —— 之前误把 decision catalog 当 final 造成
+误报冲突, 现按真实语义分层 (不通过忽略冲突来修):
+
+**resolver source roles:**
+1. **production_overlay** = 最高权威显式 terminal override
+2. **title_final / desc_final** = 新批次最终译文
+3. **historical resolved translation source** = 旧 catalog TRANSLATE 对应的真实最终
+   中文译文 (来自 overrides/done 等 final 文件, 见下"旧 resolved source audit")
+4. **translation_catalog** = **decision/index only**, 非 final translation source
+
+**translation_catalog 语义:**
+  - KEEP      -> 若无更高层 override, 终态 KEEP
+  - TRANSLATE -> 只说明该 source 需要翻译; catalog 本身**不提供** translation payload,
+                 必须去 historical final translation source 找已完成译文
+  - REVIEW    -> 若未被更高层人工终态覆盖, 则 unresolved
+  - catalog 空 translation **绝不能**与 final 中文译文做 translation equality conflict。
+  - catalog 与更高层 action 不一致**不能**当同级冲突 (catalog TRANSLATE -> overlay KEEP,
+    catalog TRANSLATE -> overlay TRANSLATE(final) 都可能是后续人工裁决):
+        higher production terminal wins
+        但必须记录 catalog_superseded_action / catalog_superseded_translation_requirement,
+        不能静默覆盖。
+
+**真正必须 HARD-FAIL 的 conflict** (仅这些 final-vs-final):
+  - production_overlay vs title_final
+  - production_overlay vs desc_final
+  - title_final vs desc_final
+  - historical final translation vs 同级/更高 final
+  对同一 (tid,norm_source), 若这些真正 final sources 给不同最终 translation/action -> HARD-FAIL。
+  catalog 本身不参与 equality conflict / action 同级冲突判定。
+
+## 🔒 旧 resolved source audit (audit_resolved_source.py)
+
+历史 resolved translation 来源 = **decision catalog × historical final translation source**,
+与 scripts/gap_inventory.py 的 join 完全一致:
+  catalog(decision) × final 译文树 (overrides 最高 -> final2 -> done; 非空 translation 才 resolved)
+  translation_cache.db **禁止**作为 authoritative final source (phrase cache, 非 final QA artifact)。
+
+已新增 `scripts/audit_resolved_source.py` (只读, 不改 writer / 不生成 sidecar / 不用 cache.db):
+  - 报 translation_catalog rows / unique tid / decision 分布 (KEEP/TRANSLATE/REVIEW/...)
+  - catalog TRANSLATE/APPROVED 中 RESOLVED(有终态译文) vs MISSING(无终态) 数
+  - catalog KEEP 数
+  - 每个 historical result 文件 rows / unique tid / 非空 translation 数
+  - join 后: CATALOG_TRANSLATE_RESOLVED / CATALOG_TRANSLATE_MISSING / CATALOG_KEEP
+  - 记录 catalog_superseded_action (catalog TRANSLATE/KEEP/REVIEW 被更高层终态覆盖)
+    与 catalog_superseded_translation_requirement (catalog 要求译文但无终态 -> 真正 unresolved)
+  - EXIT: MISSING==0 -> 0; 否则 -> 1
+
+白盒 (合成 catalog 12 行: 7 TRANSLATE / 3 KEEP / 2 REVIEW):
+  -> RESOLVED=5, MISSING=2, KEEP=3, KEEP-superseded=1, REVIEW-resolved=1,
+     REVIEW-unresolved=1, superseded_action=2, superseded_req=2; EXIT=1 (有真 MISSING)。
+  catalog 无 translation payload, 仅决策/索引, 不冒充 final。
+
+Windows 用法 (真实审计, 先 cd 仓根, 短路径):
+  python scripts\audit_resolved_source.py --catalog output\translation_catalog.csv ^
+      --overrides output\translation_overrides.csv ^
+      --done output\translation_done.csv ^
+      --overrides2 output\translation_overrides.final2.csv ^
+      --layer configs\title_manual_translate.c26.csv ^
+      --layer configs\title_terminal_keep.c26.csv ^
+      --layer configs\desc_dorothy_frozen.c26.csv ^
+      --layer configs\desc_terminal_keep.c26.csv ^
+      --layer configs\desc_content_corrections.c26.csv ^
+      --report output\resolved_source_audit.txt
+
+判定依据 (用户口径): 先查明历史 CATALOG_TRANSLATE_RESOLVED 真实终态所在, 再据此
+改 resolver (不猜); 用历史 verified final 而非把 decision catalog 冒充 final。
+
+同时: gen_cohort_sidecars.py:35 invalid escape SyntaxWarning 已清 (docstring 改 raw str,
+无语义改动, writer 未动)。
+
+状态 (2026-08-15 17:55): 未生成 sidecar; 未改 writer; 未降 unresolved gate;
+未删 catalog; 未用 translation_cache.db 作为 final。resolver 尚未改 —— 等 audit 结果。
