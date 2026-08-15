@@ -51,8 +51,23 @@ G-S  standalone_profile : G-P 真 且 G-O 全假 且满足「独立包」正面�
   * 不调用任何模型
   * 不重新 generation
 用法:
-  python scripts/run2_pose_vs_functional_audit.py --list <pkg_list.txt> [--out report.csv]
-  python scripts/run2_pose_vs_functional_audit.py --cohort output/cohort_selection.csv [--out ...]
+  # 先 reconciliation (只读 path 完整性)
+  python scripts/pose_path_reconciliation_448.py \
+      --coverage output/coverage.csv --mods "<Mods 根>" \
+      --validate-identity --out output/pose_path_reconciliation_448.csv
+
+  # census 必须用 resolved physical path (禁 fail-open)
+  python scripts/run2_pose_vs_functional_audit.py \
+      --reconciliation output/pose_path_reconciliation_448.csv \
+      [--out output/pose_vs_functional_census.csv]
+
+  # 直接跑原始清单 (仅当已知全部存在且可读时才允许)
+  python scripts/run2_pose_vs_functional_audit.py --list <pkg_list.txt>
+
+contract:
+  path 不存在 / 不可读 -> ERROR_MISSING_FILE, 绝不能再变成 NO_POSE_ROOT 或其他正常分类。
+  census 需显式报告 resolved N / unresolved M; 未解析不得算进正常分类。
+  完整 census 硬门: EXACT_PATH+UNIQUE_RELOCATED==448 且 MISSING==0 and AMBIGUOUS==0 and MISMATCH==0。
 """
 import sys, os, zlib, csv, argparse
 from pathlib import Path
@@ -155,17 +170,24 @@ def classify_package(path: str) -> dict:
     r = {"package_path": path, "pose_root_count": 0, "nonpose_root_count": 0,
          "pose_display_refs": 0, "functional_feel": 0, "nested_pose": 0,
          "has_clip": 0, "verdict": "NO_POSE_ROOT", "reason": ""}
+    # ---- 新 contract: path 不存在 / 不可读 -> ERROR/MISSING_FILE, 绝不入正常分类 ----
     if not os.path.exists(path):
-        r["reason"] = "SKIP_MISSING_FILE"
+        r["verdict"] = "ERROR_MISSING_FILE"
+        r["reason"] = "MISSING_FILE: path 不存在 (禁止当作 NO_POSE_ROOT 或正常包分类)"
         return r
     idx, err = safe_parse(path)
-    if err or idx is None:
-        r["reason"] = f"DBPF 解析失败: {err}"
-        r["verdict"] = "ERROR"
+    if err or idx is None or not os.path.isfile(path):
+        r["verdict"] = "ERROR_MISSING_FILE"
+        r["reason"] = f"MISSING_FILE/UNREADABLE: DBPF 解析失败: {err}"
         return r
-    backend = get_backend("readonly").open(path)
-    roots = _read_roots(backend, idx.entries)
-    backend.close()
+    try:
+        backend = get_backend("readonly").open(path)
+        roots = _read_roots(backend, idx.entries)
+        backend.close()
+    except Exception as e:
+        r["verdict"] = "ERROR_MISSING_FILE"
+        r["reason"] = f"MISSING_FILE/UNREADABLE: 读取失败: {e}"
+        return r
 
     has_clip = any(e.type_id == CLIP_TID for e in idx.entries)
     r["has_clip"] = 1 if has_clip else 0
@@ -229,31 +251,61 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--list", help="一行一个 package 路径")
     ap.add_argument("--cohort", help="coverage cohort_selection.csv (取 package_path 列)")
+    ap.add_argument("--reconciliation",
+                    help="pose_path_reconciliation_448.csv 报告: 用 resolved_path 做 census; 未解析 -> ERROR_MISSING_FILE")
     ap.add_argument("--out", help="可选: 写报告 csv")
     a = ap.parse_args()
 
     paths = []
-    if a.list:
-        paths = [l for l in (line.strip() for line in open(a.list, encoding="utf-8-sig")) if l]
-    elif a.cohort:
-        for r in csv.DictReader(open(a.cohort, encoding="utf-8-sig")):
-            if r.get("package_path"):
-                paths.append(r["package_path"])
+    if a.reconciliation:
+        # 新 contract: census 必须使用 resolved physical path。
+        # 只有 EXACT_PATH / UNIQUE_RELOCATED 才参与正常分类;
+        # MISSING/AMBIGUOUS/MISMATCH/未解析 全部 -> ERROR_MISSING_FILE, 不放入正常分类。
+        rec = list(csv.DictReader(open(a.reconciliation, encoding="utf-8-sig")))
+        resolved = 0
+        unresolved = 0
+        for r in rec:
+            status = r.get("resolution_status")
+            rp = r.get("resolved_path") or ""
+            if status in ("EXACT_PATH", "UNIQUE_RELOCATED") and rp:
+                paths.append(rp)
+                resolved += 1
+            else:
+                # 不可恢复: 保留记录, 但明确标 unresolved, 不参与正常分类
+                paths.append(None)
+                unresolved += 1
+        rows = []
+        for r, orig in zip(paths, rec):
+            if r is None:
+                rows.append(_unresolved_row(orig))
+            else:
+                row = classify_package(r)
+                row["original_path"] = orig.get("original_path") or ""
+                rows.append(row)
+        print(f"[reconciliation] resolved={resolved} / unresolved={unresolved} "
+              f"(未解析不入正常分类, 全部标 ERROR_MISSING_FILE)")
     else:
-        print("[ERROR] 需要 --list 或 --cohort")
-        return 2
+        if a.list:
+            paths = [l for l in (line.strip() for line in open(a.list, encoding="utf-8-sig")) if l]
+        elif a.cohort:
+            for r in csv.DictReader(open(a.cohort, encoding="utf-8-sig")):
+                if r.get("package_path"):
+                    paths.append(r["package_path"])
+        else:
+            print("[ERROR] 需要 --list / --cohort 之一, 或 --reconciliation 报告")
+            return 2
+        rows = [classify_package(p) for p in paths]
 
-    rows = [classify_package(p) for p in paths]
     vc = Counter(r["verdict"] for r in rows)
-    print(f"\n== pose vs functional 分类审计 ({len(rows)} 包) ==")
+    print(f"\n== pose vs functional 分类审计 (resolved {len([r for r in rows if not r['verdict'].startswith('ERROR_MISSING_FILE')])} 包 / total {len(rows)}) ==")
     for v in ("STANDALONE_POSE_PACK", "OBJECT_EMBEDDED_POSE", "POSE_ONLY_LOW_CONF",
-              "NO_POSE_ROOT", "ERROR"):
+              "NO_POSE_ROOT", "ERROR_MISSING_FILE"):
         if vc.get(v):
             print(f"  {v}: {vc[v]}")
     print("\n-- OBJECT_EMBEDDED / LOW_CONF 明细 --")
     for r in rows:
         if r["verdict"] in ("OBJECT_EMBEDDED_POSE", "POSE_ONLY_LOW_CONF"):
-            print(f"  [{r['verdict']}] {os.path.basename(r['package_path'])} :: {r['reason']}")
+            print(f"  [{r['verdict']}] {os.path.basename(r.get('package_path',''))} :: {r['reason']}")
 
     if a.out:
         with open(a.out, "w", newline="", encoding="utf-8-sig") as f:
@@ -262,6 +314,18 @@ def main():
             w.writerows(rows)
         print(f"\n[WROTE] {a.out} ({len(rows)} 行, 只读审计报告)")
     return 0
+
+
+def _unresolved_row(orig) -> dict:
+    """未解析路径 -> 明确 ERROR_MISSING_FILE, 绝不作正常分类。"""
+    return {
+        "package_path": orig.get("resolved_path") or orig.get("original_path") or "",
+        "pose_root_count": 0, "nonpose_root_count": 0,
+        "pose_display_refs": 0, "functional_feel": 0, "nested_pose": 0,
+        "has_clip": 0, "verdict": "ERROR_MISSING_FILE",
+        "reason": f"UNRESOLVED({orig.get('resolution_status')}): "
+                   f"重定位后仍不可读/不确定, 禁止入正常分类",
+    }
 
 
 if __name__ == "__main__":
