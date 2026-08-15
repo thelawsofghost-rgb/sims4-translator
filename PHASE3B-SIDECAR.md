@@ -1105,3 +1105,49 @@ D. provenance 固定: KEEP=2 MANUAL_QA_FAIL=15 CONTENT_CORRECTION=37 ACCEPTED_MO
     run1-missing 未消除 -> HARD-FAIL rc=2; run1 缺 --overrides 仍拦。
   - `--run2 --preflight-only` 端到端 PASS 且未建 out-dir (零写真证)。
   - 回归 135 PASS / 0 FAIL。
+
+## 🔒 run2 硬要求增补 (2026-08-15, 批准后补两条 fail-closed)
+
+**① `--run1-missing` 不允许省略 — 确定性生成并提交 `output/run1_missing_tids.txt`**
+  - 新增 `scripts/gen_run1_missing.py`: 确定性派生 run1 的 9 个 MISSING tid =
+    10-cohort 包内 approved **POSE_DISPLAY_NAME** 类 (C-class, 历史 run1 唯一 MISSING 类别;
+    PACK_TITLE/PACK_DESCRIPTION 在 run1 已能 resolve 不计入) 的 tid;
+    每条必须已被任一 production final 覆盖 (否则无法消除 -> HARD-FAIL)。
+  - `--expect 9,9,9` (rows,unique,unique) 默认; 写文件一行一 tid, sort 稳定, 无注释。
+  - 负例: pose 未覆盖 -> HARD-FAIL; --expect 不符 -> HARD-FAIL; cohort 非10 -> HARD-FAIL。
+  - 提交 `output/run1_missing_tids.txt` 后, 运行:
+    ```
+    python scripts\gen_run1_missing.py --cohort output\cohort_selection.csv \
+        --title-final output\translation_done_title_final.csv \
+        --desc-final output\translation_done_desc_final.csv \
+        --production-overlay output\translation_overrides.production.csv \
+        -o output\run1_missing_tids.txt
+    ```
+
+**② preflight 必须加载与 generation 完全相同的 resolver inputs (含 catalog), 并报告 9/9/0**
+  - `run2_preflight.py` 新增 `--catalog`(已支持) + `--run1-missing`(**required**, argparse
+    强制, 不允许省略) + `--expect-run1-missing`(默认 9)。
+  - 必须显式报告并满足:
+    ```
+    run1_missing_expected            = 9
+    run1_missing_rows                = 9
+    run1_missing_unique              = 9
+    run1_missing_resolved            = 9
+    run1_missing_still_unresolved    = 0
+    ```
+    非 9/9/0 -> HARD-FAIL (绝不在无此证据时声称"run1 9 MISSING 已消除")。
+  - **catalog 只作 frozen terminal fallback**, precedence 最低; 多源一致性校验含 catalog:
+    (tid,norm_source) 在 catalog 与任一 production source 重复时 action/translation 必须一致,
+    不一致 -> HARD-FAIL (已白盒: catalog 译文与 overlay 冲突 -> HARD-FAIL rc=2)。
+  - preflight 与 generation 使用同一组 resolver inputs: 两者都传
+    `--title-final/--desc-final/--production-overlay/--catalog-final/--run1-missing`,
+    避免"preflight 一套输入、generation 另一套输入"。
+  - `gen_cohort_sidecars.py --run2 --preflight-only`: 缺 `--run1-missing` -> FAIL rc=2;
+    带齐 -> PASS 且不建 out-dir (零写真证)。
+
+**白盒 (合成 10 包, run1-missing=9 pose tid):**
+  - gen_run1_missing -> 9/9/9 EXIT=0, 写文件 9 行 unique=9; 负例全 HARD-FAIL。
+  - run2_preflight (含 catalog) -> 9/9/0 + catalog(20) + 10 包全 PASS + EXIT=0。
+  - 负例: run1-missing 混入未覆盖 tid -> 9/8/1 HARD-FAIL; catalog 冲突 -> HARD-FAIL;
+    缺 --run1-missing -> argparse required 拦截 rc=2; gen preflight-only 缺 run1-missing -> rc=2。
+  - 回归 135 PASS / 0 FAIL。

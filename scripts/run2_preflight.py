@@ -55,8 +55,12 @@ def main():
     ap.add_argument("--production-overlay", required=True,
                     help="output/translation_overrides.production.csv (217)")
     ap.add_argument("--catalog", default="", help="旧 frozen catalog terminal (可选, precedence 最低)")
-    ap.add_argument("--run1-missing", default="",
-                    help="run1 的 9 个 MISSING tid 文件(每行一个); 逐一必须被当前 resolver 消除")
+    ap.add_argument("--run1-missing", required=True,
+                    help="run1 的 9 个 MISSING tid 文件(每行一个, 必须提供 — 不允许省略); "
+                         "逐一必须被当前 resolver 消除")
+    ap.add_argument("--expect-run1-missing", default=9, type=int,
+                    help="run1-missing 期望条数(默认 9); 必须满足 rows=resolved=9, "
+                         "still_unresolved=0, 否则 HARD-FAIL")
     ap.add_argument("--report", default="", help="显式写出纯文本 preflight report (缺省只打印)")
     ap.add_argument("--out-dir", default="", help="若提供, 校验 stale 非空(与 gen_cohort_sidecars 一致)")
     a = ap.parse_args()
@@ -168,24 +172,31 @@ def main():
             f"{per['dup_keyhash']:>5} {per['tgi']:>3}  {per['result']}"
             + (f"  ERR={';'.join(per['errors'][:2])}" if per["errors"] else ""))
 
-    # ---- 3) run1 9 MISSING 消除证明 ----
-    missing_proof = "n/a"
-    if a.run1_missing:
-        missing_ids = [l.strip() for l in open(a.run1_missing, encoding="utf-8-sig")
-                       if l.strip() and not l.startswith("#")]
-        # 检查每个 tid 是否出现在任一 production final(按 source_text 重新 resolve 需原文本,
-        # 这里无法从 tid 反推文本; 改为: 检查 tid 在任一 production source 的 key 中)
-        all_keys = set(resolver.overlay) | set(resolver.title) | set(resolver.desc) | set(resolver.catalog)
-        tids_in_prod = {k[0] for k in all_keys}
-        unresolved_missing = [t for t in missing_ids if t not in tids_in_prod]
-        missing_proof = (f"\nrun1 9 MISSING 消除证明: 清单 {len(missing_ids)} 个 tid; "
-                         f"在 production final 中 = {len(missing_ids) - len(unresolved_missing)}; "
-                         f"仍未覆盖 = {unresolved_missing or '0'}")
-        out_lines.append("-" * 64)
-        out_lines.append(missing_proof)
-        if unresolved_missing:
-            out_lines.append("[HARD-FAIL] run1 MISSING 仍有未覆盖, 未消除")
-            print("\n".join(out_lines)); return 2
+    # ---- 3) run1 9 MISSING 消除证明 (必须提供文件; 缺文件/缺参数已在 argparse required 拦截) ----
+    missing_ids = [l.strip() for l in open(a.run1_missing, encoding="utf-8-sig")
+                   if l.strip() and not l.startswith("#")]
+    # 每个 tid 必须出现在任一 production final 的 key 中 (证明是 resolver 消除, 非 writer 绕过)
+    all_keys = set(resolver.overlay) | set(resolver.title) | set(resolver.desc) | set(resolver.catalog)
+    tids_in_prod = {k[0] for k in all_keys}
+    resolved_missing = [t for t in missing_ids if t in tids_in_prod]
+    still_unresolved = [t for t in missing_ids if t not in tids_in_prod]
+    exp = a.expect_run1_missing
+    uniq = len(set(missing_ids))
+    out_lines.append("-" * 64)
+    out_lines.append(f"run1_missing_expected            = {exp}")
+    out_lines.append(f"run1_missing_rows                = {len(missing_ids)}")
+    out_lines.append(f"run1_missing_unique              = {uniq}")
+    out_lines.append(f"run1_missing_resolved            = {len(resolved_missing)}")
+    out_lines.append(f"run1_missing_still_unresolved    = {len(still_unresolved)}")
+    if still_unresolved:
+        out_lines.append(f"  still_unresolved tids: {still_unresolved}")
+    proof_ok = (len(missing_ids) == exp and uniq == exp
+                and len(resolved_missing) == exp and len(still_unresolved) == 0)
+    if not proof_ok:
+        out_lines.append(f"[HARD-FAIL] run1 MISSING 未达到 {exp}/{exp}/0: "
+                         f"rows={len(missing_ids)} resolved={len(resolved_missing)} "
+                         f"still_unresolved={len(still_unresolved)} (unique={uniq})")
+        print("\n".join(out_lines)); return 2
 
     # ---- 4) aggregate ----
     out_lines.append("-" * 64)
