@@ -1614,3 +1614,54 @@ APPROVED_SET_REGRESSION OK。
 -> INDEPENDENT_AUDIT: PASS` (rc=0)。
 若仍 FAIL: per-slot `!!` 指出是 approved-gate / R5 changed-set / unrelated 误改 三类之一;
 writer / resolver / sidecar 不做任何修改。
+
+---
+
+## 🔁 run2_plan_parity.py —— generation-plan vs audit-plan 只读 parity (2026-08-15)
+
+### 新发现的更小 determinism 问题
+approved-set 收敛后: generator/manifest TRANSLATE total = **123**, independent auditor
+resolved TRANSLATE = **114**, delta = **9**。分布 s2 14→13 / s3 2→1 / s4 6→4 / s8 20→19 /
+s9 70→68 / s10 7→5; KEEP 恰好反向 +9。physical_changed==manifest T 仍精确相等 (writer 正确);
+这是 **planning-input parity** 缺口, 非 determinism bug。
+
+### 根因 (已精确定位)
+两条规划路径唯一差异是 **cache.db 层**:
+- GENERATOR (gen_cohort_sidecars.main:39): `TranslationResolver(a.overrides, a.done, a.cache)`
+  -> override -> done -> **cache**。9 个 divergence key 经 `cache.db` 终态解析为 TRANSLATE。
+- AUDITOR (independent_sidecar_audit.main:197): `TranslationResolver(a.production_overlay,
+  done_path=a.done)` -> override -> done (**无 cache**, 且 CLI 无 --cache 参数)。
+  → 9 个 key 落到 MISSING -> auditor 判 KEEP。
+
+白盒证实 INPUT_DIFFER=0 / TID_DIFFER=0 (同一 source 文本、同一 stable TID), 纯 cache 层差异。
+按 frozen ruling, cache.db 本应**禁止作 final payload**; 但 gen_cohort_sidecars 真路径实际
+消费它 (生成期真实路径), 制造了 generator/auditor 逐 key 计划不一致 —— 这正是审计要抓的 gap。
+
+### run2_plan_parity.py (只读, 已交付)
+直接复用两条真实路径 (不重写 resolver):
+- GENERATOR: `TranslationResolver(overrides,done,cache)` + `approved_pv_refs` +
+  `resolve_all_approved` (gen_cohort_sidecars 真 planning 路径)。
+- AUDITOR : `TranslationResolver(overrides,done)` (无 cache) + `build_approved` +
+  `read_source_target_stbl` 冷读 CHS 文本 resolve。
+逐 approved key 输出 (CSV + 终端): slot/package/role/keyhash / approved_ref_source_repr /
+source_CHS_STBL_text_repr / generator_ & auditor_resolver_input_repr / norm_source / tid /
+generator_ & auditor_action/final/source_layer / source_stbl_repr / sidecar_repr /
+INPUT_DIFFER / TID_DIFFER / ACTION_DIFFER / FINAL_DIFFER。
+parity: per-slot A/T/K (gen vs aud vs manifest) + delta(T gen-aud); divergence keys 列表;
+root cause 打印。
+
+CLI: `python scripts\run2_plan_parity.py --manifest ... --production-overlay ...
+--title-final ... --desc-final ... --done ... --catalog-final ... --cache output\translation_cache.db
+--out output\run2_plan_parity.csv`
+期望(真实): divergence keys = 9, INPUT=0 TID=0 ACTION=9 FINAL=9, delta(T) = +9。
+exit code: 0 = 完成; 2 = CLI/加载错误。只读, 不改任何文件。
+
+### 白盒 (PLAN_PARITY OK)
+A1 仅存于 cache.db -> generator TRANSLATE/CACHE, auditor KEEP/MISSING, ACTION+FINAL DIFFER;
+A2 存于 overlay -> 两路皆 TRANSLATE/OVERRIDE (一致)。INPUT/TID DIFFER=0 证实纯 cache 差异。
+全部回归保持绿 (135/0, 13/0, approved_set_v3, v2, POS)。
+
+### 处置 (本 turn 不做行为修复)
+按用户指示暂时只诊断。后续若要收敛 123/114, 二选一(待决策): (a) auditor 增加 cache layer
+使两路一致; (b) 修 gen_cohort_sidecars 使其不再消费 cache.db (符合 frozen “cache 禁止作
+payload” ruling), 则 manifest 会降为 114。当前不改。
