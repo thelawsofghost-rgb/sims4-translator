@@ -423,4 +423,23 @@ package_count, packages; stable ID 继续 T_{source_hash}_g1 (禁 STBL KeyHash);
 6 样本 delta decision。决策规则与 frozen 一致 (已验证: 'Pose 1'/'1'->KEEP(NON_SEMANTIC_TAG),
 'Tibo131 Standing Pose Pack #2'->TRANSLATE(SEMANTIC_WITH_NUM), 'Gounafier's Pose Pack'->TRANSLATE)。
 
+== set-loss 733->732 修复 (真实 gap D=733, POSE_DISPLAY_NAME 103->102) ==
+Windows 真实确认: d_reclassify D=732 (PACK_TITLE=434, PACK_DESCRIPTION=199, POSE_DISPLAY=102),
+比 gap D=733 (POSE_DISPLAY=103) 静默丢 1 条 POSE_DISPLAY_NAME unique source。
+根因: d_reclassify 对 source_text 空/空白行 `if not src: continue` 静默跳过。
+修复: 空/空白 source_text -> [HARD-FAIL] 打印全字段并 fail-fast (rc!=0), 不再静默丢;
+尾部新增硬 invariant: D 输入 unique == delta 输出 unique, 违反即停止输出 (rc!=0),
+并检查输出内 (tid,norm) 重复。
+
+确定性 set diff (Windows, 只读, 定位 733->732 丢帧):
+```
+python scripts\set_diff.py --gap output\gap_inventory.csv --delta output\translation_delta_catalog.csv
+```
+A = gap class=D unique (tid, norm); B = delta 全部 (tid, norm); 输出 A 数/B 数/A-B/B-A +
+A-B 每条完整字段 (translation_id/source_text repr/norm repr/source_hash/provenance/package) +
+重放 d_reclassify 关键逻辑逐条判定丢弃机制 (EMPTY_SOURCE_TEXT / WHITESPACE_ONLY / 
+NO_TRANSLATION_ID / NORMALIZATION_OR_TID_COLLISION), 不猜; 尾部 invariant A=='B'。
+白盒: 空 source 行触发 HARD-FAIL (不静默), set_diff 定位 A-B=1 且机制=EMPTY_SOURCE_TEXT,
+清洁路径 invariant PASS (输入 unique == 输出 unique)。
+
 **验证要求 (汇报)**: 10 个 sidecar 文件名 / 每包修改 key 数 / writer verify / independent audit / 是否全部 PASS。

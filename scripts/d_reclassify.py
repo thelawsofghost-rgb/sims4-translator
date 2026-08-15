@@ -46,11 +46,14 @@ def main():
 
     # 收集 D 类 unique source (按 norm_text 去重; 同一 source 多 provenance 合并)
     d = {}
+    dropped = []      # 被显式排除的异常行 (禁止静默)
     for r in rows:
         if (r.get("class") or "").strip() != "D":
             continue
-        src = (r.get("source_text") or "").strip()
-        if not src:
+        src = (r.get("source_text") or "")
+        if src.strip() == "":
+            # 空/空白 source_text: 不可作为可译文条目; 但绝不静默丢 -> 显式列入 dropped
+            dropped.append({"reason": "EMPTY_OR_WHITESPACE_SOURCE", "row": dict(r)})
             continue
         key = norm_text(src)
         e = d.setdefault(key, {
@@ -69,6 +72,15 @@ def main():
             e["ref_count"] += int((r.get("package_count") or "0").strip() or 0)
         except ValueError:
             pass
+
+    if dropped:
+        # 硬性: 不允许静默丢。发现异常入先行禁止 -> 打印全字段并 fail-fast (rc != 0)
+        print(f"[HARD-FAIL] D 输入含 {len(dropped)} 个空/空白 source_text, 拒绝静默丢弃:")
+        for x in dropped:
+            print("   ", {k: v for k, v in x["row"].items()})
+        raise SystemExit(
+            f"[FAIL] 空/空白 source_text 不得静默丢; 请先裁决这些行 (排除或补 source). "
+            f"现 D 唯一输入 {len(d)} (扣除 {len(dropped)} 异常行) 未输出.")
 
     print(f"[D] NEW_SOURCE_NOT_IN_CATALOG unique source = {len(d)}")
 
@@ -107,6 +119,18 @@ def main():
         w.writeheader()
         for o in out_rows:
             w.writerow(o)
+
+    # ---- 硬 invariant: D 输入 unique == delta catalog 输出 unique (禁 733->732 静默) ----
+    from collections import Counter as _C
+    out_key_cnt = _C((o["translation_id"], norm_text(o["source_text"])) for o in out_rows)
+    dup_out = [k for k, n in out_key_cnt.items() if n > 1]
+    if dup_out:
+        raise SystemExit(f"[INVARIANT-FAIL] delta 输出存在重复 (tid, norm): {dup_out[:5]}")
+    if len(out_rows) != len(d):
+        raise SystemExit(
+            f"[INVARIANT-FAIL] D 输入 unique {len(d)} != delta 输出 unique {len(out_rows)}. "
+            f"不允许静默丢帧; 已停止输出.")
+    print(f"[INVARIANT] D 输入 unique == delta 输出 unique = {len(d)}  PASS")
 
     # ---- 汇总 ----
     print("\n================ D 类重新分类汇总 ================")
