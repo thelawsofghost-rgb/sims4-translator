@@ -13,6 +13,9 @@ production base (frozen, 唯一, byte/content 必须不变):
   configs/desc_terminal_keep.c26.csv                 ->  2 DESC terminal KEEP
   configs/desc_manual_translate.c26.csv              -> 15 DESC manual final TRANSLATE
   configs/desc_content_corrections.c26.csv           -> 37 DESC content-qa correction TRANSLATE
+  configs/run2_unresolved_keep.c26.csv               -> 24 run2 unresolved technical-label KEEP
+                                                   (RUN2_TECHNICAL_LABEL_KEEP, 2026-08-15 Dorothy 裁决,
+                                                   由真实 run2_unresolved_unique_24.csv 冻结, 与现有 overlay disjoint)
 
 输出 (新 derived 文件, 绝不触碰 frozen base 及其余任何文件):
   output/translation_overrides.production.csv
@@ -33,7 +36,7 @@ production base (frozen, 唯一, byte/content 必须不变):
   - 增量层间 同 key 不同值                       -> HARD-FAIL
   - 缺必需层 / 缺 source_text / action 非法       -> HARD-FAIL
   - 报告各 layer 行数 + 各增量层 vs base 的交集 + 最终 unique (由真实输入验证, 不硬编码)
-  - 生产成品 invariant gate: 默认 expect=217,35,182,0 (unique,KEEP,TRANSLATE,REVIEW);
+  - 生产成品 invariant gate: 默认 expect=241,59,182,0 (unique,KEEP,TRANSLATE,REVIEW);
     不符即 HARD-FAIL 并逐层报告 action counts + 冲突来源 (可 --expect 覆盖; 空串关闭门) 。
     注意: base 若含 KEEP 行(真实 Windows base 有 4 个 KEEP), 则最终 KEEP=35/TRANSLATE=182;
     白盒用 base 全 TRANSLATE 时会是 31/186 —— 是 base action 分布差异, 非 correction37 改变 KEEP。
@@ -110,7 +113,7 @@ def main():
     ap.add_argument("out_dir")
     ap.add_argument("--out", default=None, help="derived overlay 输出路径 (缺省 out_dir/translation_overrides.production.csv)")
     ap.add_argument("--no-write", action="store_true", help="dry-run, 只校验不写")
-    ap.add_argument("--expect", default="217,35,182,0",
+    ap.add_argument("--expect", default="241,59,182,0",
                     help="生产成品 invariant: unique,KEEP,TRANSLATE,REVIEW (fail-closed; 不符即 HARD-FAIL)")
     a = ap.parse_args()
     out_dir = Path(a.out_dir)
@@ -128,6 +131,7 @@ def main():
         ("desc terminal KEEP", ROOT / "configs" / "desc_terminal_keep.c26.csv", True),
         ("desc manual final TRANSLATE", ROOT / "configs" / "desc_manual_translate.c26.csv", True),
         ("desc content correction TRANSLATE", ROOT / "configs" / "desc_content_corrections.c26.csv", True),
+        ("run2 unresolved technical-label KEEP", ROOT / "configs" / "run2_unresolved_keep.c26.csv", True),
     ]
 
     print("=== production overlay 构建 (非破坏, 只读 frozen BASE 114) ===")

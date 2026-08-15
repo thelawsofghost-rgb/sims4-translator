@@ -1350,3 +1350,42 @@ aggregate: unresolved=0 source_mismatch=0 policy_conflict=0 dup-KeyHash=0 CHS_TG
 
 **白盒 (合成 10 包):** 正例 10/10 PASS rc=0; D类(MISSING) rc=1; E类(REVIEW无高层) rc=1;
 --preflight-only 零写 PASS。回归 135 PASS / 0 FAIL。
+
+---
+
+## 🔒 run2 unresolved 人工裁决 → 独立 KEEP24 layer (2026-08-15, Dorothy)
+
+**真实 run2 unresolved dump (只读, occurrence/decision 双层):**
+  unresolved occurrences = 29
+  unique decisions        = 24
+  duplicate extra         = 5   (同一技术标签跨 package 共享 tid, occurrence-level 仍全保留)
+  duplicate groups        = 5
+  pure integer            = 13 / Pose+integer = 16 / other = 0
+
+**Dorothy 终判:** 24/24 unique decisions = **KEEP**; provenance = **RUN2_TECHNICAL_LABEL_KEEP**。
+理由: 全部 POSE_DISPLAY_NAME, source 仅属 `^\d+$` 或 `^Pose\s+\d+$` —— 无语义姿势编号/技术标签。
+
+**独立 frozen layer:** `configs/run2_unresolved_keep.c26.csv`
+  - 由真实 `output/run2_unresolved_unique_24.csv` 冻结 (`scripts/build_run2_keep24.py`)
+  - 直接沿用 dump 稳定 `translation_id` + `source`, 不重算 / 不造 package-specific TID
+  - 不改 pose C26 KEEP26 / title layers / desc layers (完全独立, 互不相交)
+  - HARD-FAIL gate: rows=24 ∧ unique(tid,norm_source)=24 ∧ role 全 POSE_DISPLAY_NAME
+    ∧ source 仅 `^\d+$`|`^Pose\s+\d+$` (other=0) ∧ 与现有 production overlay key 交集=0
+
+**接入 build_override_overlay.py:** 新增增量层 "run2 unresolved technical-label KEEP";
+生产成品 invariant 默认更新为 expected `241,59,182,0` (unique,KEEP,TRANSLATE,REVIEW)。
+真实 overlay 计算 (非硬编码): 217 = KEEP35+TRANSLATE182 → 241 = KEEP59+TRANSLATE182+REVIEW0
+  (24 unique KEEP, 若真实全 disjoint —— builder 与 overlay 双向 HARD-FAIL 保证)。
+
+注意两层计数勿混:
+  overlay KEEP=59  = unique decision 层计数
+  cohort  KEEP=118 = 实际 package occurrence 层计数 (24 unique 覆盖 29 occurrence:
+                     5 个重复 extra 变 KEEP) → 89+29=118; TRANSLATE 维持 123; approved=241。
+
+**重跑同一 10-package zero-write preflight 理论期望:**
+  approved=241 / KEEP=118 / TRANSLATE=123 / unresolved=0
+  source_mismatch=0 policy_conflict=0 duplicate_KeyHash=0 CHS_TGI=0; packages 10/0 PASS; rc=0
+
+**白盒 (build_run2_keep24 + overlay 集成):** 合法24→写 layer/disjoint EXIT=0; 注入 `Pose A`
+(不合正则)→HARD-FAIL rc=2; overlay 含 `Pose 5`(相交)→HARD-FAIL rc=2; shadow 集成
+base114+各层+run2KEEP24 → 241/59/182/0 EXIT=0, run2 层与其余各层 pairwise 交集全 0。
