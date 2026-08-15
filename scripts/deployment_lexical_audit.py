@@ -171,53 +171,61 @@ def main():
                  f"dup_target_exact={cand_dup_exact} ci_collisions={cand_ci_collisions} "
                  f"leading_space={cand_leading_space}")
 
-    def _first_stbl_tgi(p: Path):
+    def _all_stbl_tgis(p: Path):
+        """枚举 package 内全部 STBL resources 的 exact (type, group, instance) TGI set.
+        返回 (set[str], parse_ok: bool). parse_ok=False = malformed (fail-closed/诊断)."""
         try:
             import dbpf_fast
         except Exception:
-            return None
+            return set(), False
         try:
             idx, err = dbpf_fast.safe_parse(str(p))
             if idx is None:
-                return None
+                return set(), False
+            out = set()
             for e in idx.entries:
                 if e.type_id == 0x220557DA:  # STBL
-                    return f"0x{e.type_id:08X}/0x{e.group_id:08X}/0x{e.instance_id:016X}"
+                    out.add(f"0x{e.type_id:08X}/0x{e.group_id:08X}/0x{e.instance_id:016X}")
+            return out, True
         except Exception:
-            return None
-        return None
-    _read_first_stbl_tgi = _first_stbl_tgi
+            return set(), False
+    _read_all_stbl_tgis = _all_stbl_tgis
 
     # 每个 source 的 exact TGI (从 selection CHS_target_TGI), 供 coexist 扫描
     src_tgi = {Path(r.get("package_path", "")).name: r.get("CHS_target_TGI", "")
                for r in deploys}
 
     # ---- Mods coexist 扫描 (ZERO WRITE): candidate target 已存在 / exact-TGI coexist ----
+    # coexist 判定: production CHS_target_TGI ∈ package_all_STBL_TGIs (枚举全部, 不止首个)
     mods_root = _res(a.mods_root) if a.mods_root else None
     cand_mods_preexist = []          # candidate target 已存在于 Mods 的路径
     mods_exact_tgi_coexist = []      # 与该 candidate 形成 exact-TGI coexist 的 Mods 文件
     mods_scan_error = None
+    mods_malformed_pkgs = []         # malformed package 诊断 (parse 失败 / 无 index)
     if mods_root is not None and mods_root.is_dir():
-        # 收集 Mods 中所有 .package 的 exact STBL TGI
-        tgis_in_mods = {}
+        # 收集 Mods 中所有 .package 的完整 STBL TGI set
+        stbl_sets_in_mods = {}   # str(p) -> (set[str], parse_ok)
         for p in mods_root.rglob("*.package"):
-            tgi = _read_first_stbl_tgi(p)
-            if tgi:
-                tgis_in_mods.setdefault(tgi, []).append(str(p))
+            tgis, ok = _all_stbl_tgis(p)
+            if not ok:
+                mods_malformed_pkgs.append(str(p))
+            stbl_sets_in_mods[str(p)] = (tgis, ok)
         # candidate target 是否已存在
         for x in rows:
             cand = cand_target(x["source_basename"])
             if (mods_root / cand).exists():
                 cand_mods_preexist.append(str(mods_root / cand))
-        # exact-TGI coexist
+        # exact-TGI coexist: production TGI ∈ 该 package 的全部 STBL TGI set
         for x in rows:
             s = x["source_basename"]
             tgi = src_tgi.get(s, "")
             if not tgi:
                 continue
-            for other in tgis_in_mods.get(tgi, []):
-                mods_exact_tgi_coexist.append((s, tgi, other))
+            for other, (tgiset, _ok) in stbl_sets_in_mods.items():
+                if tgi in tgiset:
+                    mods_exact_tgi_coexist.append((s, tgi, other))
         mods_exact_tgi_coexist = sorted(set(mods_exact_tgi_coexist))
+        mods_malformed_pkgs = sorted(set(mods_malformed_pkgs))
     elif mods_root is not None:
         mods_scan_error = f"Mods root 不是目录: {mods_root}"
 
@@ -292,7 +300,12 @@ def main():
         L.append(f"exact-TGI coexist with 其他 Mods 文件 = {len(mods_exact_tgi_coexist)}")
         for s, tgi, other in mods_exact_tgi_coexist:
             L.append(f"- source={s!r} TGI={tgi} <-> {other!r}")
+        L.append(f"malformed package (parse 失败/无 index) = {len(mods_malformed_pkgs)}")
+        for mp in mods_malformed_pkgs:
+            L.append(f"- malformed: {mp!r}")
         L.append("(仅报告; ZERO WRITE; 需人工确认是否清理旧 sidecar 后再 canary)")
+        L.append("(coexist 判定枚举每个 package 的**全部** STBL TGI set; "
+                 "production CHS_target_TGI ∈ set 才算 coexist, 不止首个 STBL)")
         L.append("")
     L.append("## 000_ 当前策略下 FAIL rows (诊断; 000_ 已废弃)")
     for x in rows:
@@ -315,7 +328,8 @@ def main():
           f"leading_space={cand_leading_space} => {cand_adopt}")
     if mods_root is not None:
         print(f"MODS_COEXIST: preexist={len(cand_mods_preexist)} "
-              f"exact_tgi_coexist={len(mods_exact_tgi_coexist)}"
+              f"exact_tgi_coexist={len(mods_exact_tgi_coexist)} "
+              f"malformed={len(mods_malformed_pkgs)}"
               + (f" scan_error={mods_scan_error}" if mods_scan_error else ""))
     print(f"output: {out}")
     print(f"report: {rep}")
