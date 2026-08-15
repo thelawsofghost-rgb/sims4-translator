@@ -140,13 +140,58 @@ def main():
     # FAIL 行在现有策略下的暴露数 = n_fail; 新策略下如 policy_ok 则全 0
     policy_fail_under_new = (0 if policy_ok else None)
 
+    # ---- candidate_b: "!" + source_stem + "_CHS.package" ----
+    # 与现有 contract 完全相同的比较: candidate_b.lower() < source_basename.lower()
+    # 每行 machine-assert; 除非全 436 行满足:
+    #   candidate_b PASS = 436, FAIL = 0, duplicate target = 0, leading-space source = 0
+    # 否则禁止采用此候选。
+    cb_passes = 0
+    cb_fails = 0
+    cb_dup_targets = 0
+    cb_dup_paths = set()
+    cb_seen = {}
+    for x in rows:
+        s = x["source_basename"]
+        cand = "!" + Path(s).stem + "_CHS.package"
+        if cand.lower() < s.lower():
+            cb_passes += 1
+        else:
+            cb_fails += 1
+        if cand.lower() in cb_seen:
+            if cb_seen[cand.lower()] != s.lower():
+                cb_dup_targets += 1
+                cb_dup_paths.add(cand)
+        else:
+            cb_seen[cand.lower()] = s.lower()
+    # source 前导空格计数 (现有 contract 也从不给这类 source 生成合法 target)
+    cb_leading_space = sum(1 for x in rows if x["source_basename"][:1] == " ")
+    # source basename 在 lower() 后碰撞计数 (若有则 prefix 方案本身有歧义)
+    src_seen_lower = {}
+    src_collide = 0
+    for x in rows:
+        sl = x["source_basename"].lower()
+        if sl in src_seen_lower:
+            src_collide += 1
+        else:
+            src_seen_lower[sl] = True
+    cb_ok = (cb_passes == n_deploy and cb_fails == 0 and cb_dup_targets == 0
+             and cb_leading_space == 0)
+    cb_adopt = "ADOPT" if cb_ok else "REJECT"
+    cb_note = (f"candidate_b PASS={cb_passes} FAIL={cb_fails} dup_target={cb_dup_targets} "
+               f"leading_space={cb_leading_space} source_lower_collision={src_collide} => {cb_adopt}")
+
     out.parent.mkdir(parents=True, exist_ok=True)
     cols = ["source_basename", "target_basename", "target_lexically_earlier",
-            "source_first_char", "source_first_ord", "verdict"]
+            "source_first_char", "source_first_ord", "verdict",
+            "candidate_b", "candidate_b_earlier"]
     with open(out, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
         for x in rows:
+            s = x["source_basename"]
+            cand = "!" + Path(s).stem + "_CHS.package"
+            x["candidate_b"] = cand
+            x["candidate_b_earlier"] = "YES" if cand.lower() < s.lower() else "NO"
             w.writerow(x)
 
     rep.parent.mkdir(parents=True, exist_ok=True)
@@ -187,6 +232,20 @@ def main():
     L.append("- 约束: prefix 必须是合法 Windows 文件名部分 (不含 < > : \" / \\ | ? * 且不以点结尾).")
     L.append("- 本报告只读; 不重命名任何现有 Mods 文件, 不 bulk deploy.")
     L.append("")
+    L.append("## candidate_b: '!' + source_stem + '_CHS.package'")
+    L.append(f"candidate_b earlier PASS = {cb_passes}")
+    L.append(f"candidate_b earlier FAIL = {cb_fails}")
+    L.append(f"candidate_b duplicate target paths = {cb_dup_targets}")
+    L.append(f"source leading-space count = {cb_leading_space}")
+    L.append(f"source basename collision after lower() = {src_collide}")
+    L.append(f"ADOPT/REJECT: {cb_adopt}   ({cb_note})")
+    if cb_dup_targets:
+        L.append("重复 target (lower) 列表:")
+        for d in sorted(cb_dup_paths):
+            L.append(f"- {d!r}")
+    if not cb_ok:
+        L.append("原因: 未达到 PASS=436/FAIL=0/dup=0/leading-space=0, 禁止采用.")
+    L.append("")
     L.append("## 全部 FAIL rows")
     for x in rows:
         if x["verdict"] == "FAIL":
@@ -207,6 +266,8 @@ def main():
               f"{n_deploy} 行全满足 target<source: {policy_ok}")
     else:
         print(f"POLICY: 无可打印首字 < m={hex(m)}, 需特殊处理")
+    print(f"CANDIDATE_B: PASS={cb_passes} FAIL={cb_fails} dup_target={cb_dup_targets} "
+          f"leading_space={cb_leading_space} => {cb_adopt}")
     print(f"output: {out}")
     print(f"report: {rep}")
     return 0 if ok else 1
