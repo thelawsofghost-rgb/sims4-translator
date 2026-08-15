@@ -10,6 +10,8 @@ production base (frozen, 唯一, byte/content 必须不变):
   configs/translation_overrides.c26_pose_keep.csv    -> 26 pose C26 KEEP
   configs/title_terminal_keep.c26.csv                ->  3 title terminal KEEP
   configs/title_manual_translate.c26.csv             -> 20 title manual final TRANSLATE
+  configs/desc_terminal_keep.c26.csv                 ->  2 DESC terminal KEEP
+  configs/desc_manual_translate.c26.csv              -> 15 DESC manual final TRANSLATE
 
 输出 (新 derived 文件, 绝不触碰 frozen base 及其余任何文件):
   output/translation_overrides.production.csv
@@ -107,12 +109,14 @@ def main():
         return 3
     ROOT = Path(__file__).resolve().parent.parent
 
-    # 仅 production base + 三个增量层
+    # 仅 production base + 增量层 (含 DESC KEEP2 + manual15)
     layers = [
         ("BASE output/translation_overrides.csv", out_dir / "translation_overrides.csv", True),
         ("pose C26 KEEP", ROOT / "configs" / "translation_overrides.c26_pose_keep.csv", True),
         ("title terminal KEEP", ROOT / "configs" / "title_terminal_keep.c26.csv", True),
         ("title manual final TRANSLATE", ROOT / "configs" / "title_manual_translate.c26.csv", True),
+        ("desc terminal KEEP", ROOT / "configs" / "desc_terminal_keep.c26.csv", True),
+        ("desc manual final TRANSLATE", ROOT / "configs" / "desc_manual_translate.c26.csv", True),
     ]
 
     print("=== production overlay 构建 (非破坏, 只读 frozen BASE 114) ===")

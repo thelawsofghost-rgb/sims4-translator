@@ -953,3 +953,37 @@ final reconciliation (build_desc_final.py, 只读零模型):
         QA_FAIL=0 PENDING=0 REVIEW=0 empty=0 duplicate=0 source mismatch=0
         2+15+173=190 PASS。HARD-FAIL: 未裁决 QA_FAIL / 悬空终态 / manual∩keep / source mismatch。
   白盒 PASS + 3 负例 gates。不跑模型, 不生成 sidecar。先不 final merge。
+
+---
+== PACK_DESCRIPTION 190 补两 gate (2026-08-15) ==
+
+gate A — manual15/KEEP2 落盘不需手抄 CSV:
+  build_desc_manual.py 改为读 **仓库内 frozen dorothy 源表**
+    configs/desc_dorothy_frozen.c26.csv  (translation_id, final_translation)
+  tid + source_text 一律取自 真实 run done 的 QA_FAIL 行 (source of truth);
+  final_translation 取自 frozen 表。用户在 Windows 无需手抄 CSV (避免 TID/引号/逗号错误)。
+  输出 configs/desc_manual_translate.c26.csv = 15。
+  HARD-FAIL: 缺 frozen 译文 / dorothy 表含未知 tid / 含 KEEP tid / 重复 tid。
+  keep tid 由 --keep (desc_terminal_keep.c26.csv) 读取, 不再硬编码。
+  顺序: ① frozen dorothy 表落盘 -> ② build_desc_manual.py 生成 15 manual。
+
+gate B — final 之前必须先过真实 DONE173 content QA:
+  manual15/KEEP2 落盘 -> desc_content_qa.py 检查真实 DONE173 ->
+  suspicious candidates 人工复核 -> 若发现错译加 DESC manual correction layer ->
+  suspicious 全部 resolved -> 才 build_desc_final.py。
+  build_desc_final.py 新增 content-QA 闸门:
+    --qa-candidates <REVIEW_CANDIDATE csv> + --qa-allowlist <已 resolve tid>
+    任何 candidate tid 不在 allowlist -> HARD-FAIL unresolved_content_review > 0
+    (禁止把未处理 candidate 记 ACCEPTED_MODEL)。
+    --allow-zero-candidates: candidates 为空即 resolve。
+    白盒: 正例(全 resolve)=PASS; 负例(candidate 未 resolve)=unresolved_content_review>0 FAIL。
+
+gate C — DESC 两层接进 production overlay:
+  build_override_overlay.py 增量层 新增:
+    configs/desc_terminal_keep.c26.csv     (KEEP 2)
+    configs/desc_manual_translate.c26.csv  (TRANSLATE 15)
+  base114 + pose26 + titlekeep3 + titlemanual20 + desckeep2 + descmanual15
+  若全部 disjoint -> 理论 production overlay = 180 (KEEP 35 + TRANSLATE 145 per 用户假设,
+  但真实 action 拆分由真实 base 计算, 不硬编码 180)。
+  白盒 (synthetic base114 + 真实 layers disjoint): 最终 unique = 180, 交集全 0。
+  所有旧 frozen layer (base114/pose/title) 不修改。

@@ -17,6 +17,17 @@ precedence (高->低):
   --transl  configs/desc_manual_translate.c26.csv      (15 manual final)
   -o        output/translation_done_desc_final.csv     (新 derived, 不覆盖旧证据)
 
+content-QA 闸门 (用户裁决 2026-08-15):
+  在 final 之前必须先过真实 DONE173 content QA:
+    manual15 / KEEP2 落盘 -> desc_content_qa.py 检查真实 DONE173 ->
+    suspicious candidates 人工复核 -> 若发现错译则加 DESC manual correction layer ->
+    suspicious 全部 resolved -> 才 build_desc_final.py。
+  --qa-candidates <content QA 输出的 REVIEW_CANDIDATE csv> 传入后:
+    其中每个 suspicious tid 必须出现在 --qa-allowlist (已 resolve) 中;
+    否则 HARD-FAIL: unresolved_content_review > 0 (禁止把未处理 candidate 记 ACCEPTED_MODEL)。
+  --allow-zero-candidates: 允许 candidates 为空即为全部 resolve。
+  若省略 --qa-candidates: 打印提醒但默认放行 (纯终态计算); 生产建议务必传。
+
 终态分配 (唯一定, 由真实输入推导, 不硬编码):
   2 terminal KEEP + 15 manual final + 173 accepted model DONE = 190
   最终必须报告: rows=190 uniqueTid=190 KEEP=2 MANUAL_FINAL=15 ACCEPTED_MODEL=173
@@ -31,6 +42,7 @@ HARD-FAIL (source mismatch / duplicate tid / 不明覆盖):
     normalized 不一致                         -> FAIL (mismatch)
   - failed phrase 责任行: 若 done 里某 tid 的
     status=QA_FAIL 但 manual/keep 均无对应    -> FAIL
+  - unresolved_content_review > 0            -> FAIL (content-QA candidate 未 resolve)
   - 计数核对 != 190                          -> FAIL
 """
 import sys, os, csv, argparse, re
@@ -63,6 +75,12 @@ def main():
     ap.add_argument("--done", required=True, help="DESC run done CSV (190 行: 173 DONE + 17 QA_FAIL)")
     ap.add_argument("--keep", required=True, help="DESC terminal KEEP CSV (2)")
     ap.add_argument("--transl", required=True, help="DESC manual final TRANSLATE CSV (15)")
+    ap.add_argument("--qa-candidates", default=None,
+                    help="content QA 的 REVIEW_CANDIDATE csv (translation_id,...); 其 suspicious tid 需全 resolve")
+    ap.add_argument("--qa-allowlist", default=None,
+                    help="已 resolve 的 suspicious tid 清单 (csv/文本, 每行一个 tid)")
+    ap.add_argument("--allow-zero-candidates", action="store_true",
+                    help="candidates 为空视为已全部 resolve")
     ap.add_argument("-o", "--out", required=True)
     a = ap.parse_args()
 
@@ -130,6 +148,44 @@ def main():
             fail(f"source mismatch: {tid} done={done_by[tid].get('source_text')!r} "
                  f"config={src!r}")
 
+    # ---- content-QA 闸门: 未 resolve 的 suspicious candidate 禁止记 ACCEPTED_MODEL ----
+    cand_tids = set()
+    if a.qa_candidates:
+        import os as _os
+        if not _os.path.exists(a.qa_candidates):
+            fail(f"qa-candidates 文件不存在: {a.qa_candidates}")
+        else:
+            with open(a.qa_candidates, encoding="utf-8-sig") as _f:
+                _rd = list(csv.DictReader(_f))
+            for _r in _rd:
+                _t = _u(_r.get("translation_id"))
+                if _t:
+                    cand_tids.add(_t)
+    allow_tids = set()
+    if a.qa_allowlist:
+        import os as _os2
+        if _os2.path.exists(a.qa_allowlist):
+            with open(a.qa_allowlist, encoding="utf-8-sig") as _f:
+                for _ln in _f:
+                    _t = _ln.strip().split(",")[0].strip()
+                    if _t and _t.lower() not in ("translation_id", "tid"):
+                        allow_tids.add(_t)
+        else:
+            # 内联逗号分隔 allowlist
+            allow_tids = {x.strip() for x in a.qa_allowlist.split(",") if x.strip()}
+    if a.qa_candidates is None:
+        print("  [提醒] 未传 --qa-candidates: 跳过 content-QA 门 (仅为纯终态计算)。"
+              "生产请先过 desc_content_qa.py 并 resolve 后传入。")
+    elif a.allow_zero_candidates and not cand_tids:
+        print("  [content-qa] 无 suspicious candidate (allow-zero-candidates), resolve 通过。")
+    else:
+        unresolved_content_review = sorted(cand_tids - allow_tids)
+        if unresolved_content_review:
+            fail(f"unresolved_content_review > 0: {unresolved_content_review} "
+                 f"(content-QA suspicious 未 resolve, 禁止记 ACCEPTED_MODEL)")
+        else:
+            print(f"  [content-qa] 全部 {len(cand_tids)} 个 suspicious candidate 已 resolve (allowlist)。")
+
     # ---- 组装终态 (precedence: manual > keep > accepted DONE) ----
     origin = {}
     rows = []
@@ -180,12 +236,14 @@ def main():
     print(f"empty translation         = {n_empty}")
     print(f"duplicate                 = {n_dup}")
     print(f"source mismatch           = {len([m for m in dfail if m.startswith('source mismatch')])}")
+    print(f"unresolved_content_review = {len([m for m in dfail if m.startswith('unresolved_content_review')])}")
     sumok = (n_keep + n_man + n_acc == n_rows)
     print(f"核对 {n_keep}+{n_man}+{n_acc} = {n_keep + n_man + n_acc}  (rows={n_rows})  {'PASS' if sumok else 'FAIL'}")
 
+    unresolved_review = any(m.startswith("unresolved_content_review") for m in dfail)
     ok = (n_rows == 190 and n_uniq == 190 and n_keep == 2 and n_man == 15
           and n_acc == 173 and n_qa == 0 and n_pending == 0 and n_review == 0
-          and n_empty == 0 and n_dup == 0 and not dfail and sumok)
+          and n_empty == 0 and n_dup == 0 and not unresolved_review and not dfail and sumok)
     print(f"FINAL_HARD_GATE: {'PASS' if ok else 'FAIL'}  (期望 rows=190 uniq=190 KEEP=2 MANUAL=15 ACCEPTED=173 QA/PENDING/REVIEW=0)")
 
     if dfail:
