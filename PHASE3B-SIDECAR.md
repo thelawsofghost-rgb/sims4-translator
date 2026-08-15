@@ -586,27 +586,38 @@ QA/invariant 每批:
 白盒: Phase2B 直接吞 manifest (decision 缺省 TRANSLATE, detected 自动) 且不碰 frozen
   translations_todo.csv/translation_done.csv; 旧路径回归 69/69 不受影响。
 
-== TITLE 407 reconciliation + retry manifest + completion gate 修复 (2026-08-15) ==
-真实统计 (Windows 运行) + 用户裁决:
-  A SAME_AS_SOURCE_SEMANTIC = 37
-  B SAME_AS_SOURCE_NONSEMANTIC candidate = 5
+== TITLE 407 reconciliation + retry manifest + completion gate 修复 (2026-08-15, 二次修正) ==
+真实统计 (Windows fe2996f 运行) + 用户裁决 (正交 ROW_STATE + PHRASE_FAILURE):
+  A SAME_AS_SOURCE_SEMANTIC = 42
+  B SAME_AS_SOURCE_NONSEMANTIC candidate = 0
   C TRANSLATED = 365
-  D unresolved cache-miss phrase = 5   (D∩A=4, D−A=1, A∪D=38)
+  D unresolved cache-miss phrase = 5   (D∩A=4, D−A=1)
+  核对: 42 + 0 + 365 + 5 = 412; 但 rows=407, C=365 与 A/D 有重叠(部分 D∩A 语义已在 A)。
+  TITLE 终态： 3 terminal KEEP + 2 manual final TRANSLATE + 37 semantic retry + 1 D−A retry + 364 QA
+  核对: 3+2+37+1+364 = 407。
   engine run failed=8, 但 cache 重建仅确定 5 unresolved; 另 3 未经解释, 不声称已解决。
   后续翻译运行必须直接持久化 failed_phrase 明细, 不再靠 cache 反推。
 
-B 类 5 条人工裁决 (output/title_terminal_keep.csv + title_manual_translate.csv):
-  T_4735a1455d27_g1 simonly_VixenPoster#1          -> KEEP
-  T_a6c7c5d41cc4_g1 simonly_VixenPoster#2          -> KEEP
-  T_4dae944ecd3c_g1 simonly_VixenPoster#3          -> KEEP
-  T_84515fb8cf5f_g1 RosieSimsie_NSFW_CouplePoses_AllYours -> TRANSLATE manual = RosieSimsie_NSFW_情侣姿势_全属于你
-  T_df49e145de09_g1 motherlode_fight               -> TRANSLATE manual = motherlode_打斗
-  B→KEEP=3, B→TRANSLATE=2, REVIEW=0
-  禁止仅凭 underscore/camelCase 判 PACK_TITLE 为 technical KEEP。
+B 类人工裁决 (configs/title_terminal_keep.c26.csv + configs/title_manual_translate.c26.csv):
+  3 terminal KEEP:  simonly_VixenPoster#1/#2/#3 -> action=KEEP (不进 retry/workset)
+  2 manual final TRANSLATE:
+    RosieSimsie_NSFW_CouplePoses_AllYours -> RosieSimsie_NSFW_情侣姿势_全属于你
+    motherlode_fight -> motherlode_打斗
+    -> action=TRANSLATE + 人工定稿 translation, 禁止再送模型
+  B→KEEP=3, B→TRANSLATE=2, REVIEW=0。禁止仅凭 underscore/camelCase 判 PACK_TITLE technical KEEP。
 
-retry set (build_title_retry.py):
-  retry = (A∪D) ∪ B→TRANSLATE = 38 + 2 = 40 unique tid, 3 个 B→KEEP 不进 retry。
-  白盒: retry unique=40, dup=0, terminal KEEP∩=0, 不在 done=0  -> PASS。
+retry set (build_title_retry.py, 2026-08-15 修正口径):
+  retry = (A − terminal_KEEP − manual_final_TRANSLATE) ∪ (D − A)
+  = (42 − 3 − 2) ∪ (1) = 37 ∪ 1 = 38 unique tid
+  白盒: retry unique=38, dup=0, terminal KEEP∩=0, manual final∩=0, 407核对 PASS。
+  manual final 2 条绝不回 model workset。
+
+TITLE 两层 reconciliation 下游可读 (merge_title_reconciliation.py, 白盒 PASS):
+  合并进 canonical output/translation_overrides.csv (幂等; 冲突 STOP 不写):
+    phase2b_translate.load_overrides()         -> 读 3 KEEP + 2 TRANSLATE 定稿 (不经模型)
+    c_extract/final_todo.load_terminal_keep_tids() -> 读 3 KEEP (排除 terminal)
+    audit_override_workset_conflicts()         -> 读 override 流
+  CLI: python scripts/merge_title_reconciliation.py <out_dir>
 
 completion gate 修复 (phase2b_translate.py, 2026-08-15):
   对 authoritative TRANSLATE:
@@ -620,7 +631,8 @@ completion gate 修复 (phase2b_translate.py, 2026-08-15):
     (translation_id, segment_index, source_phrase, error)。白盒 9/9 PASS。
   materialize_from_cache 路径同样堵 echo (缓存物化译文==原文且含 pending -> QA_FAIL)。
 
-production workset: 排除 3 个 terminal KEEP 后 407 -> 404 (不硬塞回 407)。
+production workset: 排除 3 个 terminal KEEP 后 407 -> 404 authoritative (不硬塞回 407)。
+  2 manual pretranslated + 38 model retry = 40 TRANSLATE; 其余 364 QA (无已知失败)。
 Phase2B scope-at-load / authoritative / POLICY-CONFLICT 全保留。
 translation_done_batch_title.csv 仍为 draft, 禁止直接 merge。DESC 190 继续暂停。
 

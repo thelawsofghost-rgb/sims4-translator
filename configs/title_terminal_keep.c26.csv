@@ -1,4 +1,4 @@
-translation_id,source_text,decision,action,reason,notes
-T_4735a1455d27_g1,simonly_VixenPoster#1,KEEP,KEEP,TITLE B类人工裁决 2026-08-15: 作者/品牌半技术标识, 无玩家可见独立语义, 保持原文,terminal KEEP,TITLE terminal reconciliation (独立文件, 不改旧 frozen catalog)
-T_a6c7c5d41cc4_g1,simonly_VixenPoster#2,KEEP,KEEP,TITLE B类人工裁决 2026-08-15: 作者/品牌半技术标识, 无玩家可见独立语义, 保持原文,terminal KEEP,TITLE terminal reconciliation (独立文件, 不改旧 frozen catalog)
-T_4dae944ecd3c_g1,simonly_VixenPoster#3,KEEP,KEEP,TITLE B类人工裁决 2026-08-15: 作者/品牌半技术标识, 无玩家可见独立语义, 保持原文,terminal KEEP,TITLE terminal reconciliation (独立文件, 不改旧 frozen catalog)
+translation_id,source_text,translation,action,reason,notes
+T_4735a1455d27_g1,simonly_VixenPoster#1,,KEEP,TITLE B类人工裁决 2026-08-15: 作者/品牌半技术标识, 无玩家可见独立语义, 保持原文,TITLE terminal KEEP (c26_title_keep) 独立人工 reconciliation, 不改旧 frozen catalog
+T_a6c7c5d41cc4_g1,simonly_VixenPoster#2,,KEEP,TITLE B类人工裁决 2026-08-15: 作者/品牌半技术标识, 无玩家可见独立语义, 保持原文,TITLE terminal KEEP (c26_title_keep) 独立人工 reconciliation, 不改旧 frozen catalog
+T_4dae944ecd3c_g1,simonly_VixenPoster#3,,KEEP,TITLE B类人工裁决 2026-08-15: 作者/品牌半技术标识, 无玩家可见独立语义, 保持原文,TITLE terminal KEEP (c26_title_keep) 独立人工 reconciliation, 不改旧 frozen catalog
