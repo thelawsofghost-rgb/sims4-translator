@@ -586,4 +586,23 @@ QA/invariant 每批:
 白盒: Phase2B 直接吞 manifest (decision 缺省 TRANSLATE, detected 自动) 且不碰 frozen
   translations_todo.csv/translation_done.csv; 旧路径回归 69/69 不受影响。
 
+== authoritative + scope-at-load 修正 (2026-08-15, 生产级) ==
+问题1 done 泄出: 原 --id-file 只过滤 pending 子集, done 仍写整份 todo(626)。
+问题2 权威决策被推翻: Phase2B 老 classifier 把部分 pose 描述 (Walk5/1B (animation)/
+  8 *animation 等) 重判 KEEP, 29 个 POSE tid 全被排出 pending -> 589->0, 再靠 626 掩盖。
+
+修复 (phase2b_translate.py, 不改 batch plan/catalog/workset/coverage/writer):
+1) scope-at-load: --id/--id-from-file/--regex/--category 在 load_todo 后、任何
+   classification/override/translation/write 之前先把 todo 裁成目标 tid 集。
+   强 invariant: requested==scoped-todo, output⊆requested, extra=0。
+   requested tid 不存在 -> [HARD-FAIL]。
+2) --authoritative: 进入 manifest 的 decision=TRANSLATE 是权威, 老 classifier 不得改判
+   KEEP/DONE_SKIP -> 强制 FULL/PARTIAL 进翻译; KEEP 形态也进。
+   override 声称 KEEP 但权威 TRANSLATE -> [POLICY-CONFLICT] fail-fast。
+   未完成行以 PENDING 显式呈现, 不靠 626 掩盖。
+
+白盒 wb_authoritative_scope (9/9): 626+id29+authoritative -> scope=29, 待翻译=29
+  (3 个 KEEP 形态强制进), done=29 绝不 626, done⊆requested, 无 KEEP; KEEP override
+  -> POLICY-CONFLICT; 不存在 tid -> HARD-FAIL; PENDING 显式。全白盒 9 套 + 回归 69/69 PASS。
+
 **验证要求 (汇报)**: 10 个 sidecar 文件名 / 每包修改 key 数 / writer verify / independent audit / 是否全部 PASS。

@@ -87,6 +87,7 @@ if ID_FROM_FILE:
         print(f"[--id-from-file] 读取 {len(_ids)} 个 tid")
 ONLY_REGEX = _flag_val("--regex")            # 只处理 source_text 匹配该正则的行
 ONLY_CATEGORY = _flag_val("--category")      # 只处理 decision/category 等于该值的行
+AUTHORITATIVE_DECISION_ON = "--authoritative" in ARGS  # 权威 workset: decision=TRANSLATE 不得被老 classifier 改判 KEEP
 CONCURRENCY = int(_flag_val("--concurrency", "8"))
 BATCH_SIZE = int(_flag_val("--batch-size", "8"))
 
@@ -907,6 +908,45 @@ def main():
     todo = load_todo()
     print(f"[输入] todo 行数 = {len(todo)}")
 
+    # ---- 作用域: CLI 定位 (--id / --id-from-file / --regex / --category) 必须在任何
+    #      classification / override / translation / write 之前, 先把 todo 裁成目标 tid 集。
+    #      否则分类与 done 都会看到整份 todo (泄出其它 batch)。----
+    if ONLY_ID or ONLY_REGEX or ONLY_CATEGORY:
+        _idreq = set(x.strip() for x in ONLY_ID.split(",")) if ONLY_ID else None
+        _rxreq = re.compile(ONLY_REGEX) if ONLY_REGEX else None
+        _scoped = []
+        for r in todo:
+            tid = r.get("translation_id", "")
+            src = norm_text(r.get("source_text", ""))
+            cat = (r.get("category") or r.get("decision") or "")
+            if _idreq is not None and tid not in _idreq:
+                continue
+            if _rxreq is not None and not _rxreq.search(src):
+                continue
+            if ONLY_CATEGORY is not None and cat != ONLY_CATEGORY:
+                continue
+            _scoped.append(r)
+        _req = set(r.get("translation_id", "") for r in todo)
+        if _idreq is not None:
+            _missing = _idreq - _req
+            if _missing:
+                raise SystemExit(f"[HARD-FAIL] requested tid 不存在于 todo: {sorted(_missing)[:10]}")
+        todo = _scoped
+        print(f"[scope] todo 裁剪: 全量-> {len(todo)} 行 (CLI 定位)")
+        assert _idreq is None or set(r.get('translation_id') for r in todo) <= _idreq, "scope 泄出 requested tid"
+        print(f"[invariant] requested={len(_idreq) if _idreq else 'regex'} scoped-todo={len(todo)}  output⊆requested")
+
+    # ---- authoritative workset: 当 --todo 是 frozen manifest (带权威 decision),
+    #      不得用老 classifier 把 authoritative TRANSLATE 重新判成 KEEP/DONE_SKIP。----
+    AUTHORITATIVE = AUTHORITATIVE_DECISION_ON
+    if AUTHORITATIVE:
+        _auth_tr = 0
+        for r in todo:
+            _d = (r.get("decision") or "").strip()
+            if _d in ("TRANSLATE", "FULL_TRANSLATE", "PARTIAL_TRANSLATE"):
+                _auth_tr += 1
+        print(f"[authoritative] 权威 decision=TRANSLATE 行数 = {_auth_tr} (老 classifier 不得改判 KEEP)")
+
     # 语言检测 sanity check (只报不一致, 不覆盖 todo 值)
     mism = sanity_check_lang(todo)
     if mism:
@@ -944,6 +984,10 @@ def main():
                     decided.append((r, "OVERRIDE_T", o["translation"], "DONE", lang))
                     continue
             else:  # KEEP
+                if AUTHORITATIVE_DECISION_ON and (r.get("decision") or "").strip() in ("TRANSLATE", "FULL_TRANSLATE", "PARTIAL_TRANSLATE"):
+                    raise SystemExit(
+                        f"[POLICY-CONFLICT] tid {tid} authoritative decision=TRANSLATE, "
+                        f"但 override 声称 KEEP ({text!r}). 权威 workset 不得被静默 KEEP。")
                 decided.append((r, "OVERRIDE_K", "", "KEEP", lang))
                 continue
         if text in APPROVED_TEXT:
@@ -953,7 +997,14 @@ def main():
             decided.append((r, mode, zh, status, alang))
             continue
         mode, sem, toks = translate_mode_for(text)
-        if mode == "KEEP":
+        _auth_tr = AUTHORITATIVE_DECISION_ON and (r.get("decision") or "").strip() in ("TRANSLATE", "FULL_TRANSLATE", "PARTIAL_TRANSLATE")
+        if mode == "KEEP" and _auth_tr:
+            # 权威 workset 明确 TRANSLATE, 老 classifier 不得改判 KEEP/DONE_SKIP:
+            # 强制进翻译流程 (无 ID/编号需保留 -> FULL; 有 -> PARTIAL)
+            _ids_kept = [tk for tk in toks if not (tk.islower() and len(tk) == 1)]
+            mode = "FULL_TRANSLATE" if not _ids_kept else "PARTIAL_TRANSLATE"
+            decided.append((r, mode, None, "PENDING", lang))  # 权威强制翻译
+        elif mode == "KEEP":
             decided.append((r, mode, "", "DONE_SKIP", lang))
         else:
             decided.append((r, mode, None, "PENDING", lang))  # 待翻译
