@@ -433,7 +433,7 @@ class Program
         {
             bool ok1 = !TryParseM64("0x1:!!!notbase64@@@:AQ==", out _, out _);
             bool ok2 = !TryParseM64("nothex:bXk=:AQ==", out _, out _);   // 非法 key
-            bool ok3 = !TryParseM64("0x1:6KiA6KiA6KiA6KiA6KiA6KiA6KiA6KiA6KiA6KiA:Dw==", out _, out _); // 非法 UTF-8 序列
+            bool ok3 = !TryParseM64("0x1:gA==:Dw==", out _, out _);                       // 非法 UTF-8: 孤立 continuation byte 0x80
             bool ok4 = !TryParseM64("0x1:QQ==", out _, out _);            // 只有 2 字段
             bool ok5 = !TryParseM64("0x1::", out _, out _);               // 空字段
             bool ok = ok1 && ok2 && ok3 && ok4 && ok5;
