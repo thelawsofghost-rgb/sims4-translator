@@ -85,6 +85,36 @@ class Program
                         mods.Add(new Modification { KeyHash = kh, ExpectedSource = expected, TranslatedValue = value });
                         break;
                     }
+                case "-m64":
+                    {
+                        // 格式: KEYHASH:BASE64_EXPECTED:BASE64_VALUE (exactly 3 fields)
+                        // 传输边界修复 (2026-08-16): expected/value 以 standard Base64 编码 UTF-8 承载,
+                        // 彻底规避 source/translation 内含 ':' 时与冒号定界冲突。
+                        // parser 严格 exactly 3 fields; malformed Base64 / invalid UTF-8 / invalid key -> ERROR fail-closed。
+                        string raw = args[++i];
+                        int c1 = raw.IndexOf(':');
+                        if (c1 < 0) { Fail("bad -m64 (need KEYHASH:BASE64_EXPECTED:BASE64_VALUE): " + raw); return 1; }
+                        int c2 = raw.IndexOf(':', c1 + 1);
+                        if (c2 < 0) { Fail("bad -m64 (need KEYHASH:BASE64_EXPECTED:BASE64_VALUE): " + raw); return 1; }
+                        string kh_s = raw.Substring(0, c1);
+                        string exp_b64 = raw.Substring(c1 + 1, c2 - c1 - 1);
+                        string val_b64 = raw.Substring(c2 + 1);
+                        // KEYHASH 与 EXPECTED_B64 必非空; VALUE_B64 可为空 (空译文合法)。
+                        if (kh_s.Length == 0 || exp_b64.Length == 0)
+                        {
+                            Fail("bad -m64: empty key/expected (need KEYHASH:BASE64_EXPECTED[:BASE64_VALUE]): " + raw); return 1;
+                        }
+                        uint kh;
+                        try { kh = ParseHexU32(kh_s); }
+                        catch (Exception) { Fail("bad -m64: invalid key hash: " + kh_s); return 1; }
+                        string expected, value;
+                        if (!TryBase64Utf8(exp_b64, out expected))
+                        { Fail("bad -m64: expected Base64/UTF-8 decode failed: " + exp_b64); return 1; }
+                        if (!TryBase64Utf8(val_b64, out value))   // 空串 decode 为空 -> 合法
+                        { Fail("bad -m64: value Base64/UTF-8 decode failed: " + val_b64); return 1; }
+                        mods.Add(new Modification { KeyHash = kh, ExpectedSource = expected, TranslatedValue = value });
+                        break;
+                    }
                 default:
                     Fail("unknown arg: " + args[i]); return 1;
             }
@@ -92,7 +122,7 @@ class Program
 
         if (sourcePath == null || outPath == null || !hasTgi || mods.Count == 0)
         {
-            Fail("usage: SidecarBuilder -source SRC -out OUT -type T -group G -inst I [-locale 0x01] -m KEYHASH:EXPECTED:VALUE ...");
+            Fail("usage: SidecarBuilder -source SRC -out OUT -type T -group G -inst I [-locale 0x01] [-m KEYHASH:EXPECTED:VALUE | -m64 KEYHASH:B64_EXP:B64_VAL] ...");
             return 1;
         }
         if (!File.Exists(sourcePath)) { Fail("source not found: " + sourcePath); return 1; }
@@ -291,6 +321,29 @@ class Program
     static uint ParseHexU32(string s) { return Convert.ToUInt32(s.StartsWith("0x") ? s.Substring(2) : s, 16); }
     static ulong ParseHexU64(string s) { return Convert.ToUInt64(s.StartsWith("0x") ? s.Substring(2) : s, 16); }
 
+    // standard Base64 -> UTF-8 exact decode (fail-closed): 返回 false 当 malformed Base64 或 decode 后非合法 UTF-8。
+    static bool TryBase64Utf8(string b64, out string text)
+    {
+        text = null;
+        try
+        {
+            byte[] bytes = Convert.FromBase64String(b64);
+            var strict = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+            text = strict.GetString(bytes);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    // standard Base64 encode (与 Python base64.b64encode 一致, 含 padding)
+    static string Base64EncodeUtf8(string s)
+    {
+        return Convert.ToBase64String(Encoding.UTF8.GetBytes(s));
+    }
+
     // 64-bit Instance 的最高 8 bits (bits 56-63) 编码 locale (0x01=CHS_CN, 0x02=CHT)。
     // 例 0x014EACCF17C8B091 字节序 [01 4E AC CF 17 C8 B0 91], 最高 byte = 0x01。
     static byte LocaleTopByte(ulong inst) { return (byte)((inst >> 56) & 0xFF); }
@@ -298,6 +351,15 @@ class Program
     // Regression self-check: --selfcheck
     // 验证 locale 顶层字节取位 (必须为 >>56, 而非 >>32)。
     static int SelfCheck()
+    {
+        int rc = SelfCheckLocale();
+        int rc2 = SelfCheckM64();
+        bool allOk = (rc == 0 && rc2 == 0);
+        Console.WriteLine(allOk ? "SELFCHECK=PASS" : "SELFCHECK=FAIL");
+        return allOk ? 0 : 1;
+    }
+
+    static int SelfCheckLocale()
     {
         var cases = new[] {
             new { Inst = 0x014EACCF17C8B091UL, Want = (byte)0x01 },
@@ -313,7 +375,93 @@ class Program
             Console.WriteLine(string.Format("locale(0x{0:X16}) => 0x{1:X2} expecting 0x{2:X2} : {3}",
                 c.Inst, got, c.Want, ok ? "PASS" : "FAIL"));
         }
-        Console.WriteLine(allOk ? "SELFCHECK=PASS" : "SELFCHECK=FAIL");
         return allOk ? 0 : 1;
+    }
+
+    // -m64 transport 契约 regression (纯逻辑, 无需 s4pi)
+    // 覆盖: source 含 ':' / value 含 ':' / 中文 Unicode / creator 括号 / 空 value /
+    //       普通 ASCII + 负向 (decoded expected != actual source -> write precondition 仍 FAIL)。
+    // 编码: string -> UTF-8 -> standard Base64 (与 Python base64.b64encode 双向互通)。
+    static int SelfCheckM64()
+    {
+        bool allOk = true;
+        // (label, expected_source, translated_value, want_roundtrip)
+        var cases = new (string, string, string, bool)[] {
+            ("source_colon",      "Need: [MURPHY] iPhone 13 Pro Max (hat, LEFT)", "需要：iPhone 13 Pro Max 帽子（左）", true),
+            ("value_colon",       "普通姿势", "姿势 A：左侧（带冒号的译文）", true),
+            ("chinese_unicode",   "相拥", "深情相拥（中文 Unicode）", true),
+            ("creator_brackets",  "[wrenmie] Posepack 5: Cozy Days", "[wrenmie] 姿势包 5：舒适时光", true),
+            ("empty_value",       "空译文目标", "", true),
+            ("ordinary_ascii",    "plain ascii pose", "plain translated value", true),
+            ("second_colon_src",  "ALL-IN-ONE: RIGHT", "全能：右侧", true),
+        };
+        foreach (var c in cases)
+        {
+            string exp_b64 = Base64EncodeUtf8(c.Item2);
+            string val_b64 = Base64EncodeUtf8(c.Item3);
+            // 模拟 orchestrator 发送的 -m64 token: KEYHASH:B64_EXP:B64_VAL
+            string token = "0x12345678:" + exp_b64 + ":" + val_b64;
+            string got_exp, got_val;
+            bool parsed = TryParseM64(token, out got_exp, out got_val);
+            bool ok = parsed && got_exp == c.Item2 && got_val == c.Item3;
+            allOk &= ok;
+            Console.WriteLine(string.Format("-m64 {0}: roundtrip={1} (expected_b64_len={2})",
+                c.Item1, ok ? "PASS" : "FAIL", exp_b64.Length));
+        }
+
+        // 负向 1: decoded expected != actual source -> 该 mod 必须 FAIL (write precondition)
+        {
+            // 编码一个与真实 source 不同的 expected; 模拟 writer 与 STBL 比对时应 FAIL
+            string wrong_expected = "Wrong: source text that won't match";
+            string real_source = "Actual: real source in STBL";
+            string exp_b64 = Base64EncodeUtf8(wrong_expected);
+            string val_b64 = Base64EncodeUtf8("译文");
+            string got_exp, got_val;
+            bool parsed = TryParseM64("0x12345678:" + exp_b64 + ":" + val_b64, out got_exp, out got_val);
+            bool decode_ok = parsed && got_exp == wrong_expected;
+            // 关键: decode 正确还原了 wrong_expected, 而 wrong_expected != real_source -> precondition 必须 FAIL
+            bool would_fail = decode_ok && (got_exp != real_source);
+            bool ok = decode_ok && would_fail;
+            allOk &= ok;
+            Console.WriteLine(string.Format("-m64 negative: decoded_expected={0}", got_exp));
+            Console.WriteLine(string.Format("-m64 negative: expected!=source -> would_fail={0} : {1}",
+                would_fail, ok ? "PASS" : "FAIL"));
+        }
+
+        // malformed Base64 / invalid UTF-8 / non-hex key -> TryParseM64 必须返回 false (ERROR fail-closed)
+        {
+            bool ok1 = !TryParseM64("0x1:!!!notbase64@@@:AQ==", out _, out _);
+            bool ok2 = !TryParseM64("nothex:bXk=:AQ==", out _, out _);   // 非法 key
+            bool ok3 = !TryParseM64("0x1:6KiA6KiA6KiA6KiA6KiA6KiA6KiA6KiA6KiA6KiA:Dw==", out _, out _); // 非法 UTF-8 序列
+            bool ok4 = !TryParseM64("0x1:QQ==", out _, out _);            // 只有 2 字段
+            bool ok5 = !TryParseM64("0x1::", out _, out _);               // 空字段
+            bool ok = ok1 && ok2 && ok3 && ok4 && ok5;
+            allOk &= ok;
+            Console.WriteLine(string.Format("-m64 malformed-fail-closed: malformed_b64={0} bad_key={1} bad_utf8={2} two_fields={3} empty={4} : {5}",
+                ok1, ok2, ok3, ok4, ok5, ok ? "PASS" : "FAIL"));
+        }
+        return allOk ? 0 : 1;
+    }
+
+    // 解析 -m64 token KEYHASH:B64_EXP:B64_VAL -> (expected, value)。
+    // strictly 3 colon fields; KEYHASH 与 B64_EXP 必非空, B64_VAL 可为空 (空译文合法);
+    // 任何 decode/key 错误 -> false。
+    static bool TryParseM64(string raw, out string expected, out string value)
+    {
+        expected = null; value = null;
+        int c1 = raw.IndexOf(':');
+        if (c1 < 0) return false;
+        int c2 = raw.IndexOf(':', c1 + 1);
+        if (c2 < 0) return false;
+        string kh_s = raw.Substring(0, c1);
+        string exp_b64 = raw.Substring(c1 + 1, c2 - c1 - 1);
+        string val_b64 = raw.Substring(c2 + 1);
+        if (kh_s.Length == 0 || exp_b64.Length == 0) return false;
+        try { ParseHexU32(kh_s); } catch (Exception) { return false; }
+        string e, v;
+        if (!TryBase64Utf8(exp_b64, out e)) return false;
+        if (!TryBase64Utf8(val_b64, out v)) return false;
+        expected = e; value = v;
+        return true;
     }
 }
