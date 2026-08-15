@@ -1340,7 +1340,8 @@ production final      > old catalog decision -> catalog_decision_superseded
   E) 当前 cohort REVIEW 无更高层终态 (unresolved)
 
 **preflight 报告 production source health:**
-  overlay=217 / title=407 / desc=190 / done nonempty unique=1888 / catalog=3540
+  overlay=241 / title=407 / desc=190 / done nonempty unique=1888 / catalog=3540
+  (2026-08-15 run2 KEEP24 冻结后 overlay 241=KEEP59+TR182+REV0; 历史 217 属 provenance)
   title_desc_overlap=? / title_desc_conflict=0
   historical_superseded=? / catalog_decision_superseded=?
 然后 10 包: approved/KEEP/TRANSLATE/unresolved/source_mismatch/duplicate_KeyHash/CHS_TGI。

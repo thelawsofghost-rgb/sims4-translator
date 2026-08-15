@@ -8,20 +8,21 @@ run2_preflight.py —— Phase 3B2-SIDECAR run2 resolver/production-input 零写
 (不建 package, 不碰 package, 不写 sidecar, 不改 Mods)。
 
 production source (preflight 与 generation 必须使用完全相同):
-  production_overlay  = 217   (explicit latest terminal override, 最高权威)
+  production_overlay  = 241   (explicit latest terminal override, 最高权威)
   title_final         = 407   (新批次 final)
   desc_final          = 190   (新批次 final)
   translation_done    = 1888  (historical final translation fallback, nonempty unique)
   translation_catalog = 3540  (decision/index ONLY, 不是 final payload)
 
-已退出 resolver (只作 provenance/audit, base114 已被 production overlay217 完整包含):
+已退出 resolver (只作 provenance/audit, base114 已被 production overlay241 完整包含;
+历史 217 为 run2 KEEP24 冻结前快照, 属 provenance):
   translation_overrides.csv (base114), translation_overrides.final2.csv
 
 禁止作 final payload: catalog.translation, translation_cache.db。
 
 报告结构:
   1) production source health:
-       overlay rows = 217 / title rows = 407 / desc rows = 190
+       overlay rows = 241 / title rows = 407 / desc rows = 190
        historical done nonempty unique = 1888 / catalog rows = 3540
        title_desc_overlap = ? / title_desc_conflict = 0
        historical_superseded = ? / catalog_decision_superseded = ?
@@ -69,7 +70,7 @@ def main():
     ap.add_argument("--title-final", required=True, help="output/translation_done_title_final.csv (407)")
     ap.add_argument("--desc-final", required=True, help="output/translation_done_desc_final.csv (190)")
     ap.add_argument("--production-overlay", required=True,
-                    help="output/translation_overrides.production.csv (217)")
+                    help="output/translation_overrides.production.csv (241)")
     ap.add_argument("--done", default="", help="output/translation_done.csv (historical final, nonempty unique 1888)")
     ap.add_argument("--catalog", default="", help="output/translation_catalog.csv (decision/index only 3540)")
     ap.add_argument("--report", default="", help="显式写出纯文本 preflight report (缺省只打印)")
@@ -115,7 +116,7 @@ def main():
     td_conflict = sum(1 for k in (tf_keys & df_keys)
                       if resolver.title[k]["translation"] != resolver.desc[k]["translation"])
     out_lines.append("production source health:")
-    out_lines.append(f"  overlay rows                     = {len(resolver.overlay)}  (期望 217)")
+    out_lines.append(f"  overlay rows                     = {len(resolver.overlay)}  (期望 {EXPECTED_ROWS['production_overlay']})")
     out_lines.append(f"  title rows                       = {len(resolver.title)}  (期望 407)")
     out_lines.append(f"  desc rows                        = {len(resolver.desc)}  (期望 190)")
     out_lines.append(f"  historical done nonempty unique  = {len(resolver.done)}  (期望 1888)")

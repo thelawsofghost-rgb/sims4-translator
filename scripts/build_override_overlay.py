@@ -46,7 +46,7 @@ production base (frozen, 唯一, byte/content 必须不变):
 
 用法:
   python scripts/build_override_overlay.py <out_dir> [--out <path>] [--no-write]
-  python scripts/build_override_overlay.py <out_dir> --expect "217,35,182,0"
+  python scripts/build_override_overlay.py <out_dir> --expect "241,59,182,0"
   python scripts/build_override_overlay.py <out_dir> --expect ""   # 关闭 invariant gate (仅报告)
 """
 import sys, os, csv, argparse
@@ -209,7 +209,7 @@ def main():
           f"(KEEP={n_keep}, TRANSLATE={n_tr}, REVIEW={n_rev})")
 
     # 生产成品 invariant gate (fail-closed): 不符即 HARD-FAIL, 不写文件
-    # --expect "" 关闭门 (仅报告); 默认 217,35,182,0 为生产期望
+    # --expect "" 关闭门 (仅报告); 默认 241,59,182,0 为生产期望
     if (a.expect or "").strip():
         try:
             exp_unique, exp_keep, exp_tr, exp_rev = [int(x) for x in a.expect.split(",")]

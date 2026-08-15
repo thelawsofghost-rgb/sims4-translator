@@ -6,14 +6,14 @@ production_resolver.py —— Phase 3B2-SIDECAR run2 production resolver（五�
 背景: 真实 Windows historical-source reduction audit PASS 后, production resolver 输入
 正式冻结为五份 (preflight 与 generation 必须使用完全相同):
 
-  production_overlay  = 217  (explicit latest terminal override, 最高权威)
+  production_overlay  = 241  (explicit latest terminal override, 最高权威)
   title_final         = 407  (新批次 final)
   desc_final          = 190  (新批次 final)
   translation_done    = 1888 (historical final translation fallback)
   translation_catalog = 3540 (decision/index ONLY, 不是 final payload)
 
 以下文件【退出】production resolver, 只保留 provenance/audit (base114 已被
-production overlay217 完整包含, 见 reduction audit):
+production overlay241 完整包含; 历史 217 为 run2 KEEP24 冻结前快照, 属 provenance):
   translation_overrides.final2.csv
   translation_overrides.csv            (= base114)
 
@@ -94,10 +94,14 @@ BANNED_PRODUCTION_SOURCE = {
 
 # 每个 production 源应预期的行/非空数 (用户冻结值; 违反即 HARD-FAIL)
 #   注意: done 与 catalog 用 unique (tid,norm_source) 判定; overlay/title/desc 用行数
+# 每个 production 源应预期的行/非空数 (用户冻结值; 违反即 HARD-FAIL)
+#   注意: done 与 catalog 用 unique (tid,norm_source) 判定; overlay/title/desc 用行数。
+#   单一常量来源: 所有 active production 路径 (resolver/preflight/gen) 均引用此表,
+#   避免脚本各自残留旧数字。2026-08-15 run2 KEEP24 冻结后 overlay=241 (KEEP59+TR182+REV0)。
 EXPECTED_ROWS = {
     "title_final": 407,
     "desc_final": 190,
-    "production_overlay": 217,
+    "production_overlay": 241,
     "translation_done_nonempty_unique": 1888,
     "catalog_rows": 3540,
 }
