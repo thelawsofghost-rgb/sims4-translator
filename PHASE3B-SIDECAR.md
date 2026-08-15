@@ -1502,3 +1502,46 @@ stray 未入 manifest .package / NOOP 却存在 sidecar —— 全部正确 FAIL
 白盒 (v2): A1 source 18 STBL + target 一次 PASS; A2 target 缺失 FAIL; A3 target 重复 FAIL;
 B1 NOOP planned output_sidecar 磁盘不存在 PASS。
 既有回归 test_phase2b_regression(135/0) + test_sidecar_audit_regression(13/0) 保持 PASS。
+
+---
+
+## 🔍 run2_r5_rootcause.py —— R5 逐 KeyHash 只读 root-cause dump (2026-08-15)
+
+真实独立审计 v2: slot 1/6/7 PASS, **slot 2/3/4/8/9/10 FAIL**, ERROR=0, 失败全集中在 R5。
+
+定位前不做任何行为修复 (不修 auditor / writer / resolver, 不重新 generation)。先做一次
+**纯只读、逐 KeyHash** 的 R5 根因 dump, 区分是 resolver 判定与 writer 写入不一致, 还是
+KEEP 键被误改, 还是 norm 后命中但 exact 不同 (空格/换行/NBSP/Unicode normalization 被视觉隐藏)。
+
+新增 `scripts/run2_r5_rootcause.py` (只读):
+- 冷读 source target CHS STBL + sidecar sole STBL (同 independent_sidecar_audit 的解析),
+  对每个 approved key 独立重算 production resolver 最终译文。
+- 每个 key 一行 CSV: slot/package/role/keyhash / resolver_action(KEEP|TRANSLATE)/
+  resolver_source(OVERRIDE|DONE|CACHE|KEEP_flag|MISSING|SOURCE_MISMATCH)/resolver_final/
+  source_stbl_text/sidecar_stbl_text (repr) / manifest_action+expected-final (per-key 无 -> 留空)/
+  source_eq_final/source_eq_sidecar/final_eq_sidecar/source_changed。
+- 按 unique KeyHash 互斥分类: TRANSLATE_CHANGED_OK / TRANSLATE_NOOP / TRANSLATE_NOT_APPLIED /
+  TRANSLATE_WRONG_VALUE / KEEP_OK / KEEP_CHANGED。
+- 每 slot aggregate: resolver TRANSLATE count / 各分类计数 / physical changed-key count /
+  manifest modified_key_count。
+- --known-keyhash 对指定 kh 输出精确 repr 对比: len(text) / UTF-8 byte length / NFC eq /
+  exact Python eq。审计以 exact stored string 为准, 不放宽 normalization。
+- role 复用 gen_cohort_sidecars.approved_pv_refs (只读 XML 遍历) 得 per-key category
+  (PACK_TITLE/PACK_DESCRIPTION/POSE_DISPLAY_NAME)。
+
+CLI (Windows 单行, 全只读):
+  python scripts\run2_r5_rootcause.py ^
+    --manifest output\cohort_sidecars_run2_retry1\cohort_sidecar_manifest.csv ^
+    --title-final output\translation_done_title_final.csv ^
+    --desc-final output\translation_done_desc_final.csv ^
+    --production-overlay output\translation_overrides.production.csv ^
+    --done output\translation_done.csv ^
+    --catalog-final output\translation_catalog.csv ^
+    --out output\run2_r5_rootcause.csv
+  # 已知 9 KeyHash 精确 repr: 加 --known-keyhash 0x672FCF0A,0x21049F5E,0x55671880,0xC1540619,0xEA0E275A,0x15D10254,0x2AC02610,0x4DD84C68,0x8DC4D3F4
+  # 只诊断失败 6 slot: --slots s2,s3,s4,s8,s9,s10
+exit code: 0 = 完成 (dump 成功, 不影响审计结论); 2 = CLI/加载错误。
+
+白盒: 6 分类全部正确分支 (CHANGED_OK/NOOP/NOT_APPLIED/WRONG_VALUE/KEEP_OK/KEEP_CHANGED),
+known-key repr 表 (len/bytes/NFC/exact) 就位; 既有 independent_sidecar_audit 白盒回归保持 PASS。
+退出码语义保留: 本工具只诊断, 不改审计结论。
