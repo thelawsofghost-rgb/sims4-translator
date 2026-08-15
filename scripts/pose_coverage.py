@@ -286,6 +286,7 @@ def scan_package(path: str) -> dict:
         "COBJ_count": 0,
         "RSLT_count": 0,
         "FTPT_count": 0,
+        "strong_object_footprint": 0,
         "multiple_target_STBL_families": 0,
         "status": "ERROR",
         "reason": "",
@@ -540,27 +541,37 @@ def scan_package(path: str) -> dict:
 
 
 def _classify(row: dict) -> dict:
-    # ---- STRONG_OBJECT_FOOTPRINT gate (fail-closed) ----
-    # 命中: OBJD>0 AND COBJ>0 AND (RSLT>0 OR FTPT>0) -> SKIP_FALSE_POSITIVE_INTERNAL_POSE
-    # 这是 functional-object 内部内置 pose 的强证据 (448 census: 唯一命中=Kritical),
-    # 无论 CHS 状态如何都不得判 ELIGIBLE。
-    if (row["OBJD_count"] > 0 and row["COBJ_count"] > 0
-            and (row["RSLT_count"] > 0 or row["FTPT_count"] > 0)):
+    # ---- STRONG_OBJECT_FOOTPRINT signal: 始终计算并记录 (诊断), 不一定改 status ----
+    # 命中定义 (VERIFIED): OBJD>0 AND COBJ>0 AND (RSLT>0 OR FTPT>0)。
+    _strong = (row["OBJD_count"] > 0 and row["COBJ_count"] > 0
+               and (row["RSLT_count"] > 0 or row["FTPT_count"] > 0))
+    row["strong_object_footprint"] = 1 if _strong else 0
+
+    # ---- baseline status (原 CHS/结构判定, 保留 provenance) ----
+    _classify_baseline(row)
+
+    # ---- strong gate 只作用于 baseline==ELIGIBLE ----
+    # 只有当 baseline 会判 ELIGIBLE 时才升级为 SKIP_FALSE_POSITIVE_INTERNAL_POSE;
+    # 若 baseline 已是 NO_CHS/AMBIG/MAPPING/DUP/MISSING 等 skip, 保留原 status,
+    # strong_object_footprint=1 仅作附加诊断 (不覆盖 provenance, 不为了凑数)。
+    if _strong and row["status"] == "ELIGIBLE_EXISTING_CHS":
         row["status"] = "SKIP_FALSE_POSITIVE_INTERNAL_POSE"
         row["reason"] = (
             f"STRONG_OBJECT_FOOTPRINT: OBJD={row['OBJD_count']} AND COBJ={row['COBJ_count']} "
             f"AND (RSLT={row['RSLT_count']} OR FTPT={row['FTPT_count']}) —— 功能物品内置 pose, "
-            f"非独立 Pose Pack (448 census 唯一命中即 Kritical, 见 functional_signal_census_448)")
-        return row
+            f"非独立 Pose Pack (448 census 唯一命中即 Kritical)")
+    return row
 
+
+def _classify_baseline(row: dict) -> None:
     if row["CHS_0x01_exists"] == 0:
         row["status"] = "SKIP_NO_CHS"
         row["reason"] = "缺 0x01 CHS (不自行创建, 不推导新 Instance)"
-        return row
+        return
     if row["CHS_target_STBL_count"] != 1:
         row["status"] = "SKIP_AMBIGUOUS_TGI"
         row["reason"] = f"CHS 目标 STBL 数 {row['CHS_target_STBL_count']} != 1 (多 target / 多 family)"
-        return row
+        return
     # (唯一 target) 含重复 KeyHash — 保守跳过, 不进 ELIGIBLE。
     # 即使重复只落在 UNMAPPED, 当前阶段一律不区分, 全部跳过 (写 sidecar 需逐 key 精确
     # 反查 + 原文保留, 重复 hash 使“唯一 key→唯一文本”映射失效, 无法保证 writer 只动目标 key)。
@@ -571,7 +582,7 @@ def _classify(row: dict) -> dict:
             f"physical={row['CHS_entry_count']}, unique={row['CHS_unique_key_hash_count']}, "
             f"duplicate_hashes={row['duplicate_key_hash_count']}, "
             f"extra_occurrences={row['duplicate_extra_occurrences']}")
-        return row
+        return
     # 硬 invariant: target STBL 三分法必须全量覆盖 (同一计量单位: unique key hash)。
     # TRANSLATE + KEEP + UNMAPPED == CHS_unique_key_hash_count (exact CHS target STBL 的
     # unique key 总数)。不满足 => 计数串了 scope / 计量单位不一致, 绝不判 ELIGIBLE。
@@ -584,7 +595,7 @@ def _classify(row: dict) -> dict:
                           f"+KEEP+{row['keep_count']} +UNMAPPED+{row['unmapped_uncertain_count']} "
                           f"={_sum} != CHS_unique_key_hash_count={row['CHS_unique_key_hash_count']} "
                           f"(scope 串包或计量单位不一致: 其他 STBL/locale/orphan 混入)")
-        return row
+        return
     if row["unresolved_player_visible_ref_count"] != 0:
         row["status"] = "SKIP_MAPPING_UNCERTAIN"
         # structural-ref resolution completeness gate (XML ref -> target STBL):
@@ -595,7 +606,7 @@ def _classify(row: dict) -> dict:
                           f"unresolved={row['unresolved_player_visible_ref_count']} / "
                           f"resolved={row['resolved_player_visible_ref_count']} "
                           f"(total={row['player_visible_structural_ref_count']})")
-        return row
+        return
     if row["translate_set_complete"] == 0:
         row["status"] = "SKIP_MAPPING_UNCERTAIN"
         # set-level invariant: 收集 pv_refs 与生成 TRANSLATE keys 必须同源 (同一字段定义)。
@@ -605,7 +616,7 @@ def _classify(row: dict) -> dict:
                           f"TRANSLATE_SET={row['translate_key_set_size']} vs "
                           f"RESOLVED_PV_SET={row['resolved_pv_key_set_size']} "
                           f"(分类与 pv_refs 不同源或有额外字段被吞)")
-        return row
+        return
     if row["exact_structural_translate_count"] == 0 and row["keep_count"] == 0:
         row["status"] = "SKIP_MAPPING_UNCERTAIN"
         # 语义确认 (2026-08-15): unmapped_uncertain_count>0 本身【不】触发本状态。
@@ -615,7 +626,7 @@ def _classify(row: dict) -> dict:
         # 例: Tibo131 translate=36/keep=1/unmapped=17 -> 仍 ELIGIBLE (17 unmapped 全 untouched)
         row["reason"] = ("无任何已解析到 target CHS STBL 的 player-visible 结构引用 "
                           "(translate=0 且 keep=0); unmapped/orphan key 不阻塞写入")
-        return row
+        return
     row["status"] = "ELIGIBLE_EXISTING_CHS"
     row["reason"] = ("存在唯一 0x01 CHS 目标, 无重复 KeyHash, 三分法全量覆盖 + invariant 满足 + "
                       "player-visible refs 全部 exact resolve")
@@ -848,13 +859,72 @@ def pick_cohort(rows):
 
 
 # ---------------------------------------------------------------- main
+def _print_help():
+    print(__doc__)
+    print("""用法:
+  python scripts/pose_coverage.py --list <file> [--out cov.csv] [--report rep.md] [--cohort-out cohort.csv]
+  python scripts/pose_coverage.py -h | --help
+
+选项:
+  --list <file>    明文 package 路径列表 (一行一个)。缺省读 output/pose_verification.csv
+                   (过滤 POSE_VERIFIED, 即 659 清单)。
+  --out <csv>      新 coverage 输出路径 (默认 output/coverage.csv)。
+  --report <md>    新报告输出路径 (默认 output/coverage_report.md)。
+  --cohort-out <csv> 新 cohort 输出路径。若不指定且 output/cohort_selection.csv 已存在
+                   (冻结历史 cohort), 则【拒绝覆盖】, 只报告 roster 是否变化, 不写文件。
+
+安全:
+  * -h/--help 立即返回 (rc=0), 零扫描、零写入。
+  * 默认不覆盖已存在的历史 frozen cohort (除非显式给 --cohort-out)。
+  * coverage.csv / report 为本次 rerun 产物, 默认覆盖各自路径。
+""")
+
+
+_COH_COLS = ["cohort_slot", "selection_reason", "package_path", "status",
+             "CHS_target_TGI", "CHS_entry_count", "CHS_unique_key_hash_count",
+             "exact_structural_translate_count", "keep_count", "unmapped_uncertain_count",
+             "pack_title_ref_count", "pack_description_ref_count", "pose_display_name_ref_count",
+             "non_ascii_source_present", "long_string_present", "repeated_source_text_present",
+             "target_STBL_compression_state", "package_has_compressed_resources",
+             "PosePackInstance_count", "multiple_target_STBL_families"]
+
+
+def _write_cohort(path, cols, picks):
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(cols)
+        for slot, why, r in picks:
+            d = _cohort_detail(r)
+            w.writerow([slot, why, d["package_path"], d["status"],
+                        d["CHS_target_TGI(s)"], d["CHS_entry_count"], d["CHS_unique_key_hash_count"],
+                        d["exact_structural_translate_count"], d["keep_count"], d["unmapped_uncertain_count"],
+                        d["pack_title_ref_count"], d["pack_description_ref_count"], d["pose_display_name_ref_count"],
+                        d["non_ascii_source_present"], d["long_string_present"], d["repeated_source_text_present"],
+                        d["target_STBL_compression_state"], d["package_has_compressed_resources"],
+                        d["PosePackInstance_count"], d["multiple_target_STBL_families"]])
+
+
 def main():
     list_path = None
+    out_csv = None
+    report_path = None
+    cohort_out = None
     args = sys.argv[1:]
+    if "-h" in args or "--help" in args:
+        _print_help()
+        return 0
     i = 0
     while i < len(args):
         if args[i] == "--list":
-            list_path = args[i + 1]; i += 1
+            list_path = args[i + 1]; i += 2; continue
+        if args[i] == "--out":
+            out_csv = args[i + 1]; i += 2; continue
+        if args[i] == "--report":
+            report_path = args[i + 1]; i += 2; continue
+        if args[i] == "--cohort-out":
+            cohort_out = args[i + 1]; i += 2; continue
+        print(f"[ERROR] 未知参数: {args[i]} (用 -h 查看用法)")
+        return 2
         i += 1
     if list_path and not os.path.exists(list_path):
         print(f"[ERROR] --list 文件不存在: {list_path}")
@@ -884,7 +954,8 @@ def main():
     out_dir = Path(os.getcwd()) / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cov_csv = out_dir / "coverage.csv"
+    cov_csv = Path(out_csv) if out_csv else (out_dir / "coverage.csv")
+    cov_csv.parent.mkdir(parents=True, exist_ok=True)
     cols = _COLS
     with open(cov_csv, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=cols)
@@ -902,44 +973,75 @@ def main():
               "SKIP_MISSING_FILE", "ERROR", "ERROR_COVERAGE_INVARIANT"):
         print(f"  {s}: {sc.get(s, 0)}")
 
-    # ---- cohort ----
+    # ---- cohort: 冻结保护 + roster-change 报告 ----
     picks, coh_notes = pick_cohort(rows)
-    coh_csv = out_dir / "cohort_selection.csv"
-    _COH_COLS = ["cohort_slot", "selection_reason", "package_path", "status",
-                 "CHS_target_TGI", "CHS_entry_count", "CHS_unique_key_hash_count",
-                 "exact_structural_translate_count", "keep_count", "unmapped_uncertain_count",
-                 "pack_title_ref_count", "pack_description_ref_count", "pose_display_name_ref_count",
-                 "non_ascii_source_present", "long_string_present", "repeated_source_text_present",
-                 "target_STBL_compression_state", "package_has_compressed_resources",
-                 "PosePackInstance_count", "multiple_target_STBL_families"]
-    with open(coh_csv, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
-        w.writerow(_COH_COLS)
-        for slot, why, r in picks:
-            # 仅 ELIGIBLE 真实包 (roster 无 N/A、无重复、路径必存在)
-            d = _cohort_detail(r)
-            w.writerow([slot, why, d["package_path"], d["status"],
-                        d["CHS_target_TGI(s)"], d["CHS_entry_count"], d["CHS_unique_key_hash_count"],
-                        d["exact_structural_translate_count"], d["keep_count"], d["unmapped_uncertain_count"],
-                        d["pack_title_ref_count"], d["pack_description_ref_count"], d["pose_display_name_ref_count"],
-                        d["non_ascii_source_present"], d["long_string_present"], d["repeated_source_text_present"],
-                        d["target_STBL_compression_state"], d["package_has_compressed_resources"],
-                        d["PosePackInstance_count"], d["multiple_target_STBL_families"]])
-    _paths = [r["package_path"] for _, _, r in picks]
-    _dcount = len(set(_paths))
-    print(f"cohort: {coh_csv} ({len(picks)} 行)   distinct 包={_dcount}  "
-          f"全 ELIGIBLE={all(r['status']=='ELIGIBLE_EXISTING_CHS' for _,_,r in picks)}  "
-          f"全存在={all(os.path.exists(p) for p in _paths)}")
+    _paths_new = [r["package_path"] for _, _, r in picks]
+    _dcount_new = len(set(_paths_new))
+    frozen_coh = out_dir / "cohort_selection.csv"
+
+    # 读取既有 frozen cohort (若存在), 供 roster 对比; 不可读即视为无历史。
+    frozen_names = set()
+    frozen_exists = frozen_coh.exists()
+    if frozen_exists:
+        try:
+            with open(frozen_coh, encoding="utf-8-sig") as f:
+                fr = list(csv.reader(f))
+            if fr:
+                hdr = fr[0]
+                try:
+                    pi = hdr.index("package_path")
+                    frozen_names = {os.path.basename(r[pi]) for r in fr[1:] if len(r) > pi and r[pi]}
+                except ValueError:
+                    frozen_names = set()
+        except Exception:
+            frozen_exists = False
+
+    new_names = {os.path.basename(p) for p in _paths_new}
+    added = sorted(new_names - frozen_names)
+    removed = sorted(frozen_names - new_names)
+
+    # 决定 cohort 输出路径: 显式 --cohort-out 才写; 否则有 frozen 则拒绝覆盖。
+    if cohort_out:
+        coh_csv = Path(cohort_out)
+        coh_csv.parent.mkdir(parents=True, exist_ok=True)
+        _write_cohort(coh_csv, _COH_COLS, picks)
+        wrote = True
+        print(f"cohort: {coh_csv} ({len(picks)} 行, 显式 --cohort-out)")
+    elif frozen_exists:
+        coh_csv = frozen_coh
+        wrote = False
+        print(f"cohort_selection.csv 已存在 (冻结历史 cohort): 拒绝覆盖, 未写入。"
+              f"(如需新 cohort 用 --cohort-out <path>)")
+    else:
+        coh_csv = frozen_coh
+        _write_cohort(coh_csv, _COH_COLS, picks)
+        wrote = True
+        print(f"cohort: {coh_csv} ({len(picks)} 行)")
+
+    # roster-change 报告 (无论是否写入都输出):
+    print(f"  roster 变化: 新选择 {_dcount_new} distinct ELIGIBLE")
+    print(f"    added(n=新增)   = {len(added)}: {added if added else '-'}")
+    print(f"    removed(n=剔除) = {len(removed)}: {removed if removed else '-'}")
+    if wrote and not frozen_exists:
+        print("  注: 首次生成 cohort (无历史 frozen)。")
+    elif not wrote and frozen_exists:
+        print("  注: 历史 frozen cohort 保留, 本次 roster 仅对比未写入。")
 
     # ---- markdown report ----
-    rep = out_dir / "coverage_report.md"
+    rep = Path(report_path) if report_path else (out_dir / "coverage_report.md")
+    rep.parent.mkdir(parents=True, exist_ok=True)
     with open(rep, "w", encoding="utf-8") as f:
         f.write("# 659 CONFIRMED_POSE coverage 报告 (只读)\n\n")
         f.write(f"扫描包数: {len(rows)}\n\n## status 数量\n\n")
         for s in ("ELIGIBLE_EXISTING_CHS", "SKIP_NO_CHS", "SKIP_AMBIGUOUS_TGI",
                   "SKIP_MAPPING_UNCERTAIN", "SKIP_DUPLICATE_KEYHASH",
+                  "SKIP_FALSE_POSITIVE_INTERNAL_POSE",
                   "SKIP_MISSING_FILE", "ERROR", "ERROR_COVERAGE_INVARIANT"):
             f.write(f"- {s}: {sc.get(s, 0)}\n")
+        f.write(f"\n## cohort roster 变化 (对比历史 frozen)\n\n")
+        f.write(f"- frozen 存在: {frozen_exists}; 本次写入: {wrote}\n")
+        f.write(f"- 新增 (added): {len(added)} → {added if added else '-'}\n")
+        f.write(f"- 剔除 (removed): {len(removed)} → {removed if removed else '-'}\n")
         f.write("\n## cohort 风险维度备注\n\n")
         for n in coh_notes:
             f.write(f"- {n}\n")
@@ -977,6 +1079,7 @@ _COLS = ["package_path", "file_size", "PosePackInstance_count", "STBL_count_tota
          "STBL_version", "compression_state",
          "non_ascii_source_present", "long_string_present", "repeated_source_text_present",
          "OBJD_count", "COBJ_count", "RSLT_count", "FTPT_count",
+         "strong_object_footprint",
          "multiple_target_STBL_families", "status", "reason"]
 
 
