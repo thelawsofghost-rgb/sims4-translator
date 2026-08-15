@@ -63,9 +63,12 @@ def classify_one(src: str):
     # 纯数字 (可选负号/小数/分隔): 整串由 [0-9.,+\-x×X] 组成且至少含一个数字
     if re.fullmatch(r"[0-9.,+\-x×X\s]+", ns) and re.search(r"[0-9]", ns):
         return "KEEP_TECHNICAL_NUMERIC"
-    # pose 序号标签: 形如 Pose <n> / pose<N> / P<n> / 序号+pose / <n> pose ...
-    lns = ns.lower()
-    if re.search(r"\bpose\s*#?\s*[0-9]|p\s*#?\s*[0-9]+\s*$|pose\s*[0-9]+", lns):
+    # pose 序号标签 (冻结 regex, 仅本次 builder 从真实 481 unresolved 导出 exact rows 用;
+    # 不构成 runtime policy, 落盘仍是 exact source rows):
+    #   (?i)^pose(?:\s+|_)\d+$   —— case-insensitive, Pose + (空白或 _) + 数字, 全串锚定
+    #   覆盖 Pose 17 / Pose  4 / pose 1 / Pose_01 / Pose_09 ;
+    #   负向不上当: PosePlayer / Pose ABC / Pose_foo (无数字或非数字结尾)。
+    if re.fullmatch(r"(?i)^pose(?:\s+|_)\d+$", ns):
         return "KEEP_TECHNICAL_POSE_NUMBER"
     return None  # 非 technical -> 必须命中 _TRANSLATE_MAP 否则 ERROR
 
