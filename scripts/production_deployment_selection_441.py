@@ -62,6 +62,11 @@ _CRY_SOURCES = {
 MAN_OUT = "output/production_deployment_selection_441_manifest.csv"
 REP_OUT = "output/production_deployment_selection_441_report.md"
 
+# 已 forensic 的两个 Cry source 的源 SHA256 (精确匹配才判定为 Cry INHERENT 跳过)。
+# 由 --cry-sha 提供 (repeatable, 恰 2 个):
+#     python ... --cry-sha <shaA> --cry-sha <shaB>
+_CRY_SHA_SET = set()
+
 
 def _res(p: str) -> Path:
     return Path(p).expanduser().resolve()
@@ -82,18 +87,32 @@ def load_manifest_rows(path: Path, label: str):
 
 
 def is_cry_row(r) -> bool:
-    """按 source 文件名 + exact TGI 判定 Cry INHERENT 冲突行。"""
+    """身份判定: (source_sha256 + exact TGI) 精确匹配才认为 Cry INHERENT。
+
+    文件名仅为诊断 (用于 human-readable warning), 绝不参与身份判定。
+    若 sha 不匹配 pin 定集 => 不判为 Cry (由 fail-closed 逻辑报 re-review)。
+    """
+    tgi = r.get("CHS_target_TGI", "")
+    if tgi != _CRY_TGI:
+        return False
+    sha = (r.get("source_sha256", "") or "").strip().lower()
+    return sha in _CRY_SHA_SET
+
+
+def cry_by_filename(r) -> bool:
+    """仅诊断: 文件名+TG I 命中但 sha 未 pin 定 (用于 re-review warning)。"""
     src = Path(r.get("package_path", "")).name
     if src not in _CRY_SOURCES:
         return False
-    tgi = r.get("CHS_target_TGI", "")
-    return tgi == _CRY_TGI
+    return r.get("CHS_target_TGI", "") == _CRY_TGI
 
 
 def main():
     ap = argparse.ArgumentParser(description="ZERO-WRITE final deployment selection (441)")
     ap.add_argument("--manifest-v1", required=True)
     ap.add_argument("--manifest-retry6", required=True)
+    ap.add_argument("--cry-sha", action="append", default=[],
+                    help="已 pin 定的两个 Cry source_sha256 (repeatable, 恰 2)")
     ap.add_argument("--out", default=MAN_OUT)
     ap.add_argument("--report", default=REP_OUT)
     ap.add_argument("--force", action="store_true")
@@ -104,6 +123,12 @@ def main():
     if (out.exists() or rep.exists()) and not a.force:
         print(f"[FAIL-CLOSED] 输出已存在, refuse (rc=1) 除非 --force: {out} | {rep}")
         return 1
+
+    global _CRY_SHA_SET
+    _CRY_SHA_SET = {s.strip().lower() for s in a.cry_sha if s.strip()}
+    if len(_CRY_SHA_SET) != 2:
+        print(f"[HARD-FAIL] --cry-sha 必须恰好提供 2 个 pin 定 SHA (got {len(_CRY_SHA_SET)}): 拒绝并需 re-review (rc=2)")
+        return 2
 
     rows_v1 = load_manifest_rows(_res(a.manifest_v1), "441_v1")
     rows_retry = load_manifest_rows(_res(a.manifest_retry6), "retry6")
@@ -148,12 +173,24 @@ def main():
     n_conflict = len(CONFLICT)
     n_total = n_deploy + n_noop + n_conflict
 
+    # ---- fail-closed: 文件名/TGI 像 Cry 但 sha 未 pin 定 => 内容可能已改, 需 re-review ----
+    cry_sha_mismatch = []
+    for r in all_rows:
+        if cry_by_filename(r) and not is_cry_row(r):
+            sha = (r.get("source_sha256", "") or "").strip().lower()
+            cry_sha_mismatch.append((Path(r.get("package_path", "")).name,
+                                     sha[:16], r.get("CHS_target_TGI", "")))
+    n_sha_mismatch = len(cry_sha_mismatch)
+
     # 硬校验 (推导后仍校验验收)
     checks = []
     checks.append(("DEPLOY = 436", n_deploy == _EXPECT_DEPLOY, f"got {n_deploy}"))
     checks.append(("NOOP = 3", n_noop == _EXPECT_NOOP, f"got {n_noop}"))
     checks.append(("CONFLICT_SKIP = 2", n_conflict == _EXPECT_CONFLICT, f"got {n_conflict}"))
     checks.append(("TOTAL = 441", n_total == _EXPECT_TOTAL, f"got {n_total}"))
+    # Cry sha pin 定: 任何 文件名/TGI 像 Cry 但 sha 未精确匹配 => 内容已变, re-review (FAIL)
+    checks.append(("Cry source_sha256 pinned (fail-closed)", n_sha_mismatch == 0,
+                   f"mismatch={n_sha_mismatch}"))
     all_ok = all(ok for _, ok, _ in checks)
     verdict = "PASS" if all_ok else "FAIL"
 
@@ -185,13 +222,19 @@ def main():
     L.append("## Cry INHERENT_SOURCE_TGI_CONFLICT (SKIP)")
     L.append(f"- exact TGI     = `{_CRY_TGI}`")
     L.append(f"- conflict key  = `{_CRY_KEY}`")
+    L.append(f"- identity      = (source_sha256 + exact TGI) 精确匹配, 文件名仅诊断")
+    L.append(f"- pinned sha    = {sorted(_CRY_SHA_SET)}")
     for r in CONFLICT:
-        L.append(f"  - {Path(r.get('package_path','')).name}  -> 保留 staging 为证据, 不复制进 Mods, "
-                 f"原 source 不修改不删除")
+        L.append(f"  - {Path(r.get('package_path','')).name}  sha={ (r.get('source_sha256','') or '')[:16] }…  -> 保留 staging 为证据, 不复制进 Mods, 原 source 不修改不删除")
     L.append("")
     L.append("## checks")
     for name, ok, got in checks:
         L.append(f"- {'PASS' if ok else 'FAIL'}  {name}  ({got})")
+    if cry_sha_mismatch:
+        L.append("")
+        L.append("## fail-closed: Cry source 内容已改变 (需 re-review, 不得跳过)")
+        for fname, sha16, tg in cry_sha_mismatch:
+            L.append(f"- {fname}  sha={sha16}…  tgi={tg}  -> 与 forensic 不符, 重跑 forensic")
     if warn:
         L.append("")
         L.append("## warnings (NOT_SELECTED)")
