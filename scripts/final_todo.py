@@ -7,11 +7,11 @@ final_todo.py — 合并 C + D-TRANSLATE + 人工 REVIEW->TRANSLATE 为最终待
 不调用模型, 不生成 sidecar, 不重跑 10 包。
 
 合并口径 (唯一 unique source, 按 norm_text 去重; stable id 沿用 T_{source_hash}_g1):
-  C  类 = 29  条  (translation_missing_result.csv, 全为待补 TRANSLATE)
+  C  类 = 待补条数  (translation_missing_result.csv, 扣除 terminal-KEEP reconciliation 后)
   D  TRANSLATE = 597 条  (translation_delta_catalog.csv, decision==TRANSLATE)
   人工 REVIEW->TRANSLATE = 5 条  (translation_manual_review.csv, final_decision==TRANSLATE)
   ----------------------------------------------------------------
-  最终待补 = 631 条 (预期)
+  最终待补 = C + D_TRANSLATE + MANUAL_T (数量由 reconciliation 决定)
 
 同时核验并报告:
   manual REVIEW->KEEP = 1 (不计入待补)
@@ -19,12 +19,14 @@ final_todo.py — 合并 C + D-TRANSLATE + 人工 REVIEW->TRANSLATE 为最终待
   remaining MISSING   = 0 (不允许未裁决缺失降级)
 
 硬 invariant (fail-fast, rc != 0):
-  - todo unique 严格 == C(29) + D_TRANSLATE(597) + MANUAL_T(5)
+  - todo unique 严格 == C + D_TRANSLATE + MANUAL_T
   - 这三组内部及组间 (tid,norm) 无重复
-  - REVIEW 未裁决 = 0; 若 != 0 或 631 不成立 -> 打印差异来源并停止, 不自动补数据
+  - REVIEW 未裁决 = 0; 若 != 0 或 todo!=期望 -> 打印差异来源并停止, 不自动补数据
+  - terminal KEEP (frozen override 图层 action=KEEP) 从 C 类排除 (reconciliation), 不得进入 todo
 """
 import sys, os, csv, argparse, hashlib, unicodedata
 from collections import Counter
+from c_extract import load_terminal_keep_tids
 
 
 def norm_text(s):
@@ -50,24 +52,38 @@ def load_csv_rows(path, cols):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--missing", required=True, help="translation_missing_result.csv (C 类 29)")
+    ap.add_argument("--missing", required=True, help="translation_missing_result.csv (C 类)")
     ap.add_argument("--delta", required=True, help="translation_delta_catalog.csv (D 类)")
     ap.add_argument("--manual", required=True, help="translation_manual_review.csv")
+    ap.add_argument("--overrides", action="append", default=[],
+                    help="frozen terminal override 图层 (action=KEEP) 用于 C 类 reconciliation; 可多次")
     ap.add_argument("--out", default="output/translation_final_todo.csv")
     a = ap.parse_args()
 
+    # C→final_todo reconciliation: 仅 terminal KEEP (frozen override 图层) 排除, 不用 classifier
+    ovr_paths = a.overrides or [
+        os.path.join(os.path.dirname(a.out) or ".", "translation_overrides.csv"),
+        os.path.join(os.path.dirname(a.out) or ".", "translation_overrides.final2.csv"),
+    ]
+    terminal_k = load_terminal_keep_tids(ovr_paths)
+    print(f"[terminal KEEP] frozen override 图层 terminal KEEP tid = {len(terminal_k)}")
     COLS = ["translation_id", "source_text", "source_hash", "decision",
             "reason", "translation", "provenance", "package_count", "packages"]
 
-    # ---- C 类 (29) ----
+    # ---- C 类 ----
     c_rows = load_csv_rows(a.missing, COLS)
     C = {}
     c_ok = 0
+    c_kex = 0
     for r in c_rows:
         n = norm_text(r.get("source_text") or "")
         if n == "":
             continue
-        key = (r.get("translation_id") or make_translation_id(source_hash(n), 1), n)
+        tid = (r.get("translation_id") or "").strip()
+        if tid in terminal_k:
+            c_kex += 1
+            continue   # RESOLVED_KEEP: 不得进入 final todo
+        key = (tid or make_translation_id(source_hash(n), 1), n)
         C.setdefault(key, {"source_text": r["source_text"] or n,
                            "decision": "TRANSLATE",
                            "reason": r.get("old_catalog_decision") or "C_MISSING_RESULT",
@@ -76,6 +92,8 @@ def main():
                            "package_count": r.get("affected_package_count") or "",
                            "packages": r.get("packages") or ""})
         c_ok += 1
+    if c_kex:
+        print(f"[C] terminal KEEP excluded (reconciliation) = {c_kex}")
 
     # ---- D 类 TRANSLATE (597) ----
     delta_rows = load_csv_rows(a.delta, COLS)
@@ -157,12 +175,12 @@ def main():
     print(f"[manual] REVIEW->TRANSLATE = {m_n} | REVIEW->KEEP = {MAN_K}")
     print(f"[REVIEW 未裁决] = {len(unruly)}  (必须 0)")
 
-    strict = (total == expected) and (total == 631) and (len(unruly) == 0)
+    strict = (total == expected) and (len(unruly) == 0)
     if not strict:
         raise SystemExit(
-            f"[HARD-FAIL] 631 不严格成立: todo unique={total}, 期望={expected}(={c_n}+{d_n}+{m_n}), "
+            f"[HARD-FAIL] todo 不严格成立: todo unique={total}, 期望={expected}(={c_n}+{d_n}+{m_n}), "
             f"REVIEW 未裁决={len(unruly)}. 报告差异来源, 不自动补数据.")
-    print(f"[todo] todo unique source = {total}   (631 严格成立: PASS)")
+    print(f"[todo] todo unique source = {total}   (=C+D+manual_TR, REVIEW 全裁决: PASS)")
 
     # ---- 写最终待补清单 ----
     with open(a.out, "w", newline="", encoding="utf-8-sig") as f:

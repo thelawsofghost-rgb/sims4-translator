@@ -3,7 +3,7 @@
 """
 batch_plan.py — 只读 overlap audit + deterministic batch plan (按 translation_id 为唯一单位)
 ==========================================================================
-workset 冻结 (626 unique source, translation_incremental_workset.csv)。本层不再改
+workset 冻结 (缺译文唯一源, 数量由 upstream reconciliation 决定)。本层不再改
 decision/catalog/coverage/cohort/writer; 只做两件事, 且不调用模型:
 
 1) overlap audit: 同一 unique tid 跨多个 provenance 的数量与组合。
@@ -17,13 +17,13 @@ decision/catalog/coverage/cohort/writer; 只做两件事, 且不调用模型:
    否则含 PACK_TITLE -> batch=PACK_TITLE; 否则 batch=PACK_DESCRIPTION。
    这是确定性单值划分 (每个 tid 恰一个 batch)。
 
-输入:  --ws    output/translation_incremental_workset.csv (626)
+输入:  --ws    output/translation_incremental_workset.csv (缺译文 unique source)
 输出:  --out   output/translation_batch_manifest.csv
               (translation_id, source_text, source_hash, provenance, assigned_batch)
         --audit 可选, 默认 stdout 打印 audit。
 
 硬 invariant (fail-fast, rc != 0):
-  batch unique tid union == 626
+  batch unique tid union == 该 workset 总 tid 数 (数量由 reconciliation 决定)
   intersections between batches == 0
   missing == 0
   duplicate == 0 (任一 tid 只在一个 batch, 不重复送模型)
@@ -121,12 +121,12 @@ def main():
     print(f"  intersection between batches = {len(inter)}")
     print(f"  missing = {len(missing)}  duplicate = {len(dup_in)}")
 
-    ok = (len(union) == 626 and not inter and not missing and not dup_in)
+    ok = (len(union) == n_total and not inter and not missing and not dup_in)
     if not ok:
         raise SystemExit(
-            f"[HARD-FAIL] batch invariant 不成立: union={len(union)}(应626) inter={len(inter)} "
+            f"[HARD-FAIL] batch invariant 不成立: union={len(union)}(应{n_total}) inter={len(inter)} "
             f"missing={len(missing)} dup={len(dup_in)}. 不启动翻译。")
-    print("[INVARIANT] batch union==626, inter==0, missing==0, duplicate==0  PASS")
+    print(f"[INVARIANT] batch union=={n_total}, inter==0, missing==0, duplicate==0  PASS")
 
     # ---- 写 manifest ----
     with open(a.out, "w", newline="", encoding="utf-8-sig") as f:
@@ -135,7 +135,7 @@ def main():
         w.writeheader()
         for p in sorted(plan, key=lambda p: (p["assigned_batch"], p["translation_id"])):
             w.writerow(p)
-    print(f"\n[out] {a.out}  ({len(plan)} 行 = 626 unique tid)")
+    print(f"\n[out] {a.out}  ({len(plan)} 行 = {n_total} unique tid)")
 
     # ---- 每批 tid 清单 (供 --id-from-file, deterministic) ----
     if a.tids:

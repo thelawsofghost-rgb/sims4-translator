@@ -586,6 +586,34 @@ QA/invariant 每批:
 白盒: Phase2B 直接吞 manifest (decision 缺省 TRANSLATE, detected 自动) 且不碰 frozen
   translations_todo.csv/translation_done.csv; 旧路径回归 69/69 不受影响。
 
+== terminal-KEEP reconciliation (2026-08-15, 生产级) ==
+真实 Windows 全量 audit: workset TRANSLATE=626, terminal KEEP override=4, conflicts=3:
+  T_2a2ce211e44a_g1 sofa_footrest / T_37fdb2d0d954_g1 Smh / T_655ec0d7e2ec_g1 loop-obj
+
+逐层 trace 确认根因: sofa_footrest 在 catalog decision=TRANSLATE/PENDING, override(KEEP) +
+final2(KEEP) + done(KEEP) 三处 terminal KEEP, 但 gap_inventory 仍进
+CATALOG_TRANSLATE_MISSING_RESULT -> missing_result 当待补 -> final_todo/workset 被错误带入
+authoritative TRANSLATE。根因不在 Phase2B (POLICY-CONFLICT gate 保留)。
+
+修复 C→final_todo 的 reconciliation (不改 frozen catalog/override/coverage/writer):
+  catalog TRANSLATE + terminal KEEP (frozen override 图层 action=KEEP) -> RESOLVED_KEEP,
+  不得进入 translation_missing_result / final_todo / workset。
+  terminal KEEP 仅允许来自明确 frozen terminal layer (translation_overrides.csv /
+  translation_overrides.final2.csv action=KEEP / 已确认 final done status=KEEP)。
+  不允许普通 classifier 自动产生 KEEP 来排除 todo。
+
+改动 (最小):
+  - c_extract.py: 新增 --overrides(可多次); 缺省读 output/translation_overrides.csv +
+    .final2.csv; action==KEEP 的 tid 从 C 类排除 (RESOLVED_KEEP)。C 29->26。
+  - final_todo.py: 新增 --overrides; 同 reconciliation (防御旧 missing_result)。
+    硬编码 631 -> 结构性 total==C+D+manual_TR。
+  - bake_workset.py: 硬编码 626 -> 结构性 workset + manual_t == todo。
+  - batch_plan.py: 硬编码 626 -> 结构性 union==n_total。
+
+预期数字 (全部 PASS, wb_reconcile_full 9/9):
+  excluded=3  C=26  todo=628  workset=623  batches=26/407/190
+  union=623  inter=0  missing=0  duplicate=0  terminal-KEEP∩workset=0
+
 == authoritative + scope-at-load 修正 (2026-08-15, 生产级) ==
 问题1 done 泄出: 原 --id-file 只过滤 pending 子集, done 仍写整份 todo(626)。
 问题2 权威决策被推翻: Phase2B 老 classifier 把部分 pose 描述 (Walk5/1B (animation)/

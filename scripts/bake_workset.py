@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-bake_workset.py — 构造 deterministic 增量翻译 workset (仅 626 缺译文 source)
+bake_workset.py — 构造 deterministic 增量翻译 workset (仅缺译文 source)
 ==========================================================================
 decision 层已冻结 (frozen translation_catalog / gap_inventory / delta_catalog /
 manual decisions / coverage / cohort / writer 全部不再改)。本层只读构造:
 
-  输入:  --todo    output/translation_final_todo.csv   (631 unique source, 冻结)
-         --manual  output/translation_manual_review.csv (6 条人工裁决: 5 TRANSLATE + 1 KEEP)
-  输出:  --out     output/translation_incremental_workset.csv  (626, 仅缺最终译文的源)
+  输入:  --todo    output/translation_final_todo.csv   (缺译文 unique source, 冻结)
+         --manual  output/translation_manual_review.csv (人工裁决: TRANSLATE + KEEP)
+  输出:  --out     output/translation_incremental_workset.csv  (仅缺最终译文的源)
 
 口径:
-  final todo            = 631
-  manual pretranslated  =   5   (manual final_decision==TRANSLATE, 已有人工最终译文,
+  final todo            = upstream reconciliation 决定 (C 待补 + D TRANSLATE + manual_TR)
+  manual pretranslated  = manual final_decision==TRANSLATE (已有人工最终译文,
                                  禁止再送模型重翻; 保留在最终 merge)
-  actual model workset  = 626   (C 29 + D TRANSLATE 597, 唯一缺最终译文)
-  KEEP (含 manual KEEP @ninawhims / EMPTY_SOURCE_NOOP / D KEEP)  全部禁止进入翻译
+  actual model workset  = todo - manual pretranslated   (唯一缺最终译文)
+  KEEP (含 terminal KEEP override / manual KEEP / EMPTY_SOURCE_NOOP / D KEEP)
+                         全部禁止进入翻译
 
 规则/硬 invariant (fail-fast, rc != 0):
   - workset 只从 todo 取 decision==TRANSLATE 的行
   - manual-pretranslated 排除必须用 (stable tid, norm source_text) 精确匹配 todo 行;
     若 manual TRANSLATE 的某条不在 todo -> HARD-FAIL (说明 decision 层不一致, 不自动补)
-  - 排除后 workset unique 严格 == todo(631) - manual_t(5) = 626
-  - 626 + 5 == 631 严格成立, 否则打印差异来源并停止
+  - workset + manual_t == todo 严格成立, 否则打印差异来源并停止
   - workset 内 (tid, norm) 无重复; source_text/source_hash exact 对应 (不重算不改)
   - 不调用模型 / 不生成 sidecar / 不重跑包; 复用 frozen glossary/overrides/protected
     spans/translation policy (这些在后续 Phase2B 流水线中沿用)
@@ -47,7 +47,7 @@ def main():
     ap.add_argument("--out", default="output/translation_incremental_workset.csv")
     a = ap.parse_args()
 
-    # ---- todo (631) ----
+    # ---- todo (缺译文 unique source) ----
     todo = {}
     for r in csv.DictReader(open(a.todo, encoding="utf-8-sig")):
         n = norm_text(r.get("source_text") or "")
@@ -96,11 +96,7 @@ def main():
             continue     # 人工已定案, 排除出 model workset
         workset[key] = r
 
-    # ---- 硬 invariant ----
-    if len(workset) != 626:
-        raise SystemExit(
-            f"[HARD-FAIL] workset != 626: 实际={len(workset)} | todo={len(todo)} "
-            f"manual_t={len(man_t)} -> 626 + 5 = 631 不成立。打印差异, 不自动补。")
+    # ---- 硬 invariant (结构性: workset 是全 TRANSLATE todo 去掉 manual pretranslated; 由 reconciliation 决定数量) ----
     if len(workset) + len(man_t) != len(todo):
         raise SystemExit(
             f"[INVARIANT-FAIL] {len(workset)} + {len(man_t)} != {len(todo)}. 不自动补。")
@@ -113,8 +109,8 @@ def main():
     if any((r.get("decision") or "").strip() != "TRANSLATE" for r in workset.values()):
         raise SystemExit("[INVARIANT-FAIL] workset 混入非 TRANSLATE 决策")
 
-    print(f"[workset] 实际翻译 workset = {len(workset)}  (626 严格成立: PASS)")
-    print(f"[invariant] 626 + 5 = {len(workset) + len(man_t)} == todo {len(todo)}  "
+    print(f"[workset] 实际翻译 workset = {len(workset)}  (严格成立: PASS)")
+    print(f"[invariant] {len(workset)} + {len(man_t)} == todo {len(todo)}  "
           f"({'PASS' if len(workset)+len(man_t)==len(todo) else 'FAIL'})")
 
     # ---- 写 workset ----
@@ -133,7 +129,7 @@ def main():
             if p:
                 pv[p] += 1
                 pkg_impact.setdefault(p, set()).update((r.get("packages") or "").split("|"))
-    print("\n=== workset 626 按 provenance 分布 ===")
+    print(f"\n=== workset {len(workset)} 按 provenance 分布 ===")
     for p in sorted(pv):
         print(f"  {p}: {pv[p]}  (覆盖 {len(pkg_impact[p])} 包)")
 
