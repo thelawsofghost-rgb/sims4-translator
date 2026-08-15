@@ -612,26 +612,29 @@ retry set (build_title_retry.py, 2026-08-15 修正口径):
   白盒: retry unique=38, dup=0, terminal KEEP∩=0, manual final∩=0, 407核对 PASS。
   manual final 2 条绝不回 model workset。
 
-TITLE 两层 reconciliation 下游可读 (2026-08-15 二次修正, 非破坏):
-  禁止修改 frozen output/translation_overrides.csv (22 条基线, byte/content 不变)。
-  新 derived 文件由 build_override_overlay.py 生成 (只读 frozen, 可 repeatable --overrides):
+TITLE 两层 reconciliation 下游可读 (2026-08-15 三次修正, production base 锁定 114):
+  production base (frozen, 唯一, byte/content 不变):
+    output/translation_overrides.csv = 114
+  增量层 (仅以下三):
+    configs/translation_overrides.c26_pose_keep.csv -> 26 pose C26 KEEP
+    configs/title_terminal_keep.c26.csv             ->  3 title terminal KEEP
+    configs/title_manual_translate.c26.csv          ->  2 title manual final TRANSLATE
+  新 derived 文件由 build_override_overlay.py 生成 (只读 base, 绝不改 frozen):
     output/translation_overrides.production.csv
-      = frozen translation_overrides.csv(22)
-      + frozen translation_overrides.final2.csv(38, 完全 superset, 同 tid 值全相同 0 冲突)
-      + c26 pose KEEP (26)
-      + title terminal KEEP (3)  + title manual TRANSLATE (2)
-      = 最终 unique (tid,norm_source) = 69 (KEEP=33, TRANSLATE=36)
   合并保证 (用户裁决): deterministic + 幂等;
-     同 (tid,norm_source) 不同 action/translation, 且**非** frozen<->final2 既有 precedence
-        -> HARD-FAIL (exit!=0, 不写);
-     同 tid 不同 source (source mismatch)          -> HARD-FAIL;
-     缺必需层 / 缺 source_text / action 非法         -> HARD-FAIL;
-     报告各 layer 行数 + 最终 unique 数;
-     frozen<->final2 为既有 precedence (final2 superset>frozen, 覆盖不算冲突)。
-  实测真实数据: frozen 22 ⊆ final2 38 (同 key 值全相同); TITLE 5 tid 均不在 final2;
-    poseKEEP 与 final2 0 同tid异值 -> 真实输出无 HARD-FAIL, unique=69 (KEEP=33,TRANSLATE=36)。
-  CLI: python scripts/build_override_overlay.py output [--extra <layer.csv> ...] [--no-write]
-  下游显式传 .production.csv 读取 (不是改 frozen)。
+     同 tid 不同 normalized source        -> HARD-FAIL;
+     同 (tid,ns) 不同 action             -> HARD-FAIL;
+     同 (tid,ns) 不同 translation        -> HARD-FAIL;
+     缺必需层 / 缺 source_text / action 非法 -> HARD-FAIL;
+     报告各 layer 行数 + 各增量层 vs BASE 交集 + 增量层间交集 + 最终 unique
+       (由真实输入验证, 不硬编码 145; 若全 disjoint 则 114+26+3+2=145)。
+  实测 (Windows 真实审计, 用户锁定):
+    final3(114)=canonical(114) 完全相同历史快照 -> 不 merge;
+    final2(111)=canonical 严格子集             -> 不参与;
+    final(95) 含 5 条旧值后被 canonical 修正   -> 禁止参与;
+    root 22/73 = 早期历史资产                  -> 不作为 production input。
+  CLI: python scripts/build_override_overlay.py output [--out <p>] [--no-write]
+  下游显式传 .production.csv 读取 (不是改 frozen base)。
 
 A/D evidence 由 diag_title_qa 自动落盘 (不手工构造, 2026-08-15):
   python scripts/diag_title_qa.py output --done <done> --also-failed \
