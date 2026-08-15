@@ -381,4 +381,19 @@ python scripts\diag_resolver_assets.py --done output\translation_done.csv --cach
 resolver 接受或拒绝原因), 以及 cache.db 的表/schema/行数 + 6 ID 的 by-tid/by-source_hash/
 by-source_phrase 命中与 resolver 实际查询语义。只读, 不改 frozen data, 不生成 sidecar。
 
+frozen decision-catalog gap inventory (Windows, 只读, 不加缓存不生成 sidecar):
+```
+python scripts\gap_inventory.py --catalog output\translation_catalog.csv --overrides output\translation_overrides.csv --overrides2 output\translation_overrides.final2.csv --done output\translation_done.csv
+```
+对最终 ELIGIBLE 包的 approved unique player-visible keys 全量 join 到权威 catalog
+(translation_catalog.csv: translation_id/source_text/decision/source_hash), 按 unique source 分类:
+  A CATALOG_KEEP / B CATALOG_TRANSLATE_RESOLVED / C CATALOG_TRANSLATE_MISSING_RESULT(异常) /
+  D NEW_SOURCE_NOT_IN_CATALOG (再按 PACK_TITLE/PACK_DESCRIPTION/POSE_DISPLAY_NAME 拆分);
+输出 unique 总数 + A/B/C/D 各多少 + 各字段类别 + 各影响 package 数 + 6 样本归属。
+translation_cache.db 不作为最终译文 fallback。
+
+Production 最终语义 (暂定, 待 gap inventory 后定): catalog decision=KEEP -> KEEP 合法不要求
+done/cache; catalog=TRANSLATE/APPROVED -> 必须 override/done 有最终译文否则 FAIL;
+不在 catalog -> NEW_SOURCE 不得自动猜译文。
+
 **验证要求 (汇报)**: 10 个 sidecar 文件名 / 每包修改 key 数 / writer verify / independent audit / 是否全部 PASS。
