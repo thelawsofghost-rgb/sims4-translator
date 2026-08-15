@@ -586,6 +586,23 @@ QA/invariant 每批:
 白盒: Phase2B 直接吞 manifest (decision 缺省 TRANSLATE, detected 自动) 且不碰 frozen
   translations_todo.csv/translation_done.csv; 旧路径回归 69/69 不受影响。
 
+== TITLE 407 QA 统计口径修正 (2026-08-15) ==
+用户裁决: diag_title_qa 仅作证据采集器, 不自动 reconciliation, 不改 completion gate。
+统计口径改为正交双维度:
+  ROW_STATE (A/B/C 互斥, 求和==rows):
+    A SAME_AS_SOURCE_SEMANTIC   : translation==source 且含玩家可见语义 -> FAIL/PENDING 候选
+    B SAME_AS_SOURCE_LEGITIMATE : translation==source 且【强证据】合法保持原文 -> KEEP 候选
+    C TRANSLATION_CHANGED       : translation != source
+  PHRASE_FAILURE (D 独立维度, 每行 failed_phrase=yes/no): cache miss 且未被 protected/glossary/强证据覆盖
+B 的强证据 (旧 translate_mode_for() 不可靠, 禁单独使用):
+  B1 纯作者/handle (By/©/@/Credit + 名, 或纯 @handle)
+  B3 纯编号/无实词技术标识 (全串无 >=3 字母英文实词, 如 2 F V2 / C1-3 M / 11 A2)
+  B4 protected span 覆盖整个 source
+  含英文实词的裸 title-case("Intense chemistry"/"Aylin Moss") 不自动归 B -> A 复核候选。
+玩家可见语义标题 (Pose set #43 / Male poses #1 / Pretty Smile Poses / Bed Pose Pack)
+即使旧 classifier 判 technical 也属 A(TRANSLATE)。intro-obj/placeholderIntro/8 *animation
+含实词 -> 不静默 KEEP, 归 A 复核。
+
 == TITLE 407 内容 completion 缺陷诊断 (2026-08-15, 实跑) ==
 TITLE 实跑: rows=407 unique=407 pending=0 keep=0 emptyTranslation=0 sameAsSource=42。
 工程 scope invariant PASS, 但内容 completion 判定有真实缺陷:
