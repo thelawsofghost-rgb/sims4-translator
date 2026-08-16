@@ -20,19 +20,36 @@ deployment target naming (冻结, 本步唯一 target-generation):
   机器断言每一 DEPLOY row: candidate_basename.lower() < source_basename.lower()
 旧 000_ naming policy 正式废弃 (仅保留历史诊断)。
 
-对每个 DEPLOY row, 扫描 Mods 全树 exact STBL TGI 命中, 按状态裁决:
-  EXACT_CANDIDATE_SATISFIED         candidate_target_path 已存在 + exact TGI 相同 + SHA256 == production sidecar SHA
-  EQUIVALENT_ALTNAME_SATISFIED      同目录其他文件名 sidecar + exact TGI 相同 + SHA256 == production sidecar SHA
-                                    + 该 existing basename < source basename
-  IDENTICAL_DUPLICATE_SOURCE_GROUP  多个 selected DEPLOY rows exact TGI 相同 + source SHA 相同 +
-                                    production sidecar SHA 相同 => 非 hard conflict (重新核 exact SHA, 任一不同 => HARD_CONFLICT)
-  OLD_TEST_DIFFERENT_BYTES          localization/test marker + same exact TGI + bytes != production => quarantine 候选
-  HARD_CONFLICT                     same exact TGI + 内容不一致 + 非已批准 Cry skip => fail-closed / manual review
-  UNRELATED                         KEEP (NOOP / CONFLICT_SKIP / 无关 Mods 文件)
+deployment_target_naming 与状态模型 (冻结):
+  candidate_target_filename_for(source) = "!" + source_stem + "_CHS.package"
+  candidate_target_path = mods_root / rel_to_mods(source) / candidate_basename
+  机器断言每一 DEPLOY row: candidate_basename.lower() < source_basename.lower()
+旧 000_ naming policy 正式废弃 (仅保留历史诊断)。
+
+对每个 DEPLOY row, 扫描 Mods 全树 exact STBL TGI 命中, 独立计算 deployment_action (互斥):
+  EXACT_CANDIDATE_SATISFIED  本 row 自身 candidate_target_path 已存在 + exact TGI + SHA == prod sidecar
+  EQUIVALENT_ALTNAME_SATISFIED 本 row 自身目录 (cand.parent) 其他文件名 sidecar + SHA==prod + 更早 basename
+  COPY_REQUIRED              本 row 自身目录无等价 sidecar 命中 => 必须独立部署
+  QUARANTINE_BLOCKED         localization/test marker 同 exact TGI + 字节 != prod => 需先隔离 (不部署)
+  HARD_CONFLICT              本 row 目录内同 TGI 内容不一致且非安全重复 group 可解释 => fail-closed
+  UNRELATED                  KEEP (NOOP / CONFLICT_SKIP / 无关 Mods 文件)
+
+duplicate_source_group 是【属性/诊断】, 非互斥 deployment action:
+  duplicate_source_group=YES / duplicate_group_id / duplicate_group_safe 标注到每个命中重复 group 的 row。
+  多个 selected DEPLOY rows exact TGI 相同 + source SHA 相同 + production sidecar SHA 相同
+  => duplicate_group_safe=YES, 只说明这些 row 之间【非 HARD_CONFLICT】, 绝不使任一 row 视为 satisfied。
+  每个 row 仍必须独立判定其 deployment_action (仅看自身 source 目录);
+  禁止因‘另一目录存在同 TGI/SHA source 或 sidecar’而把当前 row 当 satisfied。
+
+机器断言 (对 436 DEPLOY rows):
+  EXACT_CANDIDATE_SATISFIED + EQUIVALENT_ALTNAME_SATISFIED + COPY_REQUIRED
+  + (QUARANTINE_BLOCKED|HARD_CONFLICT) rows = 436
+  duplicate_source_group 行单独统计, 不得参与上式作为互斥 action。
 
 malformed 门 (fail-closed):
   malformed_selected_source = 0 且 malformed_existing_localization_candidate = 0 才 PASS。
   Mods 中其他 unrelated malformed 只记录, 不阻塞本批部署。
+  duplicate_group_safe=NO 亦 fail-closed。
 
 已知真机现场必须正确识别:
   !!Anika_Argument_CHS.package            -> EXACT_CANDIDATE_SATISFIED
@@ -49,10 +66,10 @@ stdout 至少:
   DEPLOY rows=436
   EXACT_CANDIDATE_SATISFIED=?
   EQUIVALENT_ALTNAME_SATISFIED=?
-  IDENTICAL_DUPLICATE_SOURCE_GROUP rows=?
   COPY_REQUIRED=?
-  QUARANTINE_REQUIRED=?
+  QUARANTINE_BLOCKED=?
   HARD_CONFLICT=0
+  duplicate_source_group rows=? (属性/诊断, 非互斥 action)
   NOOP=3
   CONFLICT_SKIP=2
   TOTAL=441
@@ -72,14 +89,18 @@ _STBL_GROUP = 0x80000000
 MAN_OUT = "output/production_deployment_final_manifest.csv"
 REP_OUT = "output/production_deployment_final_report.md"
 
-# reconcile states
+# deployment_action (每个 DEPLOY row 独立计算, 互斥)
+#   SATISFIED = EXACT | ALTNAME
+#   COPY_REQUIRED, QUARANTINE_BLOCKED, HARD_CONFLICT
 EXACT = "EXACT_CANDIDATE_SATISFIED"
 ALTNAME = "EQUIVALENT_ALTNAME_SATISFIED"
-IDDUP = "IDENTICAL_DUPLICATE_SOURCE_GROUP"
-OLD_TEST = "OLD_TEST_DIFFERENT_BYTES"
+OLD_TEST = "QUARANTINE_BLOCKED"
 HARD = "HARD_CONFLICT"
 COPY = "COPY_REQUIRED"
 UNRELATED = "UNRELATED"
+# duplicate_source_group 与 duplicate_group_safe 是【属性/诊断】, 非互斥 action。
+# 机器断言: EXACT + ALTNAME + COPY_REQUIRED + (QUARANTINE_BLOCKED|HARD_CONFLICT) = DEPLOY total;
+# duplicate_source_group 行单独统计, 不参与上式作为互斥 action。
 
 # Cry INHERENT conflict (skipped from deployment; 永不视为 HARD_CONFLICT)
 _CRY_TGI = "0x220557DA/0x80000000/0x01D208F3F86A48A1"
@@ -257,16 +278,26 @@ def main():
           f"malformed_selected_source={len(malformed_selected_source)} "
           f"malformed_existing_localization_candidate={len(malformed_existing_loc_candidate)}")
 
-    # ---------- 同 TGI 重复 source group 检测 (IDENTICAL_DUPLICATE_SOURCE_GROUP) ----------
-    # 先按 exact CHS_target_TGI 分组所有 DEPLOY rows
+    # ---------- 同 TGI 重复 source group 检测 (duplicate_source_group = 属性/诊断, 非 action) ----------
     from collections import defaultdict
     tgi_groups = defaultdict(list)
     for r in rows:
         tgi_groups[r["CHS_target_TGI"]].append(r)
     dup_tgi_groups = {t: grp for t, grp in tgi_groups.items() if len(grp) > 1}
-    idd_group_paths = set()   # 命中 IDDUP 的 candidate_target_path 集合 (禁止再判定需 COPY)
+    for gid, (t, grp) in enumerate(sorted(dup_tgi_groups.items())):
+        src_shas = {g["source_sha256"] for g in grp}
+        prod_shas = {g["prod_sidecar_sha256"] for g in grp}
+        group_safe = (len(src_shas) == 1 and len(prod_shas) == 1 and prod_shas != {""})
+        for g in grp:
+            g["duplicate_source_group"] = "YES"
+            g["duplicate_group_id"] = f"dup{gid + 1}"
+            g["duplicate_group_safe"] = "YES" if group_safe else "NO"
+    for r in rows:
+        r.setdefault("duplicate_source_group", "NO")
+        r.setdefault("duplicate_group_id", "")
+        r.setdefault("duplicate_group_safe", "")
 
-    # ---------- 逐 row 裁决 ----------
+    # ---------- 逐 row 裁决 (deployment_action 与重复诊断无关, 只看该 row 自身 source 目录) ----------
     for r in rows:
         tgi = r["CHS_target_TGI"]
         cand = _res(r["candidate_target_path"])
@@ -274,24 +305,7 @@ def main():
         prod_sha = r["prod_sidecar_sha256"]
         matches = mods_index.get(tgi, [])  # Mods 中含该 exact TGI 的文件
 
-        # 1) 同一 exact TGI 有多个 selected DEPLOY rows => 优先归并判定 (非 hard conflict)
-        grp = dup_tgi_groups.get(tgi)
-        if grp and len(grp) > 1:
-            # 重新核: 所有 source SHA 全等 且 所有 prod sidecar SHA 全等
-            src_shas = {g["source_sha256"] for g in grp}
-            prod_shas = {g["prod_sidecar_sha256"] for g in grp}
-            if len(src_shas) == 1 and len(prod_shas) == 1 and prod_shas != {""}:
-                r["reconcile"] = IDDUP
-                r["reason"] = "同 exact TGI 重复 source group: source 与 production sidecar 均字节一致, 非 hard conflict"
-                idd_group_paths.add(cand_norm)
-                continue
-            else:
-                r["reconcile"] = HARD
-                r["reason"] = (f"重复 source group 内容不一致: src_sha_set={len(src_shas)} prod_sha_set={len(prod_shas)}"
-                               f" (prod 含空={'' in prod_shas}) => fail-closed")
-                continue
-
-        # 2) EXACT_CANDIDATE_SATISFIED
+        # 2) EXACT_CANDIDATE_SATISFIED (仅本 row 自身 source 目录的 candidate 位置)
         if cand.exists():
             cm = [m for m in matches if m["path"] == cand_norm]
             if cm and prod_sha and cm[0]["sha"] == prod_sha:
@@ -303,8 +317,7 @@ def main():
                 r["reason"] = "candidate_target_path 存在但字节与 production sidecar 不一致"
                 continue
 
-        # 3) EQUIVALENT_ALTNAME_SATISFIED: 同目录其他文件名 sidecar
-        #    同目录 = cand.parent; existing basename < source basename; sha == prod_sha
+        # 3) EQUIVALENT_ALTNAME_SATISFIED: 仅本 row 自身 source 目录 (cand.parent) 的其他文件名 sidecar
         cand_dir = str(cand.parent.resolve())
         equi = None
         for m in matches:
@@ -319,7 +332,7 @@ def main():
             r["reason"] = f"同目录等价 sidecar 已存在且排序更早, 字节一致: {equi.name}"
             continue
 
-        # 4) OLD_TEST_DIFFERENT_BYTES (同目录或任意目录 localization/test 同 TGI 不同字节)
+        # 4) OLD_TEST_DIFFERENT_BYTES -> QUARANTINE_BLOCKED (localization/test 同 TGI 不同字节)
         old_tests = [m for m in matches if m["is_loc"] and (not prod_sha or m["sha"] != prod_sha)]
         if old_tests:
             r["reconcile"] = OLD_TEST
@@ -327,31 +340,46 @@ def main():
             r["reason"] = "旧 test/localization 同 exact TGI 且字节不同, canary 前需隔离"
             continue
 
-        # 5) 其他普通 source 含同 TGI (非同目录, 非 localization 标记) => 非冲突, 需 COPY
-        #     (通常即当前 source 自身匹配其 TGI, 属预期; 亦可能无关 source)
-        non_self_other = [m for m in matches if not m["is_loc"] and m["path"] != str(_res(r["package_path"]).resolve())]
-        detail = f"(含 {len(non_self_other)} 个非自身同 TGI 包)" if non_self_other else "(仅当前 source 自身匹配, 属预期)"
-        r["reconcile"] = COPY
-        r["reason"] = f"无已部署等价 sidecar 命中候选位置/同目录等价名; 需部署生产 sidecar {detail}"
-        continue
+        # 5) HARD: 本 row 目录内同 TGI 内容不一致 (非 loc, 非自身), 且非安全重复 group 可解释
+        #     (identical duplicate group 只证明其 row 间非 hard conflict, 不满足本 row)
+        non_self_conflicts = [
+            m for m in matches
+            if not m["is_loc"]
+            and m["path"] != str(_res(r["package_path"]).resolve())
+            and (not prod_sha or m["sha"] != prod_sha)
+        ]
+        # 若本 row 属于安全重复 group, duplicate 同源/同字节不构成对【部署目标自身】的冲突
+        if non_self_conflicts and r["duplicate_source_group"] == "NO":
+            r["reconcile"] = HARD
+            r["reason"] = f"同 exact TGI 的非本地化、非自身同字节命中 {len(non_self_conflicts)} 个且与 production 字节不一致"
+            continue
 
-        # 6) 无任何同 TGI 命中 => COPY_REQUIRED
+        # 9) 否则: 本 row 自身 source 目录无已部署等价 sidecar => 必须 COPY_REQUIRED
+        #     (即使它是某重复 group 的一员: 另一目录有同 TGI/SHA source 或 sidecar 不使本 row 满足)
         r["reconcile"] = COPY
-        r["reason"] = "Mods 中无同 exact TGI 命中, 需要部署生产 sidecar"
+        r["reason"] = "本 row 自身 source 目录无命中 EXACT/ALTNAME/QUARANTINE; 需独立部署生产 sidecar"
 
     # ---------- 汇总 ----------
     from collections import Counter
     cnt = Counter(r["reconcile"] for r in rows)
     n_copy = cnt[COPY]
-    n_quar = sum(1 for r in rows if r["reconcile"] == OLD_TEST)
+    n_quar = cnt[OLD_TEST]
     n_hard = cnt[HARD]
     n_exact = cnt[EXACT]
     n_alt = cnt[ALTNAME]
-    n_idd = cnt[IDDUP]
+    n_dup_group_rows = sum(1 for r in rows if r["duplicate_source_group"] == "YES")
 
-    # fail-closed 门
+    # 机器断言: EXACT + ALTNAME + COPY + (QUARANTINE_BLOCKED|HARD) == DEPLOY total
+    action_total = n_exact + n_alt + n_copy + n_quar + n_hard
+    if action_total != n_deploy:
+        print(f"[MACHINE-ASSERT-FAIL] 部署 action 互斥合计 {action_total} != DEPLOY {n_deploy}")
+        print("  禁止将 duplicate_source_group 视为互斥 action 代替 SATISFIED/COPY")
+        return 2
+
+    # fail-closed 门: HARD_CONFLICT=0 且 malformed 门通过 且 非安全重复 group=0
+    unsafe_dup = [r for r in rows if r["duplicate_group_safe"] == "NO"]
     hard_mal = len(malformed_selected_source) > 0 or len(malformed_existing_loc_candidate) > 0
-    ok = (n_hard == 0 and not hard_mal)
+    ok = (n_hard == 0 and not hard_mal and not unsafe_dup)
     verdict = "PASS" if ok else "FAIL"
 
     # ---------- 输出 (ZERO WRITE) ----------
@@ -359,7 +387,10 @@ def main():
     cols = ["package_path", "source_basename", "source_sha256", "CHS_target_TGI",
             "candidate_basename", "candidate_target_path",
             "sidecar_staging_path", "prod_sidecar_sha256",
-            "reconcile", "equivalent_path", "quarantine_candidates", "reason"]
+            "duplicate_source_group", "duplicate_group_id", "duplicate_group_safe",
+            "deployment_action", "equivalent_path", "quarantine_candidates", "reason"]
+    for r in rows:  # 暴露 deployment_action 列 (alias of reconcile action)
+        r["deployment_action"] = r.get("reconcile", "")
     with open(out, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
@@ -383,11 +414,12 @@ def main():
     L.append("## 终局")
     for name, n in [("EXACT_CANDIDATE_SATISFIED", n_exact),
                     ("EQUIVALENT_ALTNAME_SATISFIED", n_alt),
-                    ("IDENTICAL_DUPLICATE_SOURCE_GROUP rows", n_idd),
                     ("COPY_REQUIRED", n_copy),
-                    ("QUARANTINE_REQUIRED", n_quar),
+                    ("QUARANTINE_BLOCKED", n_quar),
                     ("HARD_CONFLICT", n_hard)]:
         L.append(f"- {name} = {n}")
+    L.append(f"- machine assert: EXACT+ALTNAME+COPY+QUARANTINE+HARD == DEPLOY ({action_total}=={n_deploy})  PASS")
+    L.append(f"- duplicate_source_group rows = {n_dup_group_rows} (属性/诊断, 非互斥 action)")
     L.append(f"- NOOP = {n_noop}")
     L.append(f"- CONFLICT_SKIP = {n_conflict}")
     L.append(f"- TOTAL = {n_deploy + n_noop + n_conflict}")
@@ -396,6 +428,11 @@ def main():
     L.append(f"- malformed_existing_localization_candidate = {len(malformed_existing_loc_candidate)}")
     L.append(f"- RECONCILIATION: {verdict}")
     L.append("")
+    if unsafe_dup:
+        L.append("## duplicate source group 非安全 (fail-closed)")
+        for r in unsafe_dup:
+            L.append(f"- dup{r['duplicate_group_id']} {r['source_basename']}  duplicate_group_safe=NO")
+        L.append("")
     if malformed_selected_source or malformed_existing_loc_candidate:
         L.append("## malformed (fail-closed gate)")
         for m in malformed_selected_source:
@@ -405,7 +442,8 @@ def main():
         L.append("")
     L.append("## 明细 (DEPLOY rows)")
     for r in rows:
-        L.append(f"- reconcile={r['reconcile']:<28} {r['candidate_basename']}")
+        dup_tag = f"  [dup={r['duplicate_group_id']} safe={r['duplicate_group_safe']}]" if r["duplicate_source_group"] == "YES" else ""
+        L.append(f"- action={r['reconcile']:<24} {r['candidate_basename']}{dup_tag}")
         L.append(f"    src={r['source_basename']}  TGI={r['CHS_target_TGI']}")
         L.append(f"    cand={r['candidate_target_path']}")
         if r.get("prod_sidecar_sha256"):
@@ -436,10 +474,10 @@ def main():
     print(f"DEPLOY rows={n_deploy}")
     print(f"EXACT_CANDIDATE_SATISFIED={n_exact}")
     print(f"EQUIVALENT_ALTNAME_SATISFIED={n_alt}")
-    print(f"IDENTICAL_DUPLICATE_SOURCE_GROUP rows={n_idd}")
     print(f"COPY_REQUIRED={n_copy}")
-    print(f"QUARANTINE_REQUIRED={n_quar}")
+    print(f"QUARANTINE_BLOCKED={n_quar}")
     print(f"HARD_CONFLICT={n_hard}")
+    print(f"duplicate_source_group rows={n_dup_group_rows} (属性/诊断)")
     print(f"NOOP={n_noop}")
     print(f"CONFLICT_SKIP={n_conflict}")
     print(f"TOTAL={n_deploy + n_noop + n_conflict}")
