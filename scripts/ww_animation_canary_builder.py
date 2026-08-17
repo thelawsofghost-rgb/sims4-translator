@@ -57,8 +57,19 @@ ZERO WRITE TO MODS。不执行真机 swap / 不部署 sidecar / 不改原 packag
       internal_fields_changed 判定为 semantic tree diff (忽略唯一 display 元素内部文本):
       旧版用 otext.replace(old,new)==ctext 的有损 raw-string 比对, 会把 display 之外同名子串
       (如 animation_clip_names 里的 FORCE_FLOOR_002) 误判为 internal change (audit classification bug)。
-      新版对源与 canary WW XML 做元素/attr/text/tail 全量 semantic 比较, 仅豁免 display 节点。
+      新版对源与 canary WW XML 做元素/attr/text/tail 全量 semantic 比较, 仅豁免 display 节点;
+      每元素 key 含兄弟序号 (同名兄弟不 collapse), 修复重复 <T/> 路径下 DISPLAY_SEMANTIC_DIFF_COUNT
+      被计数为 0 的计数 bug。
       只生成 artifact / 不 swap / 不真机 / 不 TEST B / 不 sidecar / 不 production / 不碰 Mods。
+
+  REVALIDATE 只读模式 (修 validator 后对现有 artifact 复核, 不重生成/不写文件):
+  python scripts/ww_animation_canary_builder.py \
+      --source "...\\MSWD_FORCE_FLOOR_002.package" \
+      --revalidate "...\\MSWD_FORCE_FLOOR_002_CANARY_SOURCE_FAITHFUL.package" \
+      --display-old "FORCE_FLOOR_002" \
+      --display-new "【CHS_CANARY】强制地板002"
+      -> 对 source + 现有 canary 跑全部静态 gate + display/internal semantic diff;
+      输出 CANARY_BYTES_UNCHANGED=YES (未重写 artifact)。
 
 可选:
   --display-field animation_raw_display_name   (默认; 真实 WickedWhims 字段)
@@ -158,16 +169,29 @@ def _old_in_block(block: str, field: str):
     return m.group(1).strip() if m else None
 
 
-def _xml_tree_nodes(root, prefix=""):
-    """遍历 XML 树, 产出有序 semantic 节点: (path, tag, attr_sig, text, tail)。
-    attr_sig = 排序后的 (name,value) 元组; text/tail 保留原始 (含空白) 以便 catch 格式化差异。"""
+def _xml_tree_nodes(root):
+    """遍历 XML 树, 产出有序 semantic 节点: (key, path, tag, attr_sig, text, tail)。
+    attr_sig = 排序后的 (name,value) 元组; text/tail 保留原始 (含空白) 以便 catch 格式化差异。
+    key 为含兄弟序号的唯一路径 (同一 parent 下同名兄弟用 /path#k 区分),
+    避免重复 <T/> or <U/> 等同名兄弟在 dict 中互相覆盖 (旧 path-only key 会 collapse)。"""
     out = []
-    for el in list(root):
-        path = f"{prefix}/{el.tag}"
-        attrs = tuple(sorted((k, el.attrib[k]) for k in el.attrib))
-        out.append((path, el.tag, attrs, el.text, el.tail))
-        out.extend(_xml_tree_nodes(el, path))
+    _walk(root, "", {}, out)
     return out
+
+
+def _walk(el, prefix, sib_counter, out):
+    # 兄弟计数: 同一 parent 下按 tag 分组编号, 保证同名兄弟 key 唯一
+    tag = el.tag if not isinstance(el.tag, str) else el.tag
+    if tag not in sib_counter:
+        sib_counter[tag] = 0
+    sib_counter[tag] += 1
+    path = f"{prefix}/{tag}"
+    key = f"{path}#{sib_counter[tag]}"
+    attrs = tuple(sorted((k, el.attrib[k]) for k in el.attrib))
+    out.append((key, path, tag, attrs, el.text, el.tail))
+    child_ctr = {}
+    for ch in list(el):
+        _walk(ch, path, child_ctr, out)
 
 
 def _confined_to_display(nds_src, nds_can, display_field):
@@ -182,16 +206,16 @@ def _confined_to_display(nds_src, nds_can, display_field):
     diffs = []
     for p in s:
         d1 = by_src[p]; d2 = by_can[p]
-        is_display_el = (d1[1] == "T" and any(k == "n" and v == display_field for k, v in d1[2]))
-        if d1[1] != d2[1] or d1[2] != d2[2]:
-            diffs.append((p, "tag-or-attr", d1[1:3], d2[1:3]))
+        is_display_el = (d1[2] == "T" and any(k == "n" and v == display_field for k, v in d1[3]))
+        if d1[2] != d2[2] or d1[3] != d2[3]:
+            diffs.append((d1[1], "tag-or-attr", (d1[2], d1[3]), (d2[2], d2[3])))
             continue
-        if d1[3] != d2[3]:
+        if d1[4] != d2[4]:
             if is_display_el:
                 continue  # display text 变化为已批准差异
-            diffs.append((p, "text", d1[3], d2[3]))
-        if d1[4] != d2[4]:
-            diffs.append((p, "tail", d1[4], d2[4]))
+            diffs.append((d1[1], "text", d1[4], d2[4]))
+        if d1[5] != d2[5]:
+            diffs.append((d1[1], "tail", d1[5], d2[5]))
     return (len(diffs) == 0), diffs
 
 
@@ -210,33 +234,26 @@ def xml_semantic_diff(src_text: str, canary_text: str, display_field: str):
         return None, None, [("PARSE-CANARY", "ERR", str(e), "")]
     n1 = _xml_tree_nodes(r1)
     n2 = _xml_tree_nodes(r2)
-    # _confined_to_display 内部已把 display 元素 text 差异计入 display_sem, 其余差异非豁免
     ok, diffs = _confined_to_display(n1, n2, display_field)
-    display_sem = 0
     internal_diffs = []
     if not ok and diffs and diffs[0][1] == "structural":
         internal_diffs = diffs  # path 集不同 -> 结构性内部变化
     else:
-        # diffs 仅含非 display 差异 (display text 已在 _confined_to_display 内豁免)
-        internal_diffs = diffs
-        display_sem = _display_semantic_diff_count(n1, n2, display_field)
+        internal_diffs = diffs  # 非 display 差异
+    display_sem = _display_semantic_diff_count(n1, n2, display_field)
     return display_sem, (1 if internal_diffs else 0), internal_diffs
 
 
 def _display_semantic_diff_count(nds_src, nds_can, display_field):
-    """统计 display 元素 text 改变的个数 (应 == 1)。"""
+    """统计 display 元素 text 改变的个数 (应 == 1)。用唯一 key 匹配, 不受同名兄弟影响。"""
     src_by = {d[0]: d for d in nds_src}
     can_by = {d[0]: d for d in nds_can}
-    seen = set()
     cnt = 0
-    for p, d1 in src_by.items():
-        if not (d1[1] == "T" and any(k == "n" and v == display_field for k, v in d1[2])):
+    for key, d1 in src_by.items():
+        if not (d1[2] == "T" and any(k == "n" and v == display_field for k, v in d1[3])):
             continue
-        if p in seen:
-            continue
-        seen.add(p)
-        d2 = can_by.get(p)
-        if d2 is not None and d2[3] != d1[3]:
+        d2 = can_by.get(key)
+        if d2 is not None and d2[4] != d1[4]:
             cnt += 1
     return cnt
 
@@ -772,8 +789,23 @@ def run_canary_source_faithful(src: Path, out_dir: Path, force: bool, disp_field
     build_package(items, out, header_comp=hdr_comp, major=src_major, minor=src_minor)
 
     canary_sha = sha256(out)
+    return _verify_canary_source_faithful(
+        src=src, out=out, wxml_entry=wxml_entry, src_sha=src_sha, idx=idx,
+        src_meta=src_meta, src_major=src_major, src_minor=src_minor,
+        old_val_raw=old_val_raw, new_val_raw=new_val_raw, disp_field=disp_field,
+        canary_sha=canary_sha, changed_display_fields=changed_display_fields,
+        label="CANARY_SOURCE_FAITHFUL", readonly=False)
 
+
+def _verify_canary_source_faithful(src, out, wxml_entry, src_sha, idx, src_meta,
+                                   src_major, src_minor, old_val_raw, new_val_raw,
+                                   disp_field, canary_sha, changed_display_fields,
+                                   label, readonly):
+    """只读验证 source + 现有 canary artifact: 静态 source-fidelity gate + display semantic /
+    internal semantic diff + metadata 分类。不写任何文件。
+    返回 0 全 PASS, 3 任一 gate 失败 / 解析失败。"""
     # ---- 静态 source-fidelity gate ----
+    body_orig = read_body_raw(src, wxml_entry)  # 源 WW XML 原始存储 body (供 display/internal diff)
     idxC, cerr = safe_parse(out)
     parser_ok = (cerr is None and idxC is not None)
     meta_ok, _meta_fails, _meta_warns = dbpf_metadata_valid(out)
@@ -880,10 +912,12 @@ def run_canary_source_faithful(src: Path, out_dir: Path, force: bool, disp_field
                  and internal_changed == 0 and display_matches == 1 and display_sem_diff == 1
                  and idx_order_ok and ranges_ok and parser_ok and meta_ok and ww_gate)
 
-    print("CANARY_SOURCE_FAITHFUL:")
+    print(f"{label}:")
     print(f"  path={out}")
     print(f"  source_sha={src_sha}")
     print(f"  canary_sha={canary_sha}")
+    if readonly:
+        print(f"  CANARY_BYTES_UNCHANGED=YES")  # revalidate 仅读, 未重写 artifact
     print(f"  display_old={old_val_raw}")
     print(f"  display_new={new_val_raw}")
     print(f"  display_matches={display_matches}")
@@ -969,6 +1003,52 @@ def run_canary_source_faithful(src: Path, out_dir: Path, force: bool, disp_field
     return 0 if all_gates else 3
 
 
+def run_canary_revalidate(src: Path, canary_path: Path, disp_field: str,
+                          display_old: str, display_new: str) -> int:
+    """只读 revalidate 现有 CANARY_SOURCE_FAITHFUL artifact (不重生成, 不写文件)。
+    复用 _verify_canary_source_faithful 对 source + 现有 canary 做全部静态 gate 与
+    display/internal semantic diff 分类。用于修复 validator 后对已存在真实 artifact 复核。"""
+    if not canary_path.exists():
+        print(f"ERROR: revalidate 目标不存在: {canary_path}", file=sys.stderr)
+        return 3
+    src_sha = sha256(src)
+    idx, err = safe_parse(src)
+    if err is not None or idx is None:
+        print(f"ERROR: source 解析失败: {err}", file=sys.stderr)
+        return 3
+    ww = [e for e in idx.entries if e.type_id == WW_ANIM_XML]
+    if len(ww) != 1:
+        print(f"ERROR: 需单 WW_ANIM_XML; 实际 = {len(ww)} (fail-closed)", file=sys.stderr)
+        return 3
+    wxml_entry = ww[0]
+    src_major, src_minor, _hdr_comp, src_meta = read_entry_meta_raw(src)
+    if len(src_meta) != len(idx.entries):
+        print(f"ERROR: 源 index metadata 数与解析条目数不一致 ({len(src_meta)} vs {len(idx.entries)})", file=sys.stderr)
+        return 3
+    canary_sha = sha256(canary_path)
+    # 只读路径下的 changed_display_fields: 统计 canary WW XML 中 display node 出现次数 (须==1)
+    _chg = 0
+    try:
+        cidx, _cerr = safe_parse(canary_path)
+        if cidx:
+            for ec in cidx.entries:
+                if ec.type_id == WW_ANIM_XML and ec.instance_id == wxml_entry.instance_id:
+                    cbody = read_body_raw(canary_path, ec)
+                    _ctxt = decompress_maybe(cbody).decode("utf-8", errors="replace")
+                    pat = re.compile(r'<T\s+[^>]*\bn\s*=\s*"%s"[^>]*>' % re.escape(disp_field))
+                    _chg = len(pat.findall(_ctxt))
+                    break
+    except Exception:
+        _chg = 0
+    changed_display_fields = _chg
+    return _verify_canary_source_faithful(
+        src=src, out=canary_path, wxml_entry=wxml_entry, src_sha=src_sha, idx=idx,
+        src_meta=src_meta, src_major=src_major, src_minor=src_minor,
+        old_val_raw=display_old, new_val_raw=display_new, disp_field=disp_field,
+        canary_sha=canary_sha, changed_display_fields=changed_display_fields,
+        label="REVALIDATE_CANARY_SOURCE_FAITHFUL", readonly=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", required=True)
@@ -983,12 +1063,24 @@ def main():
                     help="CONTROL_SOURCE_FAITHFUL 模式: 只修 minor 与 offset high-bit 两个 source-fidelity bug, 保留 index placement 差异; 生成 output/ww_animation_control_source_faithful/")
     ap.add_argument("--canary-source-faithful", action="store_true",
                     help="CANARY_SOURCE_FAITHFUL 模式: 在 CONTROL_SOURCE_FAITHFUL 基础上仅改目标 WW XML 一个 display 文本, 其余 source-faithful; 生成 output/ww_animation_canary_source_faithful/ (需 --display-old/--display-new)")
+    ap.add_argument("--revalidate", metavar="CANARY_PACKAGE",
+                    help="只读复核现有 CANARY_SOURCE_FAITHFUL artifact (不重生成/不写文件): 对 source + 该 canary 跑全部静态 gate 与 display/internal semantic diff 分类")
     a = ap.parse_args()
 
     src = Path(a.source)
     if not src.is_file():
         print("ERROR: source 不存在", file=sys.stderr)
         return 2
+
+    if a.revalidate:
+        # 只读复核: 与生成模式互斥, 需要 display-old/new
+        if sum([a.control0, a.control_source_faithful, a.canary_source_faithful]) > 0:
+            print("ERROR: --revalidate 与 --control0/--control-source-faithful/--canary-source-faithful 互斥", file=sys.stderr)
+            return 2
+        if not a.display_old or not a.display_new:
+            print("ERROR: --revalidate 必须提供 --display-old 与 --display-new", file=sys.stderr)
+            return 2
+        return run_canary_revalidate(src, Path(a.revalidate), a.display_field, a.display_old, a.display_new)
 
     if sum([a.control0, a.control_source_faithful, a.canary_source_faithful]) > 1:
         print("ERROR: --control0 / --control-source-faithful / --canary-source-faithful 互斥", file=sys.stderr)
