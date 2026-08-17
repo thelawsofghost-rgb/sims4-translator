@@ -33,6 +33,15 @@ ZERO WRITE TO MODS。不执行真机 swap / 不部署 sidecar / 不改原 packag
       --display-old "FORCE_FLOOR_002" \
       --display-new "【CHS_CANARY】强制地板002"
 
+  CONTROL_SOURCE_FAITHFUL 模式 (真机 23/23 实锤后, 只修两个 source-fidelity bug):
+  python scripts/ww_animation_canary_builder.py \
+      --source "...\\MSWD_FORCE_FLOOR_002.package" \
+      --control-source-faithful [--force]
+      -> 生成 output/ww_animation_control_source_faithful/..._CONTROL_SOURCE_FAITHFUL.package
+      只修 BUG_1 (minor 从 source 透传) 与 BUG_3 (offset/size 高位保留 source 原值);
+      保留 index-at-head vs source index-at-end 差异 (INDEX_PLACEMENT_DIFFERENCE=YES)。
+      不生成 CANARY / 不真机 / 不碰 Mods。
+
 可选:
   --display-field animation_raw_display_name   (默认; 真实 WickedWhims 字段)
   --out-dir output                     (默认; artifact 写到 output/ww_animation_canary_A|B/)
@@ -150,21 +159,31 @@ def _replace_t_node_display(xml_text: str, display_field: str, old_val: str, new
     return xml_text[:s] + new_val + xml_text[e:], 1, spans
 
 
-def build_package(items, out_path: Path, header_comp=0, entry_meta=None):
+def build_package(items, out_path: Path, header_comp=0, entry_meta=None,
+                 major=2, minor=0):
     """通用 DBPF v2 写包器。保持 items 顺序。返回 (out_path)。
 
     方案 A (ROOT-CAUSE fix, 2026-08-17): 现有 writer 把 DBPF v2 compression
     metadata 全部置 0/漏写, 导致 zlib body 被游戏加载器按未压缩读取而判损坏。
-    本函数现支持按每资源写入真实的 compression metadata:
+    本函数支持按每资源写入真实的 compression metadata:
       - header 0x3C compression flag (header_comp, 源包值)
       - 每 entry 的 offset/size 压缩高位 + field7 mem_size + field8 comp_type
 
+    CONTROL_SOURCE_FAITHFUL 修正 (2026-08-17, 真机实锤后):
+      铁律 = 保留 source 值, 不是 normalize 到我们的期望值。
+      BUG_1: major/minor 硬编码 2/0 -> 改为从 source 透传 (major, minor 参数)。
+      BUG_3: offset/size bit31 不再按推导 comp 状态强制 OR; 而取 source 原高位:
+         - meta["offset_high_bit"] / meta["size_high_bit"] 提供时 -> 原样保留 bit31
+         - 缺失时 (旧路径) 才回退到 comp 推导行为 (向后兼容 CANARY/旧调用)。
+      低 31 位物理 offset 仍按新布局重算; bit31 只保留 source 原值。
+
     items: list[(type, group, inst, body)]  (旧签名, 兼容)
        或 list[(type, group, inst, body, meta)]
-       meta: dict {comp_state:bool, comp_type:int, mem_size:int}
+       meta: dict {comp_state:bool, comp_type:int, mem_size:int,
+                   offset_high_bit:Optional[int], size_high_bit:Optional[int]}
 
-    向后兼容: 无 meta 的条目按旧行为 (if body 是 zlib 则标记压缩, 否则未压缩),
-    但不再把已压缩 body 写成未压缩 metadata (这是修复的核心)。
+    向后兼容: 无 meta/无显式高位 的条目按旧行为 (if body 是 zlib 则标记压缩,
+    否则未压缩) —— 但 CONTROL_SOURCE_FAITHFUL 路径总是显式传 source 原高位。
     """
     count = len(items)
     HEADER = 0x44; PAD = 4; ENTRY = 32
@@ -185,8 +204,8 @@ def build_package(items, out_path: Path, header_comp=0, entry_meta=None):
         off += sz
     buf = bytearray(off)
     buf[0:4] = b"DBPF"
-    struct.pack_into("<I", buf, 4, 2)
-    struct.pack_into("<I", buf, 8, 0)
+    struct.pack_into("<I", buf, 4, major & 0xFFFFFFFF)
+    struct.pack_into("<I", buf, 8, minor & 0xFFFFFFFF)
     struct.pack_into("<I", buf, 0x24, count)
     struct.pack_into("<I", buf, 0x2C, index_size)
     # header 0x3C: 源包 compression flag (修复点 1: 之前恒为 0)
@@ -195,14 +214,23 @@ def build_package(items, out_path: Path, header_comp=0, entry_meta=None):
     p = index_offset
     struct.pack_into("<I", buf, p, 0); p += PAD
     for (_t, _g, inst, o, sz, comp, meta) in idx:
+        # bit31 决定: source 原高位优先 (显式给 0/1 都保留); 否则回退 comp 推导
+        if meta is not None and meta.get("offset_high_bit") is not None:
+            ohb = 1 if meta["offset_high_bit"] else 0
+        else:
+            ohb = 1 if comp else 0
+        if meta is not None and meta.get("size_high_bit") is not None:
+            shb = 1 if meta["size_high_bit"] else 0
+        else:
+            shb = 1 if comp else 0
         struct.pack_into("<I", buf, p, _t); p += 4
         struct.pack_into("<I", buf, p, _g); p += 4
         struct.pack_into("<I", buf, p, (inst >> 32) & 0xFFFFFFFF); p += 4
         struct.pack_into("<I", buf, p, inst & 0xFFFFFFFF); p += 4
-        # offset: 压缩高位 (修复点 2)
-        struct.pack_into("<I", buf, p, o | (0x80000000 if comp else 0)); p += 4
-        # size: 压缩高位 (修复点 3)
-        struct.pack_into("<I", buf, p, sz | (0x80000000 if comp else 0)); p += 4
+        # offset: 低 31 位按新布局重算, bit31 保留 source 原高位 (不再按 comp 推导)
+        struct.pack_into("<I", buf, p, (o & 0x7FFFFFFF) | (0x80000000 if ohb else 0)); p += 4
+        # size: 低 31 位写真实 body size, bit31 保留 source 原高位
+        struct.pack_into("<I", buf, p, (sz & 0x7FFFFFFF) | (0x80000000 if shb else 0)); p += 4
         # mem_size (field7): 解压后长度 (修复点 4)
         mem = (meta.get("mem_size") if meta else None) or (_decomp_len(d) if comp else 0)
         struct.pack_into("<I", buf, p, mem & 0xFFFFFFFF); p += 4
@@ -236,7 +264,7 @@ def _decomp_len(d: bytes) -> int:
 def read_entry_meta_raw(pkg: Path):
     """从源包读取每个 index entry 的原始 compression metadata (不猜测)。
 
-    返回 (header_comp, entries_meta)。entries_meta 为 list, 顺序与源 index entry 一致:
+    返回 (major, minor, header_comp, entries_meta)。entries_meta 为 list, 顺序与源 index entry 一致:
       dict{type, group, inst, offset_raw, size_raw,
            offset_comp:bool, size_comp:bool, mem_size:int, comp_type:int}
     """
@@ -246,6 +274,8 @@ def read_entry_meta_raw(pkg: Path):
         magic = hdr[0:4]
         if magic != b"DBPF":
             raise ValueError(f"非 DBPF: {magic!r}")
+        major = struct.unpack("<I", hdr[0x04:0x08])[0]
+        minor = struct.unpack("<I", hdr[0x08:0x0C])[0]
         count = struct.unpack("<I", hdr[0x24:0x28])[0]
         header_comp = struct.unpack("<I", hdr[0x3C:0x40])[0]
         idx_off = struct.unpack("<I", hdr[0x40:0x44])[0]
@@ -263,7 +293,7 @@ def read_entry_meta_raw(pkg: Path):
             "size_comp": bool(sz & 0x80000000),
             "mem_size": mem, "comp_type": ct,
         })
-    return header_comp, out
+    return major, minor, header_comp, out
 
 
 def dbpf_metadata_valid(path: Path) -> tuple[bool, list[str]]:
@@ -279,7 +309,7 @@ def dbpf_metadata_valid(path: Path) -> tuple[bool, list[str]]:
     fails = []
     warns = []
     try:
-        header_comp, metas = read_entry_meta_raw(path)
+        _mj, _mn, header_comp, metas = read_entry_meta_raw(path)
     except Exception as ex:
         return False, [f"read raw index: {ex}"], []
     for m in metas:
@@ -290,7 +320,10 @@ def dbpf_metadata_valid(path: Path) -> tuple[bool, list[str]]:
         if body_zlib and not sz_comp:
             fails.append(f"zlib body but size-compression-bit=0: {tgi}")
         if not body_zlib and sz_comp:
-            fails.append(f"non-zlib body but size-compression-bit=1: {tgi}")
+            # 真实 source (SAMPLE 3) 已证明: size_high_bit=1 可出现在非 zlib body 上
+            # (stbl/WW XML/CLIP 等, src_sz=84 c=1)。这是 source 的真实合法 index 表达,
+            # 非缺陷。仅记录为 warn (向后保留 vs source 相同高位才视为忠实)。
+            warns.append(f"non-zlib body but size-compression-bit=1 (真实 source 可合法;见 warn 而非 fail): {tgi}")
         # 以下为约束性提示: 真实 Sims 包对 mem_size/comp_type/header 0x3C 未必恒非零,
         # 若源包原本如此, 不应判死; 仅记入 warn 供人工核验。
         if sz_comp and m["mem_size"] == 0:
@@ -327,7 +360,9 @@ def run_control0(src: Path, out_dir: Path, force: bool) -> int:
     if err is not None or idx is None:
         print(f"ERROR: source 解析失败: {err}", file=sys.stderr)
         return 3
-    hdr_comp, src_meta = read_entry_meta_raw(src)
+    hdr_comp = None
+    src_major = 2; src_minor = 0
+    src_major, src_minor, hdr_comp, src_meta = read_entry_meta_raw(src)
     if len(src_meta) != len(idx.entries):
         print(f"ERROR: 源 index metadata 数与解析条目数不一致", file=sys.stderr)
         return 3
@@ -336,7 +371,8 @@ def run_control0(src: Path, out_dir: Path, force: bool) -> int:
     def meta_for(e) -> dict:
         m = by_tgi.get((e.type_id, e.group_id, e.instance_id))
         if m is not None:
-            return {"comp_state": bool(m["size_comp"]), "comp_type": m["comp_type"], "mem_size": m["mem_size"]}
+            return {"comp_state": bool(m["size_comp"]), "comp_type": m["comp_type"], "mem_size": m["mem_size"],
+                    "offset_high_bit": int(m["offset_comp"]), "size_high_bit": int(m["size_comp"])}
         b = read_body_raw(src, e)
         return {"comp_state": _is_zlib(b), "comp_type": 0x5A42 if _is_zlib(b) else 0, "mem_size": _decomp_len(b)}
 
@@ -347,7 +383,7 @@ def run_control0(src: Path, out_dir: Path, force: bool) -> int:
     if out.exists() and not force:
         print(f"ERROR: CONTROL_0 已存在 (拒绝覆盖, 用 --force): {out}", file=sys.stderr)
         return 3
-    build_package(items, out, header_comp=hdr_comp)
+    build_package(items, out, header_comp=hdr_comp, major=src_major, minor=src_minor)
 
     # ---- 静态验证 ----
     c_sha = sha256(out)
@@ -372,13 +408,13 @@ def run_control0(src: Path, out_dir: Path, force: bool) -> int:
                 res["logical_all"] = False
             if bs != bc:
                 res["raw_unmod"] = False
-        # compression metadata: 比较源与 CONTROL_0 的 per-entry mem_size/comp_type/size_comp
-        _, cm = read_entry_meta_raw(out)
+        # compression metadata: 比较源与 CONTROL_0 的 per-entry mem_size/comp_type/size_comp/offset_comp
+        _, _, _, cm = read_entry_meta_raw(out)
         if len(cm) != len(src_meta):
             res["comp_meta"] = False
         else:
             for m1, m2 in zip(src_meta, cm):
-                if (m1["size_comp"], m1["mem_size"], m1["comp_type"]) != (m2["size_comp"], m2["mem_size"], m2["comp_type"]):
+                if (m1["size_comp"], m1["mem_size"], m1["comp_type"], m1["offset_comp"]) != (m2["size_comp"], m2["mem_size"], m2["comp_type"], m2["offset_comp"]):
                     res["comp_meta"] = False
     res["byte_identical"] = (src_sha == c_sha)
     static_pass = parser_ok and meta_ok and res["rc_same"] and res["tgi_same"] \
@@ -407,6 +443,149 @@ def run_control0(src: Path, out_dir: Path, force: bool) -> int:
     return 0 if static_pass else 3
 
 
+def run_control_source_faithful(src: Path, out_dir: Path, force: bool) -> int:
+    """CONTROL_SOURCE_FAITHFUL: 只修两个已实捶 source-fidelity bug 的非必改无操作重建。
+
+    修复项 (真机 23/23 实锤):
+      BUG_1 minor downgrade: source minor=1 -> writer 硬编码 0; 改从 source 透传 major/minor。
+      BUG_3 offset high-bit normalization: source offset_high_bit=0 -> writer 按 comp 推导=1;
+            改保留 source offset_high_bit 原值 (低31位物理 offset 仍重算)。
+    不修改 index placement (source index-at-end vs control index-at-head 保留差异)。
+
+    只生成 output/ww_animation_control_source_faithful/ (不生成 CANARY / 不碰 Mods)。
+    若全部 source-fidelity gate (E) 通过 -> 打印 STATIC_PASS=YES 并返回 0;
+    否则 STATIC_PASS=NO 并返回 3 (停止)。
+    """
+    src_sha = sha256(src)
+
+    idx, err = safe_parse(src)
+    if err is not None or idx is None:
+        print(f"ERROR: source 解析失败: {err}", file=sys.stderr)
+        return 3
+    src_major, src_minor, hdr_comp, src_meta = read_entry_meta_raw(src)
+    if len(src_meta) != len(idx.entries):
+        print(f"ERROR: 源 index metadata 数与解析条目数不一致 ({len(src_meta)} vs {len(idx.entries)})", file=sys.stderr)
+        return 3
+    by_tgi = {(m["type"], m["group"], m["inst"]): m for m in src_meta}
+
+    def meta_for(e) -> dict:
+        m = by_tgi.get((e.type_id, e.group_id, e.instance_id))
+        if m is not None:
+            return {"comp_state": bool(m["size_comp"]), "comp_type": m["comp_type"], "mem_size": m["mem_size"],
+                    "offset_high_bit": int(m["offset_comp"]), "size_high_bit": int(m["size_comp"])}
+        b = read_body_raw(src, e)
+        return {"comp_state": _is_zlib(b), "comp_type": 0x5A42 if _is_zlib(b) else 0, "mem_size": _decomp_len(b)}
+
+    # 无操作: 全部源存储字节 + 源 metadata + 源 high bits (不覆盖任何逻辑内容)
+    items = [(e.type_id, e.group_id, e.instance_id, read_body_raw(src, e), meta_for(e)) for e in idx.entries]
+
+    out = out_dir / "ww_animation_control_source_faithful" / f"{src.stem}_CONTROL_SOURCE_FAITHFUL.package"
+    if out.exists() and not force:
+        print(f"ERROR: CONTROL_SOURCE_FAITHFUL 已存在 (拒绝覆盖, 用 --force): {out}", file=sys.stderr)
+        return 3
+    build_package(items, out, header_comp=hdr_comp, major=src_major, minor=src_minor)
+
+    # ---- 静态 source-fidelity gate (E) ----
+    csha = sha256(out)
+    control_sha = csha
+
+    idxC, cerr = safe_parse(out)
+    parser_ok = (cerr is None and idxC is not None)
+    meta_ok, meta_fails, _meta_warns = dbpf_metadata_valid(out)
+
+    # 版本
+    c_major, c_minor, _chc, _cm = read_entry_meta_raw(out)
+    dbpf_ver_equal = (src_major == c_major) and (src_minor == c_minor)
+
+    # 23 维逐项: offset_high_bit / size_high_bit / field7 / field8 / body
+    off_eq = sz_eq = f7_eq = f8_eq = body_eq = 0
+    idx_order_ok = True
+    ranges_ok = True
+    total = len(idx.entries)
+    src_tgi = [(e.type_id, e.group_id, e.instance_id) for e in idx.entries]
+    ctl_tgi = [(e.type_id, e.group_id, e.instance_id) for e in idxC.entries] if idxC else []
+    idx_order_ok = (src_tgi == ctl_tgi)
+    if idxC and len(idxC.entries) == total:
+        for m1, m2 in zip(src_meta, _cm):
+            off_eq += (m1["offset_comp"] == m2["offset_comp"])
+            sz_eq += (m1["size_comp"] == m2["size_comp"])
+            f7_eq += (m1["mem_size"] == m2["mem_size"])
+            f8_eq += (m1["comp_type"] == m2["comp_type"])
+        for m2, e2 in zip(_cm, idxC.entries):
+            boff = m2["offset_raw"] & 0x7FFFFFFF
+            bsz = m2["size_raw"] & 0x7FFFFFFF
+            if not (0 <= boff and boff + bsz <= out.stat().st_size):
+                ranges_ok = False
+        for e, ec in zip(idx.entries, idxC.entries):
+            if read_body_raw(src, e) == read_body_raw(out, ec):
+                body_eq += 1
+    else:
+        ranges_ok = False
+
+    # index placement (保留差异, 不判死)
+    with open(src, "rb") as fh:
+        fh.seek(0); sh = fh.read(0x44)
+    s_ioff = struct.unpack("<I", sh[0x40:0x44])[0]; s_isz = struct.unpack("<I", sh[0x2C:0x30])[0]
+    src_at_end = (s_ioff + s_isz) >= src.stat().st_size - 8
+    ctl_at_end = False
+    if idxC:
+        with open(out, "rb") as fh:
+            fh.seek(0); ch = fh.read(0x44)
+        c_ioff = struct.unpack("<I", ch[0x40:0x44])[0]; c_isz = struct.unpack("<I", ch[0x2C:0x30])[0]
+        ctl_at_end = (c_ioff + c_isz) >= out.stat().st_size - 8
+
+    body_bytes_equal = (body_eq == total)
+    all_ranges_valid = ranges_ok
+    all_gates = (dbpf_ver_equal and body_bytes_equal and off_eq == total and sz_eq == total
+                 and f7_eq == total and f8_eq == total and idx_order_ok and all_ranges_valid and parser_ok and meta_ok)
+
+    print("CONTROL_SOURCE_FAITHFUL:")
+    print(f"  path={out}")
+    print(f"  source_sha={src_sha}")
+    print(f"  control_sha={control_sha}")
+    print(f"  SOURCE_DBPF_VERSION={src_major}.{src_minor}")
+    print(f"  CONTROL_DBPF_VERSION={c_major}.{c_minor}")
+    print(f"  DBPF_VERSION_EQUAL={'YES' if dbpf_ver_equal else 'NO'}")
+    print(f"  RESOURCE_BODY_BYTES_EQUAL={'YES' if body_bytes_equal else 'NO'}  ({body_eq}/{total})")
+    print(f"  OFFSET_HIGH_BIT_EQUAL_COUNT={off_eq}/{total}")
+    print(f"  SIZE_HIGH_BIT_EQUAL_COUNT={sz_eq}/{total}")
+    print(f"  FIELD7_EQUAL_COUNT={f7_eq}/{total}")
+    print(f"  FIELD8_EQUAL_COUNT={f8_eq}/{total}")
+    print(f"  INDEX_ORDER_EQUAL={'YES' if idx_order_ok else 'NO'}")
+    print(f"  ALL_RESOURCE_RANGES_VALID={'YES' if all_ranges_valid else 'NO'}")
+    print(f"  SOURCE_INDEX_AT_END={'YES' if src_at_end else 'NO'}")
+    print(f"  CONTROL_INDEX_AT_END={'YES' if ctl_at_end else 'NO'}")
+    print(f"  INDEX_PLACEMENT_DIFFERENCE={'YES' if src_at_end != ctl_at_end else 'NO'}  (本轮唯一故意保留的主要结构差异)")
+    print(f"  PARSER_VALID={'YES' if parser_ok else 'NO'}")
+    print(f"  DBPF_METADATA_VALID={'YES' if meta_ok else 'NO'}")
+    for f in meta_fails:
+        print(f"    METADATA_FAIL: {f}")
+    print(f"  CONTROL_SOURCE_FAITHFUL_STATIC_PASS={'YES' if all_gates else 'NO'}")
+    if not all_gates:
+        if not dbpf_ver_equal:
+            print("    GATE_FAIL: DBPF_VERSION_EQUAL")
+        if not body_bytes_equal:
+            print(f"    GATE_FAIL: RESOURCE_BODY_BYTES_EQUAL ({body_eq}/{total})")
+        if off_eq != total:
+            print(f"    GATE_FAIL: OFFSET_HIGH_BIT_EQUAL ({off_eq}/{total})")
+        if sz_eq != total:
+            print(f"    GATE_FAIL: SIZE_HIGH_BIT_EQUAL ({sz_eq}/{total})")
+        if f7_eq != total:
+            print(f"    GATE_FAIL: FIELD7_EQUAL ({f7_eq}/{total})")
+        if f8_eq != total:
+            print(f"    GATE_FAIL: FIELD8_EQUAL ({f8_eq}/{total})")
+        if not idx_order_ok:
+            print("    GATE_FAIL: INDEX_ORDER_EQUAL")
+        if not all_ranges_valid:
+            print("    GATE_FAIL: ALL_RESOURCE_RANGES_VALID")
+        if not parser_ok:
+            print("    GATE_FAIL: PARSER_VALID")
+        if not meta_ok:
+            print("    GATE_FAIL: DBPF_METADATA_VALID")
+    print("ZERO_WRITE_TO_MODS=YES")
+    return 0 if all_gates else 3
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", required=True)
@@ -417,12 +596,22 @@ def main():
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--control0", action="store_true",
                     help="方案 A CONTROL_0 模式: 读 source -> 经修复后 writer 重建, 不改任何逻辑资源; 生成 output/ww_animation_control_0/")
+    ap.add_argument("--control-source-faithful", action="store_true",
+                    help="CONTROL_SOURCE_FAITHFUL 模式: 只修 minor 与 offset high-bit 两个 source-fidelity bug, 保留 index placement 差异; 生成 output/ww_animation_control_source_faithful/")
     a = ap.parse_args()
 
     src = Path(a.source)
     if not src.is_file():
         print("ERROR: source 不存在", file=sys.stderr)
         return 2
+
+    if a.control0 and a.control_source_faithful:
+        print("ERROR: --control0 与 --control-source-faithful 互斥", file=sys.stderr)
+        return 2
+
+    # CONTROL_SOURCE_FAITHFUL 模式: 只生成/验证 CONTROL_SOURCE_FAITHFUL, 不做 CANARY
+    if a.control_source_faithful:
+        return run_control_source_faithful(src, Path(a.out_dir), a.force)
 
     # CONTROL_0 模式: 只生成/验证 CONTROL_0, 不做 CANARY (不需 display-* 参数)
     if a.control0:
@@ -505,7 +694,7 @@ def main():
     new_body = compress_like(body_orig, new_body_plain)
 
     # ---- 方案 A: 提取源包真实 compression metadata (ROOT-CAUSE fix) ----
-    src_header_comp, src_meta = read_entry_meta_raw(src)
+    src_major0, src_minor0, src_header_comp, src_meta = read_entry_meta_raw(src)
     if len(src_meta) != len(idx.entries):
         print(f"ERROR: 源 index metadata 数与解析条目数不一致 ({len(src_meta)} vs {len(idx.entries)})", file=sys.stderr)
         return 3
@@ -516,7 +705,8 @@ def main():
         """返回 source 该条目的压缩 metadata; 缺失则按 body 自动推断。"""
         m = src_meta_by_tgi.get((e.type_id, e.group_id, e.instance_id))
         if m is not None:
-            return {"comp_state": bool(m["size_comp"]), "comp_type": m["comp_type"], "mem_size": m["mem_size"]}
+            return {"comp_state": bool(m["size_comp"]), "comp_type": m["comp_type"], "mem_size": m["mem_size"],
+                    "offset_high_bit": int(m["offset_comp"]), "size_high_bit": int(m["size_comp"])}
         b = read_body_raw(src, e)
         return {"comp_state": _is_zlib(b), "comp_type": 0x5A42 if _is_zlib(b) else 0, "mem_size": _decomp_len(b)}
 
@@ -524,10 +714,10 @@ def main():
         """(type, group, inst, body, meta): 复用 source metadata (未改资源) 或更新 (WW XML)。"""
         meta = meta_for(e)
         if e.type_id == WW_ANIM_XML and e.instance_id == wxml_entry.instance_id:
-            # WW XML: 保持 source 压缩态/类型, 更新 size 由 writer 用 len(body) 算出,
-            # mem_size = 新解压长度 (保持与 source 相同的压缩模型)
+            # WW XML: 保持 source 压缩态/类型 + 高/低位, 更新 size 由 writer 用 len(body) 算出
             meta = {"comp_state": meta["comp_state"], "comp_type": meta["comp_type"],
-                    "mem_size": len(decompress_maybe(body))}
+                    "mem_size": len(decompress_maybe(body)),
+                    "offset_high_bit": meta["offset_high_bit"], "size_high_bit": meta["size_high_bit"]}
         return (e.type_id, e.group_id, e.instance_id, body, meta)
 
     # CONTROL_0 内容: 与源逐字节一致 (不动任何资源逻辑内容)
@@ -552,7 +742,7 @@ def main():
             return 3
 
     # CONTROL_0 首先构建并静态验证 (只有 CONTROL_0 PASS 才生成 CANARY_A)
-    build_package(control_items, control_path, header_comp=src_header_comp)
+    build_package(control_items, control_path, header_comp=src_header_comp, major=src_major0, minor=src_minor0)
     control_meta_ok, control_meta_fails, _cw = dbpf_metadata_valid(control_path)
     control_parse_ok = safe_parse(control_path)[1] is None
     # CONTROL_0 静态判定 (PARSER_VALID + DBPF_METADATA_VALID)
@@ -567,14 +757,14 @@ def main():
         print(f"STATIC_PASS={'YES' if control_pass else 'NO'}")
         return 3
 
-    build_package(canary_items, clone_path, header_comp=src_header_comp)
+    build_package(canary_items, clone_path, header_comp=src_header_comp, major=src_major0, minor=src_minor0)
     # TEST B sidecar: 只 1 个资源, TGI == 源注册 XML TGI (元数据按 source XML 的压缩态)
     xml_meta = src_meta_by_tgi.get((WW_ANIM_XML, wxml_entry.group_id, wxml_entry.instance_id))
     sidecar_meta = {"comp_state": bool(xml_meta and xml_meta["size_comp"]),
                     "comp_type": (xml_meta["comp_type"] if xml_meta else 0x5A42),
                     "mem_size": len(decompress_maybe(new_body))}
     build_package([(WW_ANIM_XML, wxml_entry.group_id, wxml_entry.instance_id, new_body, sidecar_meta)],
-                  sidecar_path, header_comp=src_header_comp)
+                  sidecar_path, header_comp=src_header_comp, major=src_major0, minor=src_minor0)
 
     # ---------- 机器验证 ----------
     def verify_artifact(path, expect_resources, label):
