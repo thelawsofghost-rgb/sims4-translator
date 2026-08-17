@@ -19,15 +19,23 @@ STBL = 0x220557DA
 from ww_animation_canary_builder import build_package, parse_anim_xml, read_body_raw, safe_parse  # noqa
 
 WW_XML = """<?xml version="1.0" encoding="utf-8"?>
-<WickedWhimsAnimationPackage>
-  <Animation animation_id="creator_animation_001" animation_raw_display_name="Slow Romantic Kiss" animation_author="TestCreator" animation_category="Kissing" animation_clip_name="clip_0001">
-    <animation_tags><Tag name="romantic" /></animation_tags>
-    <animation_locations><Location object="LoveSeat" /></animation_locations>
-    <animation_actors_list><Actor slot="0" id="actor_a" /></animation_actors_list>
-  </Animation>
-  <Animation animation_id="creator_animation_002" animation_raw_display_name="Fast Kiss" animation_author="TestCreator" animation_category="Kissing" animation_clip_name="clip_0002">
-  </Animation>
-</WickedWhimsAnimationPackage>
+<I version="1">
+  <L n="animations_list">
+    <U>
+      <T n="animation_raw_display_name">Slow Romantic Kiss</T>
+      <T n="animation_author">TestCreator</T>
+      <T n="animation_category">Kissing</T>
+      <T n="animation_tags">romantic</T>
+      <T n="animation_locations">LoveSeat</T>
+      <L n="animation_actors_list">
+        <U>
+          <T n="actor_id">0</T>
+          <T n="animation_clip_name">clip_0001</T>
+        </U>
+      </L>
+    </U>
+  </L>
+</I>
 """
 
 
@@ -65,10 +73,11 @@ def main():
         (STBL, 0x80000000, 0x0100000000000001, build_stbl([(0xAA, 0, "Kissing")])),
     ], src)
 
-    new_disp = "【CHS_CANARY】慢速浪漫亲吻"
+    new_disp = "【CHS_CANARY】强制地板002"
+    old_disp = "Slow Romantic Kiss"
     r = subprocess.run([sys.executable, BASE + "/scripts/ww_animation_canary_builder.py",
-                        "--source", str(src), "--animation-id", "creator_animation_001",
-                        "--display-old", "Slow Romantic Kiss", "--display-new", new_disp,
+                        "--source", str(src), "--display-old", old_disp,
+                        "--display-new", new_disp,
                         "--out-dir", str(tmp / "out")],
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
     out = r.stdout
@@ -82,7 +91,7 @@ def main():
     check("B sidecar exists", sidecar.exists(), "")
     check("ZERO_WRITE_TO_MODS=YES in stdout", "ZERO_WRITE_TO_MODS=YES" in out, "")
     check("TEST_A PASS", "TEST_A_ARTIFACT:" in out, "")
-    check("stdout PASS markers", new_disp in out and "display_old=Slow Romantic Kiss" in out, "")
+    check("stdout PASS markers", new_disp in out and f"display_old={old_disp}" in out, "")
 
     # A clone: count / TGI set / 只改 1 display / internal 不变
     idxA, errA = safe_parse(clone)
@@ -102,19 +111,17 @@ def main():
         if e2 is None or read_body_raw(src, e) != read_body_raw(clone, e2):
             allbytes_same = False
     check("A non-XML bodies byte-identical", allbytes_same, "")
-    # clone XML: only target entry display changed
+    # clone XML: 只改 display T 节点 text
     w1 = next(e for e in idxA.entries if e.type_id == WW_ANIM_XML)
     _sA, txtA, _ = parse_anim_xml(read_body_raw(clone, w1))
     check("A display new present", new_disp in txtA, "")
-    check("A old display gone (target)", "Slow Romantic Kiss" not in txtA, "")
-    check("A entry2 display unchanged", 'animation_raw_display_name="Fast Kiss"' in txtA, "")
-    check("A animation_id001 same", 'animation_id="creator_animation_001"' in txtA, "")
-    check("A animation_id002 same", 'animation_id="creator_animation_002"' in txtA, "")
-    check("A clip same", 'animation_clip_name="clip_0001"' in txtA, "")
-    check("A author same", 'animation_author="TestCreator"' in txtA, "")
-    check("A category same", 'animation_category="Kissing"' in txtA, "")
-    check("A location same", 'object="LoveSeat"' in txtA, "")
-    check("A tags same", 'name="romantic"' in txtA, "")
+    check("A old display gone (target)", old_disp not in txtA, "")
+    check("A author same", '<T n="animation_author">TestCreator</T>' in txtA, "")
+    check("A category same", '<T n="animation_category">Kissing</T>' in txtA, "")
+    check("A tags same", '<T n="animation_tags">romantic</T>' in txtA, "")
+    check("A location same", '<T n="animation_locations">LoveSeat</T>' in txtA, "")
+    check("A actor_id same", '<T n="actor_id">0</T>' in txtA, "")
+    check("A clip same", '<T n="animation_clip_name">clip_0001</T>' in txtA, "")
 
     # B sidecar: exactly 1 resource, exact TGI, no CLIP/ANIM/STBL
     idxB, errB = safe_parse(sidecar)
@@ -125,8 +132,8 @@ def main():
           f"{eB.type_id:08X}/{eB.group_id:08X}/{eB.instance_id:016X}")
     _sB, txtB, _ = parse_anim_xml(read_body_raw(sidecar, eB))
     check("B display new present", new_disp in txtB, "")
-    check("B internal unchanged", 'animation_id="creator_animation_001"' in txtB
-          and 'animation_clip_name="clip_0001"' in txtB and 'animation_author="TestCreator"' in txtB, "")
+    check("B internal unchanged", '<T n="animation_clip_name">clip_0001</T>' in txtB
+          and '<T n="animation_author">TestCreator</T>' in txtB, "")
     check("B no CLIP/ANIM/STBL", all(e.type_id not in (CLIP, ANIM_RCOL, STBL) for e in idxB.entries), "")
 
     # fail-closed: 双注册 XML 应拒绝
@@ -137,36 +144,22 @@ def main():
         (CLIP, 0, 0x0F00000000000001, b"\x11" * 64),
     ], src2)
     r2 = subprocess.run([sys.executable, BASE + "/scripts/ww_animation_canary_builder.py",
-                         "--source", str(src2), "--animation-id", "creator_animation_001",
+                         "--source", str(src2), "--display-old", "Slow Romantic Kiss",
                          "--display-new", new_disp, "--out-dir", str(tmp / "out2")],
                         capture_output=True, text=True, encoding="utf-8", errors="replace")
     check("fail-closed: 双注册XML 拒绝 (rc=3)", r2.returncode == 3, f"rc={r2.returncode}\n{r2.stdout}\n{r2.stderr}")
     check("fail-closed: 不产 artifact", not (tmp / "out2" / "ww_animation_canary_A").exists(), "")
 
-    # StripClub 变体: 无 animation_id, 全局替换首个 display field
-    DANCE_XML = ('<?xml version="1.0" encoding="utf-8"?>\n'
-                 '<StripClubDanceAnimationPackage>\n'
-                 '  <Dance raw_display_name="Pole Dance Basic" dancer_animation_clip_name="dancer_clip_a" dance_type="Pole" dancer_gender="female"/>\n'
-                 '</StripClubDanceAnimationPackage>\n')
-    src3 = tmp / "WW_StripClub_Animations.package"
-    inst_xml3 = 0x0300_0000_0000_0001
-    build_package([
-        (WW_ANIM_XML, 0, inst_xml3, zlib.compress(DANCE_XML.encode("utf-8"))),
-        (CLIP, 0, 0x0F00000000000003, b"\x99" * 64),
-    ], src3)
-    new_disp3 = "【CHS_CANARY】钢管舞基础"
-    r3 = subprocess.run([sys.executable, BASE + "/scripts/ww_animation_canary_builder.py",
-                         "--source", str(src3), "--animation-id", "none",
-                         "--display-new", new_disp3, "--out-dir", str(tmp / "out3")],
+    # fail-closed: display_old 精确匹配 != 1 应拒绝 (0 匹配)
+    r4 = subprocess.run([sys.executable, BASE + "/scripts/ww_animation_canary_builder.py",
+                         "--source", str(src), "--display-old", "NoSuchDisplayText",
+                         "--display-new", new_disp, "--out-dir", str(tmp / "out4")],
                         capture_output=True, text=True, encoding="utf-8", errors="replace")
-    check("StripClub rc==0", r3.returncode == 0, f"rc={r3.returncode}\n{r3.stdout}\n{r3.stderr}")
-    sc = (tmp / "out3" / "ww_animation_canary_A" / "WW_StripClub_Animations_CANARY_A.package")
-    idxS3, _ = safe_parse(sc)
-    w3 = next(e for e in idxS3.entries if e.type_id == WW_ANIM_XML)
-    _t, txtS3, _ = parse_anim_xml(read_body_raw(sc, w3))
-    check("StripClub display replaced", new_disp3 in txtS3 and "Pole Dance Basic" not in txtS3, txtS3[:160])
-    check("StripClub clip preserved", "dancer_animation_clip_name=\"dancer_clip_a\"" in txtS3, "")
-    check("StripClub dance_type preserved", 'dance_type="Pole"' in txtS3, "")
+    check("fail-closed: 0 匹配 display_old 拒绝 (rc=3)", r4.returncode == 3, f"rc={r4.returncode}\n{r4.stdout}")
+    check("fail-closed: 0 匹配不产 artifact", not (tmp / "out4" / "ww_animation_canary_A").exists(), "")
+
+    # 兼容性注意: StripClub 旧 attribute-style 不再作为 production schema 权威;
+    # 本 harness 只对 WickedWhimsAnimationPackage + animation_raw_display_name 做权威断言。
 
     print(f"\nHARNESS {'ALL PASS' if not fails else 'FAIL: ' + str(fails)}")
     return 1 if fails else 0

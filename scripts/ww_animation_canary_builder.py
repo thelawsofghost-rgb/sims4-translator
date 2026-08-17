@@ -16,9 +16,12 @@ ZERO WRITE TO MODS。不执行真机 swap / 不部署 sidecar / 不改原 packag
 
 铁律 (fail-closed):
   * 只处理【单 registration XML】的 source: WW_ANIM_XML (0x7DF2169C) 恰好 1 个, 否则停止并报告。
-  * 只改【1 个】明确 display 字段: animation_raw_display_name (WickedWhims) 或
-    raw_display_name (StripClub)。指定到具体 animation entry (按 animation_id)。
-  * animation_id / animation_clip_name / animation_author / category / location / tags / actors
+  * 只改【1 个】明确 display 字段: animation_raw_display_name (WickedWhims, 真实 Sims tuning
+    <T n="animation_raw_display_name">TEXT</T> 结构)。
+  * 定位依据: 在唯一 WW registration XML 中精确找到
+      <T n="animation_raw_display_name">OLD</T>
+    exact match 数必须 == 1; 0 或 >1 一律 FAIL-CLOSED (不按 ordinal 猜)。
+  * animation_clip_name / animation_author / category / location / tags / actor_id
     等所有其他字段与资源【字节不变】。
   * CLIP/ANIM_RCOL/STBL 等所有非 WW-XML 资源 body 逐字节保留。
   * 必须机器验证: resource count 不变 / TGI set 不变 / 恰好 1 个 display 字段改变 /
@@ -26,12 +29,12 @@ ZERO WRITE TO MODS。不执行真机 swap / 不部署 sidecar / 不改原 packag
 
 用法 (Windows, 只读):
   python scripts/ww_animation_canary_builder.py \
-      --source "D:\\...\\WW_TestCreator_Animations.package" \
-      --animation-id creator_animation_001 \
-      --display-new "【CHS_CANARY】慢速浪漫亲吻"
+      --source "C:\\Users\\thela\\...\\MSWD_FORCE_FLOOR_002.package" \
+      --display-old "FORCE_FLOOR_002" \
+      --display-new "【CHS_CANARY】强制地板002"
 
 可选:
-  --display-old "Slow Romantic Kiss"   (可选; 不传则自动读 XML 现存值)
+  --display-field animation_raw_display_name   (默认; 真实 WickedWhims 字段)
   --out-dir output                     (默认; artifact 写到 output/ww_animation_canary_A|B/)
   --force                              (artifacts 已存在时覆盖, 默认 fail-closed 拒写)
 
@@ -41,7 +44,7 @@ ZERO WRITE TO MODS。不执行真机 swap / 不部署 sidecar / 不改原 packag
   output/ww_animation_canary_report.md
   stdout: CANARY SOURCE / TEST_A_ARTIFACT / TEST_B_ARTIFACT / ZERO_WRITE_TO_MODS=YES + PASS/FAIL
 
-退出码: 0=完成; 2=参数/IO; 3=不满足 canary 前提 (非单注册XML / entry 找不到 / 校验 FAIL)。
+退出码: 0=完成; 2=参数/IO; 3=不满足 canary 前提 (非单注册XML / T 节点找不到或非唯一 / 校验 FAIL)。
 """
 import argparse
 import csv
@@ -61,8 +64,9 @@ ANIM_RCOL = 0xBC4A5044
 STBL = 0x220557DA
 
 DISPLAY_FIELDS = {"animation_raw_display_name", "raw_display_name"}
-INTERNAL_FIELDS = {"animation_id", "id", "animation_clip_name", "dancer_animation_clip_name",
-                   "slot"}  # 保护字段: 不得改动
+# 保护字段 (真实独立功能字段): 不得改动
+INTERNAL_FIELDS = {"animation_author", "animation_locations", "animation_custom_locations",
+                   "animation_category", "animation_tags", "actor_id", "animation_clip_name"}
 
 
 def sha256(p: Path) -> str:
@@ -121,69 +125,29 @@ def parse_anim_xml(body: bytes):
     return schema, text, None
 
 
-def _find_element_with_attr(xml_text: str, attr: str, value: str, tag_filter: tuple = ("Animation", "Dance", "animation", "dance")):
-    """定位包含 attr="value" 的 XML 元素, 返回 (element_text, start, end)。
-    支持自闭合 <.../> 与成对 <tag>...</tag>。找不到返回 None。"""
-    # 定位 attr=value 出现位置
-    pat = re.compile(r'\b%s\s*=\s*"%s"' % (re.escape(attr), re.escape(value)))
-    m = pat.search(xml_text)
-    if not m:
-        return None
-    # 从该位置向左找元素开标签 '<' (跳过标签内其它属性, 取最近的 '<')
-    i = m.start()
-    lt = xml_text.rfind("<", 0, i)
-    if lt < 0:
-        return None
-    # 确认开标签以 tag 结尾且属性在同一个 <...> 内
-    gt = xml_text.find(">", i)
-    if gt < 0:
-        return None
-    # 右边界: 找到该 attr 所在 tag 的闭合 (自闭合或 </tag>)
-    open_tag = xml_text[lt:gt + 1]
-    tm = re.match(r"<\s*([A-Za-z_][A-Za-z0-9_]*)", open_tag)
-    if not tm:
-        return None
-    tagname = tm.group(1)
-    if open_tag.rstrip().endswith("/>"):
-        return xml_text[lt:gt + 1], lt, gt + 1
-    # 成对元素: 找 </tagname>
-    close_pat = re.compile(r"</%s\s*>" % re.escape(tagname))
-    cm = close_pat.search(xml_text, gt + 1)
-    if cm:
-        return xml_text[lt:cm.end()], lt, cm.end()
-    # 无闭合: 退化为整段剩余
-    return xml_text[lt:], lt, len(xml_text)
-
-
-def replace_display_field(xml_text: str, anim_id: str, display_field: str, new_val: str):
-    """只改【目标 entry (含 animation_id)】的 display 字段。
-    WickedWhims 变体: 用 animation_id 定位元素块; 块内替换 display_field。
-    StripClub 变体 (无 animation_id): 退化为全局替换首个 display_field。
-    返回 (new_text, old_val, changed_count)。"""
-    found = _find_element_with_attr(xml_text, "animation_id", anim_id)
-    if found is None:
-        # 无 animation_id (如 Dance 变体): 全局替换首个 display_field
-        m = re.search(r'(\b%s\s*=\s*)"([^"]*)"' % re.escape(display_field), xml_text)
-        if not m:
-            return xml_text, None, 0
-        return xml_text[:m.start(2)] + new_val + xml_text[m.end(2):], m.group(2), 1
-    block, start, end = found
-    new_block, cnt = _replace_in_block(block, display_field, new_val)
-    if cnt == 0:
-        return xml_text, None, 0
-    return xml_text[:start] + new_block + xml_text[end:], _old_in_block(block, display_field), cnt
-
-
 def _old_in_block(block: str, field: str):
-    m = re.search(r'\b%s\s*=\s*"([^"]*)"' % re.escape(field), block)
-    return m.group(1) if m else None
+    m = re.search(r'<T\s+[^>]*\bn\s*=\s*"%s"[^>]*>([^<]*)</T>' % re.escape(field), block)
+    return m.group(1).strip() if m else None
 
 
-def _replace_in_block(block: str, field: str, new_val: str):
-    m = re.search(r'(\b%s\s*=\s*)"([^"]*)"' % re.escape(field), block)
-    if not m:
-        return block, 0
-    return block[:m.start(2)] + new_val + block[m.end(2):], 1
+def _replace_t_node_display(xml_text: str, display_field: str, old_val: str, new_val: str):
+    """真实 Sims tuning 定位: 精确找 <T n=display_field>OLD</T> 元素, 只改该元素的 text。
+
+    返回 (new_text, replaced_count, matched_spans)。
+    exact match 数必须 == 1, 否则调用方 FAIL-CLOSED。
+    """
+    pat = re.compile(
+        r'(<T\s+[^>]*\bn\s*=\s*"%s"[^>]*>)([^<]*)(</T>)' % re.escape(display_field)
+    )
+    spans = []  # (text_start, text_end, old_text)
+    for m in pat.finditer(xml_text):
+        inner = m.group(2)
+        if inner.strip() == old_val:
+            spans.append((m.start(2), m.end(2), inner))
+    if len(spans) != 1:
+        return xml_text, len(spans), spans
+    s, e, _ = spans[0]
+    return xml_text[:s] + new_val + xml_text[e:], 1, spans
 
 
 def build_package(items, out_path: Path):
@@ -230,12 +194,32 @@ def build_package(items, out_path: Path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", required=True)
-    ap.add_argument("--animation-id", required=True)
+    ap.add_argument("--display-old", required=True)
     ap.add_argument("--display-new", required=True)
-    ap.add_argument("--display-old", default=None)
+    ap.add_argument("--display-field", default="animation_raw_display_name")
     ap.add_argument("--out-dir", default="output")
     ap.add_argument("--force", action="store_true")
     a = ap.parse_args()
+
+    # --- 保护字段 T 节点工具 (供 A/B 校验) ---
+    def _tunable_values(txt: str):
+        """提取真实 T 节点全部值: 返回 {field: [values]} (字段在 INTERNAL_FIELDS 保护范围内)。"""
+        out = {f: [] for f in INTERNAL_FIELDS}
+        for m in re.finditer(r'<T\s+[^>]*\bn\s*=\s*"([^"]+)"[^>]*>([^<]*)</T>', txt):
+            f, v = m.group(1), m.group(2).strip()
+            if f in out:
+                out[f].append(v)
+        return out
+
+    def _internal_changed(txt):
+        """返回真实 T 节点保护字段()中值发生变化的字段数。"""
+        o = _tunable_values(xml_text_orig)
+        m = _tunable_values(txt)
+        n = 0
+        for f in INTERNAL_FIELDS:
+            if o[f] != m[f]:
+                n += 1
+        return n
 
     src = Path(a.source)
     if not src.is_file():
@@ -268,16 +252,24 @@ def main():
         print(f"ERROR: WW XML 解析失败/schema 未识别: {xerr or schema}", file=sys.stderr)
         return 3
 
-    # display 字段名
-    disp_field = "raw_display_name" if "raw_display_name" in xml_text_orig and "animation_raw_display_name" not in xml_text_orig else "animation_raw_display_name"
-
-    # 找到目标 entry + OLD display 值
-    new_xml, old_val, cnt = replace_display_field(xml_text_orig, a.animation_id, disp_field, a.display_new)
-    if cnt != 1:
-        print(f"ERROR: 未能精确定位 animation_id={a.animation_id} 的 display 字段 (changed={cnt})", file=sys.stderr)
+    # display 字段名 (真实 WickedWhims / 兼容 StripClub)
+    disp_field = a.display_field
+    if disp_field not in DISPLAY_FIELDS:
+        print(f"ERROR: --display-field 不支持: {disp_field}", file=sys.stderr)
         return 3
-    if a.display_old and old_val != a.display_old:
-        print(f"WARN: --display-old 与现存值不符: 期待={a.display_old!r} 实际={old_val!r} (继续, 用实际值)", file=sys.stderr)
+
+    # 真实 schema 定位: 在唯一 WW registration XML 中精确找 <T n=disp_field>OLD</T>
+    new_xml, cnt, spans = _replace_t_node_display(xml_text_orig, disp_field, a.display_old, a.display_new)
+    if cnt != 1:
+        print(f"ERROR: display T 节点 exact match 数 = {cnt} (必须 == 1; FAIL-CLOSED, 不按 ordinal 猜)",
+              file=sys.stderr)
+        print(f"  disp_field={disp_field}  display_old={a.display_old!r}")
+        print("  HINT: 确认 display_old 与包内 <T n=...>TEXT</T> 精确一致; 0=文本不存在, >1=需更具体 selector。")
+        return 3
+    old_val = spans[0][2]  # 旧文本
+    if a.display_old and old_val.strip() != a.display_old:
+        # 理论不会发生 (spans 已按 old 匹配)
+        print(f"WARN: 文本不精确 (内部不一致): {old_val!r}", file=sys.stderr)
 
     # 新 XML body (若原 zlib 则重压缩)
     new_body_plain = new_xml.encode("utf-8")
@@ -330,21 +322,23 @@ def main():
     else:
         bA = read_body_raw(clone_path, wA[0])
         _sA, txtA, _xA = parse_anim_xml(bA)
-        # display 变化
-        disp_changed = sum(1 for f in DISPLAY_FIELDS
-                           for _ in re.findall(r'\b%s\s*=\s*"%s"' % (re.escape(f), re.escape(a.display_new)), txtA))
-        old_still = sum(1 for f in DISPLAY_FIELDS
-                        for _ in re.findall(r'\b%s\s*=\s*"%s"' % (re.escape(f), re.escape(old_val or "")), txtA))
+        # display 变化 (T 节点形式)
+        def _t_val(txt, field):
+            m = re.search(r'<T\s+[^>]*\bn\s*=\s*"%s"[^>]*>([^<]*)</T>' % re.escape(field), txt)
+            return m.group(1).strip() if m else None
+        new_t = _t_val(txtA, disp_field)
+        disp_changed = 1 if new_t == a.display_new else 0
+        old_still = 1 if new_t == old_val.strip() else 0
         if disp_changed < 1:
-            a_fails.append("display 新值未出现")
+            a_fails.append(f"display 新值未出现 (got {new_t!r})")
         if old_still > 0 and old_val:
-            a_fails.append(f"旧 display 值仍存在 ({old_still} 处)")
-        # internal 保护字段: 原值必须仍存在
+            a_fails.append("旧 display 值仍存在")
+        # internal 保护字段 (T 节点): 原值必须仍存在
+        tun_orig = _tunable_values(xml_text_orig)
+        tun_new = _tunable_values(txtA)
         for f in INTERNAL_FIELDS:
-            m_orig = re.findall(r'\b%s\s*=\s*"([^"]*)"' % re.escape(f), xml_text_orig)
-            m_new = re.findall(r'\b%s\s*=\s*"([^"]*)"' % re.escape(f), txtA)
-            if m_orig != m_new:
-                a_fails.append(f"internal 字段 {f} 已变: {m_orig} -> {m_new}")
+            if tun_orig[f] != tun_new[f]:
+                a_fails.append(f"internal 字段 {f} 已变: {tun_orig[f]} -> {tun_new[f]}")
         # TGI set 不变
         tgi_orig = {(e.type_id, e.group_id, e.instance_id) for e in idx.entries}
         tgi_new = {(e.type_id, e.group_id, e.instance_id) for e in idxA.entries}
@@ -370,24 +364,15 @@ def main():
         _sB, txtB, _xB = parse_anim_xml(bB)
         if a.display_new not in txtB:
             b_fails.append("sidecar 缺 canary display 新值")
+        tunB = _tunable_values(txtB)
         for f in INTERNAL_FIELDS:
-            m_orig = re.findall(r'\b%s\s*=\s*"([^"]*)"' % re.escape(f), xml_text_orig)
-            m_new = re.findall(r'\b%s\s*=\s*"([^"]*)"' % re.escape(f), txtB)
-            if m_orig != m_new:
+            if tun_orig[f] != tunB[f]:
                 b_fails.append(f"sidecar internal 字段 {f} 已变")
 
     a_pass = not a_fails and vA["ok"]
     b_pass = not b_fails and vB["ok"]
 
-    def _internal_changed(txt):
-        n = 0
-        for f in INTERNAL_FIELDS:
-            o = re.findall(r"\b%s\s*=" % re.escape(f), xml_text_orig)
-            m = re.findall(r"\b%s\s*=" % re.escape(f), txt)
-            if o != m:
-                n += 1
-        return n
-    a_int_changed = _internal_changed(txtA) if not a_fails or True else 0
+    a_int_changed = _internal_changed(txtA) if (not a_fails or True) else 0
     b_int_changed = _internal_changed(txtB) if not b_fails else 0
 
     # ---------- report ----------
@@ -401,8 +386,8 @@ def main():
     md.append(f"- ww_xml_tgi = {wxml_tgi}")
     md.append(f"- display_old = {old_val}")
     md.append(f"- display_canary = {a.display_new}")
-    md.append(f"- animation_id = {a.animation_id}")
-    md.append(f"- schema_display_field = {disp_field}")
+    md.append(f"- display_field = {disp_field}")
+    md.append(f"- display_matches = {cnt}")
     md.append("")
     md.append("## TEST A ARTIFACT")
     md.append(f"- path = {clone_path}")
@@ -434,11 +419,11 @@ def main():
     print(f"  schema={schema}")
     print(f"  ww_xml_tgi={wxml_tgi}")
     print(f"  display_old={old_val}")
-    print(f"  display_canary={a.display_new}")
-    print(f"  animation_id={a.animation_id}")
-    _clipv = _old_in_block(xml_text_orig, "animation_clip_name") or _old_in_block(xml_text_orig, "dancer_animation_clip_name") or "<见 XML>"
+    print(f"  display_new={a.display_new}")
+    print(f"  display_field={disp_field}")
+    print(f"  display_matches={cnt}")
+    _clipv = _old_in_block(xml_text_orig, "animation_clip_name") or "<见 XML>"
     _authorv = _old_in_block(xml_text_orig, "animation_author") or "<见 XML>"
-    # clip 引用对应 TGI (若有匹配 CLIP)
     _clip_tgi = ""
     for _c in idx.entries:
         if _c.type_id == CLIP:

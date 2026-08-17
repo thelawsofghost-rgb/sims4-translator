@@ -315,58 +315,107 @@ def main():
                   "animation_raw_display_name / animation_id / animation_clip_name 未在真实包所有属性集合中发现。")
         md.append("(不硬套白盒字段; 以下结论仅基于真实观测)")
 
+    # ---------- 独立功能字段识别 (真实 Sims tuning 结构) ----------
+    # 只识别 tag==T 且 attr n==<field> 的 node。
+    tunable_fields = {"animation_author", "animation_locations", "animation_custom_locations",
+                      "animation_category", "animation_tags", "animation_clip_name", "actor_id"}
+    tunable_found = {f: [] for f in tunable_fields}
+    display_t_nodes = []  # (field, value) 满足 <T n="..."> 但非交互/冗余的显示候选
+
     # DISPLAY_STORAGE
     display_storage = "UNKNOWN"
     display_field = "UNKNOWN"
+    display_value = "UNKNOWN"
     internal_id_field = "UNKNOWN"
     disp_sep = "UNKNOWN"
 
     if ww:
-        # 收集全部属性值, 找"最像显示文本"的属性 (含空格/自然语言, 非纯 hash/key)
-        cand_disp = []
+        # 遍历所有 XML, 收集 tag==T 且带 n= 属性的 node (Sims tuning scalar)
+        t_nodes = []
         for (tgi_x, xml_text, obs) in xml_blocks:
-            for k, vs in obs["nodes"].items():
-                for v in vs:
-                    if re.search(r'\s+[A-Za-z]', v) and not re.fullmatch(r'[0-9A-Fa-f]{6,}', v):
-                        cand_disp.append((k, v))
-        if cand_disp:
-            display_field = cand_disp[0][0]
+            for m in re.finditer(r'<T\s+[^>]*\bn\s*=\s*"([^"]+)"[^>]*>([^<]*)</T>|<T\s+[^>]*\bn\s*=\s*"([^"]+)"[^>]*/>', xml_text):
+                field = m.group(1) or m.group(3)
+                val = (m.group(2) or "").strip()
+                t_nodes.append((tgi_x, field, val))
+        # 独立功能字段: 收集每个字段的全部值
+        for (tgi_x, field, val) in t_nodes:
+            if field in tunable_fields:
+                tunable_found[field].append(val)
+
+        # ---------- 真实 DISPLAY 识别 ----------
+        # 仅当存在 <T n="animation_raw_display_name">TEXT</T> 才算 DIRECT_XML display。
+        disp_matches = [(tg, v) for (tg, f, v) in t_nodes if f == "animation_raw_display_name"]
+        display_t_nodes = disp_matches
+        if disp_matches:
+            display_field = "animation_raw_display_name"
+            display_value = disp_matches[0][1]
             display_storage = "DIRECT_XML"
         else:
             display_storage = "UNKNOWN_DIRECT_TEXT_NONE"
 
-        # internal id: 属性名含 id/hash/key/instance 且值非自然语言
+        # ---------- INTERNAL_ID_FIELD ----------
+        # 仅当真实 XML 中存在稳定、唯一、且与 display 分离、且可用于定位 entry 的 id 字段才定义;
+        # 否则显式 NONE_EXPLICIT_FOUND, 不为得到 CLEAR 强造 animation_id。
+        # 排除 actor_id (每 actor 索引非 entry id) 与 animation_clip_name (功能引用, 非定位 id)。
+        id_exclude = {"actor_id", "animation_clip_name", "animation_author", "animation_locations",
+                      "animation_custom_locations", "animation_category", "animation_tags",
+                      "animation_raw_display_name"}
+        id_candidates = []
+        for (tgi_x, field, val) in t_nodes:
+            if field in id_exclude:
+                continue
+            if re.search(r'\b(id|hash|key|instance|ref)\b', field, re.I):
+                if val and not re.search(r'\s', val) and len(val) <= 64:
+                    id_candidates.append((field, val))
+        # 也检查 attribute 形式 (兼容老款/其它 schema, 非权威)
         for (tgi_x, xml_text, obs) in xml_blocks:
             for k, vs in obs["nodes"].items():
-                if re.search(r'id|hash|key|instance|ref', k, re.I):
+                if k in id_exclude:
+                    continue
+                if re.search(r'\b(id|hash|key|instance|ref)\b', k, re.I):
                     for v in vs:
-                        if re.fullmatch(r'[0-9A-Za-z_-]{1,64}', v) and not re.search(r'\s', v):
-                            internal_id_field = k
-                            break
-                    if internal_id_field != "UNKNOWN":
-                        break
-            if internal_id_field != "UNKNOWN":
-                break
-
-        # 若有 STBL links -> display 可能经 STBL
-        if links:
-            display_storage = "STBL_REFERENCED"
-            if display_field != "UNKNOWN":
-                disp_sep = "PARTIAL"
-        elif stbls:
-            if display_storage == "DIRECT_XML":
-                display_storage = "STBL_PRESENT_BUT_UNLINKED"
-                disp_sep = "CLEAR" if display_field != "UNKNOWN" else "UNKNOWN"
+                        if not re.search(r'\s', v) and len(v) <= 64:
+                            id_candidates.append((k, v))
+        if id_candidates:
+            # 每 entry 唯一且稳定可定位的 id 字段才采用; 多个候选时取首个 (不做语义猜测)
+            internal_id_field = id_candidates[0][0]
         else:
-            if display_storage == "DIRECT_XML":
-                disp_sep = "CLEAR" if display_field != "UNKNOWN" else "UNKNOWN"
+            internal_id_field = "NONE_EXPLICIT_FOUND"
+
+        # ---------- DISPLAY_INTERNAL_SEPARATION ----------
+        # 依据: display 字段与 clip/author/location/category/tags/actor 等功能字段在结构上分离。
+        structural_basis = [f for f in ("animation_clip_name", "animation_author", "animation_locations",
+                                        "animation_category", "animation_tags", "actor_id")
+                            if tunable_found[f]]
+        if display_storage == "DIRECT_XML":
+            if structural_basis:
+                disp_sep = "PARTIAL" if len(structural_basis) < 3 else "CLEAR"
+            else:
+                disp_sep = "UNKNOWN"
+        else:
+            disp_sep = "UNKNOWN"
+
+        # 若有 STBL links 且 display 直接来自 XML -> display 与 STBL 分离。
+        if links and display_storage == "DIRECT_XML":
+            if disp_sep == "UNKNOWN":
+                disp_sep = "PARTIAL"
+
+        if stbls and display_storage == "DIRECT_XML" and not links:
+            if disp_sep == "UNKNOWN":
+                disp_sep = "PARTIAL" if structural_basis else "CLEAR"
     else:
         display_storage = "UNKNOWN (无 WW XML)"
 
     md.append(f"DISPLAY_STORAGE={display_storage}")
     md.append(f"DISPLAY_FIELD={display_field}")
+    md.append(f"DISPLAY_VALUE={display_value}")
     md.append(f"INTERNAL_ID_FIELD={internal_id_field}")
     md.append(f"DISPLAY_INTERNAL_SEPARATION={disp_sep}")
+    md.append("")
+    md.append("独立功能字段 (真实 Sims tuning 结构, 与 display 结构分离):")
+    for f in tunable_fields:
+        vals = tunable_found[f]
+        md.append(f"  - {f} = {vals if vals else '(未出现)'}")
 
     out_path = out_dir / "ww_animation_deep_one.md"
     out_path.write_text("\n".join(md) + "\n", encoding="utf-8")
@@ -397,10 +446,17 @@ def main():
             print(f"  XML({t}) {k}={v!r} -> CLIP {inst}")
     if schema_invalid:
         print("WHITEBOX_SCHEMA_ASSUMPTION_INVALID_FOR_REAL_SAMPLE=YES")
+    print("DEEP_ONE:")
     print(f"DISPLAY_STORAGE={display_storage}")
     print(f"DISPLAY_FIELD={display_field}")
+    print(f"DISPLAY_VALUE={display_value}")
     print(f"INTERNAL_ID_FIELD={internal_id_field}")
     print(f"DISPLAY_INTERNAL_SEPARATION={disp_sep}")
+    if ww:
+        print("INDEPENDENT_FIELDS:")
+        for f in tunable_fields:
+            vals = tunable_found[f]
+            print(f"  {f}={'/'.join(vals) if vals else '(absent)'}")
     print(f"ZERO_WRITE_TO_MODS=YES")
     return 0
 

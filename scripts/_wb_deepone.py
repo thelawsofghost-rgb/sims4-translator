@@ -20,17 +20,25 @@ STBL = 0x220557DA
 
 from ww_animation_canary_builder import build_package  # noqa
 
-# 真实风格 XML: 不用白盒字段; 用 title/actor_id/localization_hash 等
+# 真实 SAMPLE 3 结构 (Sims tuning): 只改 display 的 T 节点 + 独立功能字段
 XML = """<?xml version="1.0" encoding="utf-8"?>
-<WickedWhimsActorDatabase>
-  <SceneEntry scene_id="scene_floor_002" title="MSWD Force Floor" localization_hash="0x3F220598" clipref="0x0F000000000000AA">
-    <Tag name="floor" />
-    <Actor actor_id="actor_77" voice_bank="vb_base" enabled="true" />
-  </SceneEntry>
-  <SceneEntry scene_id="scene_floor_002b" title="MSWD Force Floor B" localization_hash="0x00000012">
-    <Actor actor_id="actor_78" voice_bank="vb_base" enabled="true" />
-  </SceneEntry>
-</WickedWhimsActorDatabase>
+<I version="1">
+  <L n="animations_list">
+    <U>
+      <T n="animation_raw_display_name">FORCE_FLOOR_002</T>
+      <T n="animation_author">MSWD</T>
+      <T n="animation_locations">FLOOR</T>
+      <T n="animation_category">VAGINAL</T>
+      <T n="animation_tags">FORCED</T>
+      <L n="animation_actors_list">
+        <U>
+          <T n="actor_id">0</T>
+          <T n="animation_clip_name">MSWD:PosePack_202204170320344277_set_1</T>
+        </U>
+      </L>
+    </U>
+  </L>
+</I>
 """
 
 
@@ -51,15 +59,14 @@ def main():
 
     tmp = Path(tempfile.mkdtemp(prefix="wb_deepone_"))
     src = tmp / "MSWD_FORCE_FLOOR_002.package"
-    STBL_KEY = 0x3F220598  # 与 XML localization_hash=0x3F220598 匹配
     build_package([
-        (WW_ANIM_XML, 0, 0x7DF2_0000_0000_0001, zlib.compress(XML.encode("utf-8"))),
+        (WW_ANIM_XML, 0, 0x7DF2169CB3390ED6, zlib.compress(XML.encode("utf-8"))),
         (CLIP, 0, 0x0F000000000000AA, b"\x11" * 32),
         (CLIP, 0, 0x0F000000000000BB, b"\x22" * 32),
         (ANIM_RCOL, 0, 0x0F000000000000AA, b"\x33" * 32),
         (ANIM_RCOL, 0, 0x0F000000000000BB, b"\x44" * 32),
         (STBL, 0x80000000, 0x0100000000000001,
-         build_stbl([(0x3F220598, 0, "MSWD Force Floor"), (0xDEADBEEF, 0, "other")])),
+         build_stbl([(0xDEADBEEF, 0, "unrelated")])),
     ], src)
 
     r = subprocess.run([sys.executable, BASE + "/scripts/ww_animation_forensic_deep_one.py",
@@ -70,25 +77,26 @@ def main():
     check("rc==0", r.returncode == 0, f"rc={r.returncode}\n{out}\nERR:{err}")
     check("WW_XML_COUNT=1", "WW_XML_COUNT=1" in out, "")
     check("STBL_COUNT=1", "STBL_COUNT=1" in out, "")
-    check("CLIP=2", "CLIP=2" in out or "CLIP=2 " in out.replace(" ", " "), "")
-    check("root observed", "WickedWhimsActorDatabase" in out, "")
-    check("unique tags include SceneEntry/Tag/Actor",
-          all(t in out for t in ("SceneEntry", "Tag", "Actor")), "")
-    check("unique attrs observed", all(x in out for x in ("scene_id", "title", "localization_hash", "clipref", "actor_id")), "")
-    # STBL entries (in report .md)
-    check("STBL key printed", "key=0x3F220598" in out and "MSWD Force Floor" in out, "")
-    md_report = (tmp / "out" / "ww_animation_deep_one.md").read_text(encoding="utf-8")
-    check("STBL key2 printed (report)", "key=0xDEADBEEF" in md_report and "'other'" in md_report, "")
-    # XML<->STBL cross match: localization_hash=0x3F220598 matches STBL key 0x3F220598
-    check("XML_STBL_LINKS_FOUND>=1", "XML_STBL_LINKS_FOUND=1" in out or "XML_STBL_LINKS_FOUND=2" in out, f"got={[l for l in out.splitlines() if 'XML_STBL_LINKS_FOUND' in l]}")
-    check("cross-match line present", "-> STBL key=0x3F220598" in out, "")
-    # CLIP: clipref=0x0F000000000000AA matches CLIP instance
-    check("CLIP_MATCH found", "CLIP_LINKS_FOUND=1" in out and "0x0F000000000000AA" in out, "")
-    # whitebox invalid flag: 真实字段无 animation_raw_display_name/id/clip
-    check("WHITEBOX_SCHEMA_ASSUMPTION_INVALID", "WHITEBOX_SCHEMA_ASSUMPTION_INVALID_FOR_REAL_SAMPLE" in out, "")
-    check("DISPLAY_STORAGE=STBL_REFERENCED", "DISPLAY_STORAGE=STBL_REFERENCED" in out, "")
-    # DISPLAY_FIELD 应为含自然语言文本的属性 (title)
-    check("DISPLAY_FIELD=title", "DISPLAY_FIELD=title" in out, f"got={[l for l in out.splitlines() if l.startswith('DISPLAY_FIELD')]}")
+    check("CLIP=2", "CLIP=2" in out, "")
+    check("root observed", "root=I" in out, "")
+    check("animations_list observed", "animations_list" in out, "")
+    # 真实 Sims tuning display
+    check("DISPLAY_STORAGE=DIRECT_XML", "DISPLAY_STORAGE=DIRECT_XML" in out, "")
+    check("DISPLAY_FIELD=animation_raw_display_name", "DISPLAY_FIELD=animation_raw_display_name" in out, "")
+    check("DISPLAY_VALUE=FORCE_FLOOR_002", "DISPLAY_VALUE=FORCE_FLOOR_002" in out, "")
+    # 无 STBL link (display 直接来自 XML)
+    check("XML_STBL_LINKS_FOUND=0", "XML_STBL_LINKS_FOUND=0" in out, "")
+    # 独立功能字段
+    check("INDEPENDENT_FIELDS author", "animation_author=MSWD" in out, "")
+    check("INDEPENDENT_FIELDS category", "animation_category=VAGINAL" in out, "")
+    check("INDEPENDENT_FIELDS locations", "animation_locations=FLOOR" in out, "")
+    check("INDEPENDENT_FIELDS tags", "animation_tags=FORCED" in out, "")
+    check("INDEPENDENT_FIELDS clip", "animation_clip_name=MSWD:PosePack" in out, "")
+    check("INDEPENDENT_FIELDS actor_id", "actor_id=0" in out, "")
+    # 无稳定 per-entry id -> NONE_EXPLICIT_FOUND
+    check("INTERNAL_ID_FIELD=NONE_EXPLICIT_FOUND", "INTERNAL_ID_FIELD=NONE_EXPLICIT_FOUND" in out, "")
+    # display 与功能字段结构分离 (author/locations/category/tags/clip/actor 全部在场 -> CLEAR)
+    check("DISPLAY_INTERNAL_SEPARATION=CLEAR", "DISPLAY_INTERNAL_SEPARATION=CLEAR" in out, "")
     check("ZERO_WRITE_TO_MODS=YES", "ZERO_WRITE_TO_MODS=YES" in out, "")
     check("report mkd written", (tmp / "out" / "ww_animation_deep_one.md").exists(), "")
 
