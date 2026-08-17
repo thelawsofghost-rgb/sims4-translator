@@ -78,9 +78,10 @@ SH_EXPECTED = "cd0093f2ec4b896121fa465672584c12384465b631c1d9128fe97d360b87d416"
 
 # ============================================================ raw 文本切分 (entry-scoped edit)
 def _entry_blocks(list_text: str):
-    """扫 raw XML text, 按 depth 切开顶层 <U>...</U> block (容忍内嵌 actor <U>)。
+    """扫 raw XML text, 按 depth 找顶层 <U>...</U> block 的字节区间 (容忍内嵌 actor <U>)。
 
     返回 list[(block_text, (start, end))]; end 含闭标签 </U> (字节级保留)。
+    这是【不覆盖 gaps】的定位版, 供 ordinal/OLD 读取与验证用。
     """
     blocks = []
     depth = 0
@@ -110,6 +111,25 @@ def _entry_blocks(list_text: str):
             if depth < 0:
                 depth = 0
     return blocks
+
+
+def _entry_partition(list_text: str):
+    """把 animations_list inner text 切成【完整覆盖分区】: 交替的 gap 与 entry block。
+
+    返回 [(is_entry, text, (start,end))]; 所有区间首尾相接、无空隙无重叠,
+    [0..] 到 [len..] 全覆盖, 从而重建时可逐字节保留所有非目标 whitespace。
+    """
+    blocks = _entry_blocks(list_text)
+    parts = []
+    pos = 0
+    for btext, (bst, be) in blocks:
+        if bst > pos:
+            parts.append((False, list_text[pos:bst], (pos, bst)))
+        parts.append((True, btext, (bst, be)))
+        pos = be
+    if pos < len(list_text):
+        parts.append((False, list_text[pos:], (pos, len(list_text))))
+    return parts
 
 
 def _replace_display_in_block(block_text: str, new_val: str):
@@ -319,14 +339,19 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
     if len(set(olds)) != 3:
         print(f"WARN: 三个 OLD 文本有重复 (仍来自 3 个不同 entry): {olds}", file=sys.stderr)
 
-    # ---- 拼接新的 animations_list inner ----
+    # ---- 拼接新的 animations_list inner (覆盖分区: 逐字节保留全部 gap whitespace) ----
+    part_edits = {e["ordinal0"]: e["block"] for e in edits}
     new_inner_parts = []
-    for i, (btext, (_bst, _be)) in enumerate(blocks):
-        if i in {e["ordinal0"] for e in edits}:
-            m = next(e for e in edits if e["ordinal0"] == i)
-            new_inner_parts.append(m["block"])
+    entry_idx = 0
+    for is_entry, ptext, (_ps, _pe) in _entry_partition(inner):
+        if is_entry:
+            if entry_idx in part_edits:
+                new_inner_parts.append(part_edits[entry_idx])
+            else:
+                new_inner_parts.append(ptext)  # 原样保留 (含该 entry 全部 bytes)
+            entry_idx += 1
         else:
-            new_inner_parts.append(btext)
+            new_inner_parts.append(ptext)  # gap whitespace 原样保留
     new_inner = "".join(new_inner_parts)
     new_xml = xml_text_orig[:inner_start] + new_inner + xml_text_orig[inner_end:]
 
@@ -341,10 +366,10 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
     dv_new = _display_values(new_xml)
     unchanged_count = 0
     unchanged_eq = True
-    if len(dv_src) != 479 or len(dv_new) != 479:
+    if len(dv_src) != n_entries or len(dv_new) != n_entries:
         unchanged_eq = False
     else:
-        for i in range(479):
+        for i in range(n_entries):
             if i in TARGET_ORDS:
                 continue
             if dv_src[i] != dv_new[i]:
@@ -392,8 +417,8 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
     if ds2 is None:
         ds2 = 0
         idf2 = idf2 or [("PARSE", "")]
-    ic2 = 1 if idf2 else 0
-    internal2 = len(idf2)
+    ic2 = (1 if idf2 else 0)  # boolean: 是否有 internal diff
+    internal2 = len(idf2)     # 真实 count (用于回显, 不含 padding)
     ranges_ok = _check_ranges(out, sidx)
     s_major, s_minor, _sc, s_meta = wb.read_entry_meta_raw(out)
     sm = s_meta[0] if (s_meta and len(s_meta) == 1) else None
@@ -415,7 +440,7 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
     sv_src = _display_values(xml_text_orig)
     sv_new2 = _display_values(side_text)
     c_match = True
-    if len(sv_src) == 479 and len(sv_new2) == 479:
+    if len(sv_src) == n_entries and len(sv_new2) == n_entries:
         for (ordinal0, tag, prefix) in C_TARGETS:
             if sv_new2[ordinal0] != f"【{prefix}】{sv_src[ordinal0]}":
                 c_match = False
@@ -426,7 +451,7 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
         s_count == 1 and tgi_equal and parser_ok and ranges_ok
         and dbpf_ver_equal and off_hi_eq and sz_hi_eq and f8_eq and f7_matches and stored_ok
         and ic2 == 0 and (ds2 is not None and ds2 == 3)
-        and unchanged_eq and unchanged_count == 476
+        and unchanged_eq and unchanged_count == n_entries - len(C_TARGETS)
         and c_match and source_sha_verified and src_file_unchanged
     )
 
@@ -497,10 +522,10 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
         if not parser_ok:
             print("    GATE_FAIL: PARSER_VALID")
         if ic2 != 0:
-            print(f"    GATE_FAIL: INTERNAL_XML_SEMANTIC_DIFF_COUNT != 0 ({ic2})")
+            print(f"    GATE_FAIL: INTERNAL_XML_SEMANTIC_DIFF_COUNT != 0 ({internal2})")
         if ds2 != 3:
             print(f"    GATE_FAIL: DISPLAY_SEMANTIC_DIFF_COUNT != 3 ({ds2})")
-        if unchanged_count != 476 or not unchanged_eq:
+        if unchanged_count != n_entries - len(C_TARGETS) or not unchanged_eq:
             print(f"    GATE_FAIL: UNCHANGED_DISPLAY ({unchanged_count}, equal={unchanged_eq})")
         if not c_match:
             print("    GATE_FAIL: C1/C2/C3 display 对应检验失败")
