@@ -53,6 +53,11 @@ ZERO WRITE TO MODS。不执行真机 swap / 不部署 sidecar / 不改原 packag
       (raw bytes/offset+size high bit/field7/field8 全保留); WW XML 本身保留 high bit/
       field8/压缩模型, 但 field7/mem_size 必须 = 新解压实际长度 (不得保留旧 source field7)。
       exact display match 必须 == 1, 否则 FAIL-CLOSED。
+
+      internal_fields_changed 判定为 semantic tree diff (忽略唯一 display 元素内部文本):
+      旧版用 otext.replace(old,new)==ctext 的有损 raw-string 比对, 会把 display 之外同名子串
+      (如 animation_clip_names 里的 FORCE_FLOOR_002) 误判为 internal change (audit classification bug)。
+      新版对源与 canary WW XML 做元素/attr/text/tail 全量 semantic 比较, 仅豁免 display 节点。
       只生成 artifact / 不 swap / 不真机 / 不 TEST B / 不 sidecar / 不 production / 不碰 Mods。
 
 可选:
@@ -75,6 +80,7 @@ import re
 import struct
 import sys
 import zlib
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -150,6 +156,89 @@ def parse_anim_xml(body: bytes):
 def _old_in_block(block: str, field: str):
     m = re.search(r'<T\s+[^>]*\bn\s*=\s*"%s"[^>]*>([^<]*)</T>' % re.escape(field), block)
     return m.group(1).strip() if m else None
+
+
+def _xml_tree_nodes(root, prefix=""):
+    """遍历 XML 树, 产出有序 semantic 节点: (path, tag, attr_sig, text, tail)。
+    attr_sig = 排序后的 (name,value) 元组; text/tail 保留原始 (含空白) 以便 catch 格式化差异。"""
+    out = []
+    for el in list(root):
+        path = f"{prefix}/{el.tag}"
+        attrs = tuple(sorted((k, el.attrib[k]) for k in el.attrib))
+        out.append((path, el.tag, attrs, el.text, el.tail))
+        out.extend(_xml_tree_nodes(el, path))
+    return out
+
+
+def _confined_to_display(nds_src, nds_can, display_field):
+    """判断两棵树 semantic 差异是否完全被限定在 display 元素内部 (仅该元素 text 改变)。
+    返回 (ok, diffs); diffs 元素 = (path, kind, src_val, can_val)。"""
+    s = {d[0] for d in nds_src}
+    c = {d[0] for d in nds_can}
+    if s != c:
+        return False, [("path-set", "structural", sorted(s ^ c), "")]
+    by_src = {d[0]: d for d in nds_src}
+    by_can = {d[0]: d for d in nds_can}
+    diffs = []
+    for p in s:
+        d1 = by_src[p]; d2 = by_can[p]
+        is_display_el = (d1[1] == "T" and any(k == "n" and v == display_field for k, v in d1[2]))
+        if d1[1] != d2[1] or d1[2] != d2[2]:
+            diffs.append((p, "tag-or-attr", d1[1:3], d2[1:3]))
+            continue
+        if d1[3] != d2[3]:
+            if is_display_el:
+                continue  # display text 变化为已批准差异
+            diffs.append((p, "text", d1[3], d2[3]))
+        if d1[4] != d2[4]:
+            diffs.append((p, "tail", d1[4], d2[4]))
+    return (len(diffs) == 0), diffs
+
+
+def xml_semantic_diff(src_text: str, canary_text: str, display_field: str):
+    """semantic 精确 diff: 忽略唯一 display 元素内部文本, 其余元素/attr/text/tail 全比较。
+    返回 (display_semantic_diffs, internal_flag, internal_diffs_list)。
+    任一树解析失败 -> (None, None, [unparseable]) 供 caller fail-closed。
+    internal_diffs 元素 = (path, kind, src_val, can_val)。"""
+    try:
+        r1 = ET.fromstring(src_text)
+    except Exception as e:
+        return None, None, [("PARSE-SRC", "ERR", str(e), "")]
+    try:
+        r2 = ET.fromstring(canary_text)
+    except Exception as e:
+        return None, None, [("PARSE-CANARY", "ERR", str(e), "")]
+    n1 = _xml_tree_nodes(r1)
+    n2 = _xml_tree_nodes(r2)
+    # _confined_to_display 内部已把 display 元素 text 差异计入 display_sem, 其余差异非豁免
+    ok, diffs = _confined_to_display(n1, n2, display_field)
+    display_sem = 0
+    internal_diffs = []
+    if not ok and diffs and diffs[0][1] == "structural":
+        internal_diffs = diffs  # path 集不同 -> 结构性内部变化
+    else:
+        # diffs 仅含非 display 差异 (display text 已在 _confined_to_display 内豁免)
+        internal_diffs = diffs
+        display_sem = _display_semantic_diff_count(n1, n2, display_field)
+    return display_sem, (1 if internal_diffs else 0), internal_diffs
+
+
+def _display_semantic_diff_count(nds_src, nds_can, display_field):
+    """统计 display 元素 text 改变的个数 (应 == 1)。"""
+    src_by = {d[0]: d for d in nds_src}
+    can_by = {d[0]: d for d in nds_can}
+    seen = set()
+    cnt = 0
+    for p, d1 in src_by.items():
+        if not (d1[1] == "T" and any(k == "n" and v == display_field for k, v in d1[2])):
+            continue
+        if p in seen:
+            continue
+        seen.add(p)
+        d2 = can_by.get(p)
+        if d2 is not None and d2[3] != d1[3]:
+            cnt += 1
+    return cnt
 
 
 def _replace_t_node_display(xml_text: str, display_field: str, old_val: str, new_val: str):
@@ -702,19 +791,27 @@ def run_canary_source_faithful(src: Path, out_dir: Path, force: bool, disp_field
                 break
     body_c = read_body_raw(out, ww_c_entry) if ww_c_entry is not None else b""
     display_matches = -1
-    internal_changed = 0
+    internal_changed = 1
+    display_sem_diff = 0
+    internal_diffs_list = []
+    otext = ctext = ""
     if body_c:
+        try:
+            otext = decompress_maybe(body_orig).decode("utf-8", errors="replace")
+        except Exception:
+            otext = ""
         try:
             ctext = decompress_maybe(body_c).decode("utf-8", errors="replace")
         except Exception:
             ctext = ""
         display_matches = ctext.count(new_val_raw)  # 新文本出现次数必须 == 1 (恰好改 1 处)
-        # internal_fields_changed: 除 display 字段之外的文本差异 (仅当 display 是唯一差异时=0)
-        try:
-            otext = decompress_maybe(body_orig).decode("utf-8", errors="replace")
-        except Exception:
-            otext = ""
-        internal_changed = 0 if (otext.replace(old_val_raw, new_val_raw) == ctext) else 1
+        # 修正规则: internal_fields_changed 只统计 WW XML 内部非-display semantic content。
+        # 用 semantic tree diff 取代旧的有损 raw-string 比对 (旧法会把 display 之外的同名子串/
+        # decode 非 lossless 误判为 internal change -> audit classification bug)。
+        ds, internal_changed, internal_diffs_list = xml_semantic_diff(otext, ctext, disp_field)
+        display_sem_diff = ds if ds is not None else 0
+        if ds is None:
+            internal_changed = 1  # 解析失败 fail-closed
     else:
         display_matches = -1
         internal_changed = 1
@@ -780,8 +877,8 @@ def run_canary_source_faithful(src: Path, out_dir: Path, force: bool, disp_field
 
     ww_gate = ww is not None and ww_off_eq and ww_sz_eq and ww_f8_eq and ww_f7_ok
     all_gates = (dbpf_ver_equal and nw_body_ok and nw_off_ok and nw_sz_ok and nw_f7_ok and nw_f8_ok
-                 and internal_changed == 0 and display_matches == 1 and idx_order_ok and ranges_ok
-                 and parser_ok and meta_ok and ww_gate)
+                 and internal_changed == 0 and display_matches == 1 and display_sem_diff == 1
+                 and idx_order_ok and ranges_ok and parser_ok and meta_ok and ww_gate)
 
     print("CANARY_SOURCE_FAITHFUL:")
     print(f"  path={out}")
@@ -792,6 +889,20 @@ def run_canary_source_faithful(src: Path, out_dir: Path, force: bool, disp_field
     print(f"  display_matches={display_matches}")
     print(f"  changed_display_fields={changed_display_fields}")
     print(f"  internal_fields_changed={internal_changed}")
+    print(f"  DISPLAY_SEMANTIC_DIFF_COUNT={display_sem_diff}")
+    print(f"  DISPLAY_DIFF_PATH={disp_field}")
+    print(f"  DISPLAY_OLD={old_val_raw}")
+    print(f"  DISPLAY_NEW={new_val_raw}")
+    print(f"  INTERNAL_XML_SEMANTIC_DIFF_COUNT={len(internal_diffs_list)}")
+    if internal_diffs_list:
+        for (p, kind, v1, v2) in internal_diffs_list:
+            print(f"  INTERNAL_DIFFS path={p} kind={kind} source_value={v1!r} canary_value={v2!r}")
+    else:
+        print(f"  INTERNAL_DIFFS=none")
+    field7_change_class = "EXPECTED_CONTENT_DEPENDENT_METADATA" if (ww_f7_src != ww_f7_c and ww_decomp_src != ww_decomp_c and ww_f7_ok) else ("NO_CHANGE" if ww_f7_src == ww_f7_c else "UNEXPECTED")
+    print(f"  FIELD7_CHANGE_CLASSIFICATION={field7_change_class}")
+    print(f"  CANARY_ARTIFACT_CHANGED={'YES' if canary_sha != src_sha else 'NO'}")
+    print(f"  VALIDATOR_BUG_FIXED={'YES' if internal_diffs_list == [] and internal_changed == 0 and display_sem_diff == 1 else 'NO'}")
     print(f"  WW_XML_SOURCE_STORED_SIZE={ww_stored_src}")
     print(f"  WW_XML_CANARY_STORED_SIZE={ww_stored_c}")
     print(f"  WW_XML_SOURCE_DECOMPRESSED_SIZE={ww_decomp_src}")
