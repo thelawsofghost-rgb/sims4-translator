@@ -49,8 +49,10 @@ ZERO WRITE TO MODS。不执行真机 swap / 不部署 sidecar / 不改原 packag
       --display-old "FORCE_FLOOR_002" \
       --display-new "【CHS_CANARY】强制地板002" [--force]
       -> 生成 output/ww_animation_canary_source_faithful/..._CANARY_SOURCE_FAITHFUL.package
-      唯一修改: 目标 WW XML 的 display 文本; 其余 source-faithful (minor/高位/field7/field8/
-      index order/NON_WW raw bytes 全保留)。exact display match 必须 == 1, 否则 FAIL-CLOSED。
+      唯一修改: 目标 WW XML 的 display 文本; 其余 22 未修改资源 source-faithful
+      (raw bytes/offset+size high bit/field7/field8 全保留); WW XML 本身保留 high bit/
+      field8/压缩模型, 但 field7/mem_size 必须 = 新解压实际长度 (不得保留旧 source field7)。
+      exact display match 必须 == 1, 否则 FAIL-CLOSED。
       只生成 artifact / 不 swap / 不真机 / 不 TEST B / 不 sidecar / 不 production / 不碰 Mods。
 
 可选:
@@ -606,8 +608,12 @@ def run_canary_source_faithful(src: Path, out_dir: Path, force: bool, disp_field
       <T n=animation_raw_display_name>FORCE_FLOOR_002</T> -> <T n=animation_raw_display_name>【CHS_CANARY】强制地板002</T>
     (display_old/new 由调用方传入; 本函数对 old/new 各做硬断言)。
 
-    完整保留 source: DBPF major/minor=2.1, 每 entry offset/size high bit, field7, field8,
-    index order, 所有未修改资源 raw bytes (NON_WW_RAW_BYTES_EQUAL)。
+    修正规则 (metadata fidelity vs content-dependent metadata correctness 区别):
+      - 22 未修改资源: raw stored bytes + offset/size high bit + field7 + field8 全部 source 原样保留。
+      - 唯一 WW XML (逻辑内容已改): offset/size high bit + field8/comp_type + 相同压缩模型保留 source;
+        stored size 按新 compressed body 实际长度写; field7/mem_size 必须 = 新解压实际 byte length,
+        不得保留旧 source field7。
+    完整保留 source: DBPF major/minor=2.1, index order。
     只生成 artifact (不碰 Mods / 不 swap / 不真机 / 不 TEST B / 不 sidecar / 不 production)。
 
     输出: output/ww_animation_canary_source_faithful/<stem>_CANARY_SOURCE_FAITHFUL.package
@@ -654,16 +660,19 @@ def run_canary_source_faithful(src: Path, out_dir: Path, force: bool, disp_field
     new_body = compress_like(body_orig, new_xml.encode("utf-8"))
 
     # 仅目标 WW XML 改变; 其余条目复用源存储字节 + 源 metadata
+    # WW XML: 只改 display 文本; metadata 遵循修正规则——
+    #   offset/size high bit + field8/comp_type 保留 source,
+    #   field7/mem_size 必须 = 新解压后的实际 byte length (不得保留旧 source field7)。
+    ww_canary_mem = len(decompress_maybe(new_body))  # 新 logical body 的实际解压长度
+
     def build_item(e):
         if e.type_id == WW_ANIM_XML and e.instance_id == wxml_entry.instance_id:
             m = meta_for(e)
-            # source-faithful: field7/field8 原样保留 (只改 display 文本, 不改 metadata);
-            # 新解压长度仅用于记录, 不覆盖 source 的 mem_size
             return (e.type_id, e.group_id, e.instance_id, new_body,
                     {"comp_state": bool(m.get("comp_state")), "comp_type": m.get("comp_type", 0),
-                     "mem_size": m.get("mem_size", 0),
-                     "offset_high_bit": m.get("offset_high_bit", 0),
-                     "size_high_bit": m.get("size_high_bit", 0)})
+                     "mem_size": ww_canary_mem,
+                     "offset_high_bit": int(m.get("offset_high_bit", 0)),
+                     "size_high_bit": int(m.get("size_high_bit", 0))})
         return (e.type_id, e.group_id, e.instance_id, read_body_raw(src, e), meta_for(e))
 
     items = [build_item(e) for e in idx.entries]
@@ -684,7 +693,14 @@ def run_canary_source_faithful(src: Path, out_dir: Path, force: bool, disp_field
     dbpf_ver_equal = (src_major == c_major) and (src_minor == c_minor)
 
     # display check
-    body_c = read_body_raw(out, idxC.entries[0]) if (idxC and len(idxC.entries) == len(idx.entries)) else b""
+    # 取 canary 中 WW XML 的 body (按 TGI 精确找, 不假设顺序)
+    ww_c_entry = None
+    if idxC and len(idxC.entries) == len(idx.entries):
+        for ec in idxC.entries:
+            if ec.type_id == WW_ANIM_XML and ec.instance_id == wxml_entry.instance_id:
+                ww_c_entry = ec
+                break
+    body_c = read_body_raw(out, ww_c_entry) if ww_c_entry is not None else b""
     display_matches = -1
     internal_changed = 0
     if body_c:
@@ -703,28 +719,28 @@ def run_canary_source_faithful(src: Path, out_dir: Path, force: bool, disp_field
         display_matches = -1
         internal_changed = 1
 
-    # non-WW raw bytes equal
-    off_eq = sz_eq = f7_eq = f8_eq = 0
-    nonww_equal = 0
-    total_nonww = 0
+    # 修正规则 gate: 22 未修改资源 source-faithful (raw+metadata 全保留);
+    # 唯一修改的 WW XML: high bits/field8 保留 source, field7=实际新解压长度。
+    nw_body = 0; nw_off = 0; nw_sz = 0; nw_f7 = 0; nw_f8 = 0; nw_total = 0
+    ww = None
     total = len(idx.entries)
     src_tgi = [(e.type_id, e.group_id, e.instance_id) for e in idx.entries]
     ctl_tgi = [(e.type_id, e.group_id, e.instance_id) for e in idxC.entries] if idxC else []
     idx_order_ok = (src_tgi == ctl_tgi)
     ranges_ok = True
+    ww_tgi = (WW_ANIM_XML, wxml_entry.group_id, wxml_entry.instance_id)
     if idxC and len(idxC.entries) == total:
-        changed_tgi = {(WW_ANIM_XML, wxml_entry.group_id, wxml_entry.instance_id)}
         for e, ec, m1, m2 in zip(idx.entries, idxC.entries, src_meta, _cm):
             tgi = (e.type_id, e.group_id, e.instance_id)
-            off_eq += (m1["offset_comp"] == m2["offset_comp"])
-            sz_eq += (m1["size_comp"] == m2["size_comp"])
-            f7_eq += (m1["mem_size"] == m2["mem_size"])
-            f8_eq += (m1["comp_type"] == m2["comp_type"])
-            if tgi in changed_tgi:
-                continue  # 目标 WW XML body 允许改变
-            if read_body_raw(src, e) == read_body_raw(out, ec):
-                nonww_equal += 1
-            total_nonww += 1
+            if tgi == ww_tgi:
+                ww = (m1, m2, e, ec)
+                continue  # WW XML 单独验证
+            nw_total += 1
+            nw_body += (read_body_raw(src, e) == read_body_raw(out, ec))
+            nw_off += (m1["offset_comp"] == m2["offset_comp"])
+            nw_sz += (m1["size_comp"] == m2["size_comp"])
+            nw_f7 += (m1["mem_size"] == m2["mem_size"])
+            nw_f8 += (m1["comp_type"] == m2["comp_type"])
         for m2, e2 in zip(_cm, idxC.entries):
             boff = m2["offset_raw"] & 0x7FFFFFFF
             bsz = m2["size_raw"] & 0x7FFFFFFF
@@ -732,12 +748,40 @@ def run_canary_source_faithful(src: Path, out_dir: Path, force: bool, disp_field
                 ranges_ok = False
     else:
         ranges_ok = False
-    nonww_bytes_equal = (total_nonww > 0 and nonww_equal == total_nonww)
+    nw_body_ok = (nw_total > 0 and nw_body == nw_total)
+    nw_off_ok = (nw_total > 0 and nw_off == nw_total)
+    nw_sz_ok = (nw_total > 0 and nw_sz == nw_total)
+    nw_f7_ok = (nw_total > 0 and nw_f7 == nw_total)
+    nw_f8_ok = (nw_total > 0 and nw_f8 == nw_total)
 
-    all_gates = (dbpf_ver_equal and nonww_bytes_equal and internal_changed == 0
-                 and display_matches == 1 and off_eq == total and sz_eq == total
-                 and f7_eq == total and f8_eq == total and idx_order_ok and ranges_ok
-                 and parser_ok and meta_ok)
+    # ---- WW XML 机器证明 ----
+    ww_off_hi_src = ww_size_hi_src = ww_f8_src = ww_f7_src = -1
+    ww_off_hi_c = ww_size_hi_c = ww_f8_c = ww_f7_c = -1
+    ww_stored_src = ww_stored_c = ww_decomp_src = ww_decomp_c = -1
+    ww_off_eq = ww_sz_eq = ww_f8_eq = ww_f7_ok = False
+    if ww is not None:
+        m1, m2, e, ec = ww
+        ww_off_hi_src = int(m1["offset_comp"])
+        ww_off_hi_c = int(m2["offset_comp"])
+        ww_size_hi_src = int(m1["size_comp"])
+        ww_size_hi_c = int(m2["size_comp"])
+        ww_f8_src = m1["comp_type"]; ww_f8_c = m2["comp_type"]
+        ww_f7_src = m1["mem_size"]; ww_f7_c = m2["mem_size"]
+        ww_stored_src = m1["size_raw"] & 0x7FFFFFFF
+        ww_stored_c = m2["size_raw"] & 0x7FFFFFFF
+        b_orig = read_body_raw(src, e)
+        b_c = read_body_raw(out, ec)
+        ww_decomp_src = len(decompress_maybe(b_orig))
+        ww_decomp_c = len(decompress_maybe(b_c))
+        ww_off_eq = (ww_off_hi_src == ww_off_hi_c)
+        ww_sz_eq = (ww_size_hi_src == ww_size_hi_c)
+        ww_f8_eq = (ww_f8_src == ww_f8_c)
+        ww_f7_ok = (ww_f7_c == ww_decomp_c)
+
+    ww_gate = ww is not None and ww_off_eq and ww_sz_eq and ww_f8_eq and ww_f7_ok
+    all_gates = (dbpf_ver_equal and nw_body_ok and nw_off_ok and nw_sz_ok and nw_f7_ok and nw_f8_ok
+                 and internal_changed == 0 and display_matches == 1 and idx_order_ok and ranges_ok
+                 and parser_ok and meta_ok and ww_gate)
 
     print("CANARY_SOURCE_FAITHFUL:")
     print(f"  path={out}")
@@ -748,11 +792,27 @@ def run_canary_source_faithful(src: Path, out_dir: Path, force: bool, disp_field
     print(f"  display_matches={display_matches}")
     print(f"  changed_display_fields={changed_display_fields}")
     print(f"  internal_fields_changed={internal_changed}")
-    print(f"  NON_WW_RAW_BYTES_EQUAL={'YES' if nonww_bytes_equal else 'NO'}  ({nonww_equal}/{total_nonww})")
-    print(f"  OFFSET_HIGH_BIT_EQUAL_COUNT={off_eq}/{total}")
-    print(f"  SIZE_HIGH_BIT_EQUAL_COUNT={sz_eq}/{total}")
-    print(f"  FIELD7_EQUAL_COUNT={f7_eq}/{total}")
-    print(f"  FIELD8_EQUAL_COUNT={f8_eq}/{total}")
+    print(f"  WW_XML_SOURCE_STORED_SIZE={ww_stored_src}")
+    print(f"  WW_XML_CANARY_STORED_SIZE={ww_stored_c}")
+    print(f"  WW_XML_SOURCE_DECOMPRESSED_SIZE={ww_decomp_src}")
+    print(f"  WW_XML_CANARY_DECOMPRESSED_SIZE={ww_decomp_c}")
+    print(f"  WW_XML_SOURCE_FIELD7={ww_f7_src}")
+    print(f"  WW_XML_CANARY_FIELD7={ww_f7_c}")
+    print(f"  WW_XML_CANARY_FIELD7_MATCHES_ACTUAL_DECOMPRESSED_SIZE={'YES' if ww_f7_ok else 'NO'}")
+    print(f"  WW_XML_OFFSET_HIGH_BIT_SOURCE={ww_off_hi_src}")
+    print(f"  WW_XML_OFFSET_HIGH_BIT_CANARY={ww_off_hi_c}")
+    print(f"  WW_XML_OFFSET_HIGH_BIT_EQUAL={'YES' if ww_off_eq else 'NO'}")
+    print(f"  WW_XML_SIZE_HIGH_BIT_SOURCE={ww_size_hi_src}")
+    print(f"  WW_XML_SIZE_HIGH_BIT_CANARY={ww_size_hi_c}")
+    print(f"  WW_XML_SIZE_HIGH_BIT_EQUAL={'YES' if ww_sz_eq else 'NO'}")
+    print(f"  WW_XML_FIELD8_SOURCE={ww_f8_src}")
+    print(f"  WW_XML_FIELD8_CANARY={ww_f8_c}")
+    print(f"  WW_XML_FIELD8_EQUAL={'YES' if ww_f8_eq else 'NO'}")
+    print(f"  NON_WW_RAW_BYTES_EQUAL={'YES' if nw_body_ok else 'NO'}  ({nw_body}/{nw_total})")
+    print(f"  NON_WW_OFFSET_HIGH_BIT_EQUAL={nw_off}/{nw_total}")
+    print(f"  NON_WW_SIZE_HIGH_BIT_EQUAL={nw_sz}/{nw_total}")
+    print(f"  NON_WW_FIELD7_EQUAL={nw_f7}/{nw_total}")
+    print(f"  NON_WW_FIELD8_EQUAL={nw_f8}/{nw_total}")
     print(f"  INDEX_ORDER_EQUAL={'YES' if idx_order_ok else 'NO'}")
     print(f"  ALL_RESOURCE_RANGES_VALID={'YES' if ranges_ok else 'NO'}")
     print(f"  PARSER_VALID={'YES' if parser_ok else 'NO'}")
@@ -763,20 +823,29 @@ def run_canary_source_faithful(src: Path, out_dir: Path, force: bool, disp_field
     if not all_gates:
         if not dbpf_ver_equal:
             print("    GATE_FAIL: DBPF_VERSION_EQUAL")
-        if not nonww_bytes_equal:
-            print(f"    GATE_FAIL: NON_WW_RAW_BYTES_EQUAL ({nonww_equal}/{total_nonww})")
+        if not nw_body_ok:
+            print(f"    GATE_FAIL: NON_WW_RAW_BYTES_EQUAL ({nw_body}/{nw_total})")
+        if not nw_off_ok:
+            print(f"    GATE_FAIL: NON_WW_OFFSET_HIGH_BIT_EQUAL ({nw_off}/{nw_total})")
+        if not nw_sz_ok:
+            print(f"    GATE_FAIL: NON_WW_SIZE_HIGH_BIT_EQUAL ({nw_sz}/{nw_total})")
+        if not nw_f7_ok:
+            print(f"    GATE_FAIL: NON_WW_FIELD7_EQUAL ({nw_f7}/{nw_total})")
+        if not nw_f8_ok:
+            print(f"    GATE_FAIL: NON_WW_FIELD8_EQUAL ({nw_f8}/{nw_total})")
         if internal_changed != 0:
             print("    GATE_FAIL: internal_fields_changed != 0")
         if display_matches != 1:
             print(f"    GATE_FAIL: display_matches != 1 (got {display_matches})")
-        if off_eq != total:
-            print(f"    GATE_FAIL: OFFSET_HIGH_BIT_EQUAL ({off_eq}/{total})")
-        if sz_eq != total:
-            print(f"    GATE_FAIL: SIZE_HIGH_BIT_EQUAL ({sz_eq}/{total})")
-        if f7_eq != total:
-            print(f"    GATE_FAIL: FIELD7_EQUAL ({f7_eq}/{total})")
-        if f8_eq != total:
-            print(f"    GATE_FAIL: FIELD8_EQUAL ({f8_eq}/{total})")
+        if not ww_gate:
+            if not ww_off_eq:
+                print(f"    GATE_FAIL: WW_XML_OFFSET_HIGH_BIT_EQUAL ({ww_off_hi_src}->{ww_off_hi_c})")
+            if not ww_sz_eq:
+                print(f"    GATE_FAIL: WW_XML_SIZE_HIGH_BIT_EQUAL ({ww_size_hi_src}->{ww_size_hi_c})")
+            if not ww_f8_eq:
+                print(f"    GATE_FAIL: WW_XML_FIELD8_EQUAL ({ww_f8_src}->{ww_f8_c})")
+            if not ww_f7_ok:
+                print(f"    GATE_FAIL: WW_XML_FIELD7_MATCHES_ACTUAL ({ww_f7_c} vs decompressed {ww_decomp_c})")
         if not idx_order_ok:
             print("    GATE_FAIL: INDEX_ORDER_EQUAL")
         if not ranges_ok:
