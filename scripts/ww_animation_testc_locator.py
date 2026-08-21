@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TEST C HUMAN-READABLE LOCATOR REPORT (只读)。
+TEST C READ-ONLY TARGET LOCATOR + GAME SEARCH GUIDE + EASY CANARY CANDIDATES (只读)。
 
-在【真实 Windows】上, 只从 source WW_Nevely42_Animations.package 的三个真实
-animation entry (ordinal 0/239/478) 读取 metadata, 输出:
-  - C1/C2/C3_LOCATOR: 原始字段 (display_name/author/locations/category/tags/
-    loops/allowed_for_random/actor 数)。
-  - C1/C2/C3_HUMAN_LOCATOR: 中文易读摘要。
+在【真实 Windows】上, 只从 source WW_Nevely42_Animations.package 读取, 输出:
+  1. C1/C2/C3_LOCATOR:           三个 target (ordinal 0/239/478) 完整 entry metadata
+                                  + 全部 direct child (tag/n/text) dump, 供人工判断。
+  2. C1/C2/C3_HUMAN_LOCATOR:     真人可读信息 (严格仅 XML 明确证据)。
+  3. GAME_SEARCH_GUIDE:          每个 target 的游戏内定位线索 + 菜单可见性判定。
+  4. HUMAN_CANARY_USABILITY:     该 target 是否适合做人肉 canary (POOR 则不改 sidecar)。
+  5. EASY_CANARY_CANDIDATES:     从 479-entry 源推荐 5 个更容易真人验证的普通动画。
 
-【不改 sidecar / 不改 writer / 不重新生成 XML / 不碰 Mods】。
+【不改 sidecar / 不改 writer / 不重新生成 XML / 不碰 Mods / 不 production / 不 translation】。
 
-中文映射原则:
-- 只允许基于 XML 明确值映射 (BED/FLOOR/SOFA/CHAIR/VAGINAL/ANAL/ORAL/...)。
-- explicit 值 -> canonical Chinese (记录 canonical translation, 保证统一译法)。
-- 无明确证据 -> UNKNOWN; 不推断。
-- animation_custom_locations 若为 numeric ID -> 保留 numeric ID 并标
-  CUSTOM_LOCATION_NAME=UNRESOLVED, 不猜对应家具。
-- 绝不通过 display name 猜身体部位/性行为/场景。
+中文映射原则 (仅 XML 明确枚举值 -> canonical 中文, 统一译法):
+  - 场景: BED=床 FLOOR=地板 SOFA/COUCH=沙发 CHAIR=椅子 TABLE=桌子 ...
+  - 性行为: VAGINAL=阴道性交 ANAL=肛交 ORAL=口交 HANDJOB=手交/手部刺激
+            TEASING=挑逗 CLIMAX=高潮 MASTURBATION=自慰 ... (可给英文原值+中文)。
+  - 角色: DOMINANT=主导 RECIPIENT=接受方 STIMULATOR=刺激方 ...
+  - 无明确证据 -> UNKNOWN; 严禁根据 display name 猜身体部位/性行为/场景/人数。
+  - animation_custom_locations 若为 numeric ID -> 保留 ID + CUSTOM_LOCATION_NAME=UNRESOLVED。
 
 只输出 stdout。ZERO_WRITE_TO_MODS=YES。
 """
@@ -27,6 +29,7 @@ import importlib.util
 import re
 import sys
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 MODULE = SCRIPT_DIR / "ww_animation_canary_builder.py"
@@ -38,72 +41,76 @@ WW_ANIM_XML = wb.WW_ANIM_XML
 TARGET_ORDS = (0, 239, 478)
 TARGET_PREFIX = {0: "C1", 239: "C2", 478: "C3"}
 
-# canonical 中文映射 (仅 explicit XML 值 -> 统一译法)
+# canonical 中文映射 (仅 explicit XML 枚举值)
 LOCATION_CN = {
-    "BED": "床",
-    "FLOOR": "地板",
-    "SOFA": "沙发",
-    "COUCH": "沙发",
-    "CHAIR": "椅子",
-    "TABLE": "桌子",
-    "DESK": "书桌",
-    "POOL": "泳池",
-    "SHOWER": "淋浴",
-    "BATH": "浴缸",
-    "WALL": "墙壁",
-    "CAR": "汽车",
-    "DOOR": "门",
-    "COUNTER": "柜台",
-    "KITCHEN_COUNTER": "厨房柜台",
-    "DINING_TABLE": "餐桌",
+    "BED": "床", "FLOOR": "地板", "SOFA": "沙发", "COUCH": "沙发",
+    "CHAIR": "椅子", "TABLE": "桌子", "DESK": "书桌", "POOL": "泳池",
+    "SHOWER": "淋浴", "BATH": "浴缸", "TUB": "浴缸", "WALL": "墙壁",
+    "CAR": "汽车", "DOOR": "门", "COUNTER": "柜台",
+    "KITCHEN_COUNTER": "厨房柜台", "DINING_TABLE": "餐桌", "WINDOW": "窗户",
+    "YARD": "院子", "PLAYGROUND": "游乐场", "POOL_TUB": "泳池/浴缸",
+    "HOT_TUB": "热水浴缸", "SHOWER_TUB": "淋浴/浴缸", "BENCH": "长椅",
+    "STOOL": "凳子", "BED_FLOOR": "床/地板", "FLOOR_BED": "地板/床",
 }
 SEX_TYPE_CN = {
-    "VAGINAL": "阴道性交",
-    "ANAL": "肛交",
-    "ORAL": "口交",
-    "HANDJOB": "手部刺激",
-    "FOOTJOB": "足部刺激",
-    "TITJOB": "乳交",
-    "FEMDOM": "女性主导",
-    "MALEDOM": "男性主导",
-    "MATING_PRESS": "交配压制",
-    "CLIMAX": "高潮",
-    "ORGASM": "高潮",
+    "VAGINAL": "阴道性交", "ANAL": "肛交", "ORAL": "口交",
+    "HANDJOB": "手交/手部刺激", "FOOTJOB": "足部刺激", "TITJOB": "乳交",
+    "FEMDOM": "女性主导", "MALEDOM": "男性主导", "MATING_PRESS": "交配压制",
+    "CLIMAX": "高潮", "ORGASM": "高潮", "TEASING": "挑逗",
+    "MASTURBATION": "自慰", "MASTURBATING": "自慰", "FOREPLAY": "前戏",
+    "EJACULATION": "射精", "CREAMPIE": "内射", "PETTING": "爱抚",
 }
 ACTOR_TYPE_CN = {
-    "VAGINAL": "阴道性交",
-    "ANAL": "肛交",
-    "ORAL": "口交",
-    "HANDJOB": "手部刺激",
-    "CLIMAX": "高潮",
-    "DOMINANT": "主导",
-    "SUBMISSIVE": "顺从",
-    "STIMULATOR": "刺激方",
-    "RECIPIENT": "接受方",
+    "VAGINAL": "阴道性交", "ANAL": "肛交", "ORAL": "口交",
+    "HANDJOB": "手部刺激", "CLIMAX": "高潮", "ORGASM": "高潮",
+    "DOMINANT": "主导", "SUBMISSIVE": "顺从", "STIMULATOR": "刺激方",
+    "RECIPIENT": "接受方", "TOP": "主动方", "BOTTOM": "被动方",
+    "ACTIVE": "主动", "PASSIVE": "被动", "PENETRATIVE": "插入方",
+    "PENETRATED": "被插入方",
 }
 GENDER_CN = {
-    "MALE": "男性",
-    "FEMALE": "女性",
-    "MALE_FEMALE": "男/女",
+    "MALE": "男性", "FEMALE": "女性", "MALE_FEMALE": "男/女",
+    "FEMALE_MALE": "女/男", "TRANS_MALE": "跨性别男", "TRANS_FEMALE": "跨性别女",
+    "ANY": "任意", "MIXED": "混合",
 }
-ANY_TAG = {"ANY", "ALL", "BOTH", "ANYONE"}
+ANY_TAG = {"ANY", "ALL", "BOTH", "ANYONE", "MIXED", "ANY_MALE", "ANY_FEMALE"}
+
+COMMON_LOCATIONS = {"BED", "FLOOR", "SOFA", "COUCH", "CHAIR", "TABLE", "DESK",
+                    "POOL", "SHOWER", "BATH", "TUB", "WALL", "CAR", "DOOR",
+                    "COUNTER", "KITCHEN_COUNTER", "DINING_TABLE", "WINDOW",
+                    "YARD", "BENCH", "STOOL", "HOT_TUB"}
 
 
-def _cn_map(mapping, val):
-    """explicit 值 -> canonical 中文; 空白/ANY 类 -> UNKNOWN; 无映射 -> 原值+UNKNOWN。"""
+def _cn(mapping, val):
+    """explicit 值 -> canonical 中文; 空白/ANY 类 -> UNKNOWN(任意); 无映射 -> UNKNOWN。"""
     if val is None:
         return "UNKNOWN"
     v = str(val).strip()
     if v == "":
         return "UNKNOWN"
-    if v.upper() in ANY_TAG:
+    up = v.upper()
+    if up in ANY_TAG:
         return "UNKNOWN(任意)"
     if v in mapping:
         return mapping[v]
-    up = v.upper()
     if up in mapping:
         return mapping[up]
     return "UNKNOWN"
+
+
+def _cn_or_raw(mapping, val):
+    """明确可枚举 -> 中文; 无映射但非空白 -> '原值(UNKNOWN)'; 空白/None -> UNKNOWN。"""
+    if val is None:
+        return "UNKNOWN"
+    v = str(val).strip()
+    if v == "":
+        return "UNKNOWN"
+    up = v.upper()
+    if up in ANY_TAG:
+        return "UNKNOWN(任意)"
+    if v in mapping or up in mapping:
+        return _cn(mapping, val)
+    return f"{v}(UNKNOWN)"
 
 
 def _locate_animations_list(xml_text):
@@ -156,32 +163,25 @@ def _entry_blocks(list_text):
     return blocks
 
 
-_TEXT_RE = re.compile(r"<([A-Za-z_][^\s/>]*)([^>]*)>([^<]*)</\1>", re.S)
-_SELF_RE = re.compile(r"<([A-Za-z_][^\s/>]*)([^>]*?)/>", re.S)
-_UNPAIRED = re.compile(r"<([A-Za-z_][^\s/>]*)([^>]*)>", re.S)
-
-
 def _parse_block(block_text):
-    """把单个 entry block 解析成字段 dict + actor 列表 (仅用于 locator, 不改 artifact)。
-
-    用 ElementTree 只读解析 (定位字段/actor), 不用于重建任何 XML。
-    返回 (fields, actors, warnings)。
-    """
-    import xml.etree.ElementTree as ET
+    """ElementTree 只读解析 entry block: 返回 (fields, actors, direct_children, warnings)。"""
     fields = {}
     actors = []
+    direct = []  # (tag, n, text) 全部 direct child, 供人工 dump
     warnings = []
     try:
         root = ET.fromstring(block_text.encode("utf-8"))
     except Exception as e:
-        return fields, actors, [f"parse_warn: {e}"]
+        return fields, actors, direct, [f"parse_warn: {e}"]
 
-    # entry 顶层及非-actor 子树的直接 T 字段: 收集 entry 根下所有 T, 排除位于
-    # actor <U> 子树内者 (actor 字段单独收集)。metadata 可能在 <L> 内也可能在顶层。
     for child in root:
-        _collect_entry_fields(child, fields)
+        tag = child.tag.rsplit("}", 1)[-1]
+        n = child.get("n")
+        text = (child.text or "").strip()
+        direct.append((tag, n, text))
+        if tag == "T" and n is not None and n not in fields:
+            fields[n] = text
 
-    # actor: 收集所有拥有 actor_id 的 <U> (排除 entry 根自身)
     def walk(el):
         tag = el.tag.rsplit("}", 1)[-1]
         if tag == "U":
@@ -199,50 +199,138 @@ def _parse_block(block_text):
 
     for child in root:
         walk(child)
-    return fields, actors, warnings
+    return fields, actors, direct, warnings
 
 
-def _collect_entry_fields(el, fields):
-    """收集 el 子树内 <T> 字段, 若 el 是 <U> (actor) 则跳过其子树 (actor 字段另收)。"""
-    tag = el.tag.rsplit("}", 1)[-1]
-    if tag == "U":
-        return
-    if tag == "T":
-        n = el.get("n")
-        if n is not None and n not in fields:
-            fields[n] = (el.text or "").strip()
-        return
-    for sub in el:
-        _collect_entry_fields(sub, fields)
-
-
-def _attr(m, key):
-    mm = re.search(r'\b%s\s*=\s*"([^"]*)"' % re.escape(key), m.group(2) or "")
-    return mm.group(1) if mm else None
-
-
-def _T_inner(text, after_open):
-    """从 <T ...> 之后开始, 找同一 <T> 的 </T> 闭标签, 返回 inner text。"""
-    close = re.search(r"</T>", text[after_open:])
-    if not close:
-        return ""
-    return text[after_open:after_open + close.start()]
-
-
-def _T_inner_iter(text):
-    out = []
-    for m in re.finditer(r"<T\s+[^>]*?>", text):
-        out.append(m)
-    return out
-
-
-def _first_value(fields, key):
+def _fv(fields, key):
     return fields.get(key)
 
 
+def _split_list(raw):
+    return [x.strip() for x in (raw or "").split(",") if x.strip()] if raw else []
+
+
+def _has_custom_location(fields):
+    cr = _fv(fields, "animation_custom_locations")
+    if cr is None:
+        return False, None
+    custs = _split_list(cr)
+    if not custs:
+        return False, None
+    return True, custs
+
+
+def _locations(fields):
+    loc = _split_list(_fv(fields, "animation_locations"))
+    if not loc:
+        return []
+    # 清掉空白/None
+    return loc
+
+
+def _is_sequence(fields, all_displays, ord0, name):
+    """sequence 判定 (仅结构证据, 不用来猜身体/场景):
+    - 明确 sequence 字段, 或
+    - 同 stem 且有 phase 后缀的兄弟 entry 存在。
+    """
+    # 1) 明确 XML sequence/member 字段
+    for k in ("animation_sequence", "is_sequence_part", "sequence_part",
+              "animation_phase", "sequence_index", "is_climax"):
+        if _fv(fields, k) not in (None, "", "False", "false", "0"):
+            return True
+    # 2) actor animation_type 若含 CLIMAX/ORGASM 且 loops>1 -> 高潮段可能 (弱信号, 不硬判)
+    # 3) 结构: 兄弟 entry 同 stem + 数字/phase 后缀
+    if not name:
+        return False
+    stem = re.split(r"[-_]", name.strip())[0] if re.search(r"[-_]", name.strip()) else name.strip()
+    if len(stem) < 3:
+        return False
+    phases = 0
+    phase_re = re.compile(
+        re.escape(stem) + r"(?:[-_](?:\d+|start|loop|end|climax|intro|outro))", re.I)
+    for d in all_displays:
+        if d == name:
+            continue
+        if phase_re.search(d or ""):
+            phases += 1
+    return phases >= 1
+
+
+def _game_guide(fields, actors):
+    """基于 XML 证据的菜单可见性判定。"""
+    locs = _locations(fields)
+    custom, custs = _has_custom_location(fields)
+    n_actors = len(actors)
+    genders = set()
+    for a in actors:
+        g = (a.get("animation_genders") or "").upper()
+        if g and g not in ANY_TAG:
+            genders.add(g)
+    cats = set(x.upper() for x in _split_list(_fv(fields, "animation_category")))
+    tags = set(x.upper() for x in _split_list(_fv(fields, "animation_tags")))
+
+    gen_locs = [x.upper() for x in locs]
+    has_bed = any(x in ("BED", "BED_FLOOR", "FLOOR_BED") for x in gen_locs)
+    has_sofa = any(x in ("SOFA", "COUCH", "BENCH") for x in gen_locs)
+    has_floor = any(x == "FLOOR" for x in gen_locs)
+
+    def verdict(in_list):
+        if custom:
+            # 有 numeric custom location -> 无法确认通用菜单可见
+            return "UNKNOWN"
+        if in_list:
+            return "YES"
+        return "NO" if gen_locs else "UNKNOWN"
+
+    visibility = {
+        "floor": verdict(has_floor),
+        "bed": verdict(has_bed),
+        "sofa": verdict(has_sofa),
+    }
+    # 若无任何 location -> UNKNOWN
+    if not gen_locs:
+        visibility = {"floor": "UNKNOWN", "bed": "UNKNOWN", "sofa": "UNKNOWN"}
+    return {
+        "locs": gen_locs,
+        "custom": custom,
+        "n_actors": n_actors,
+        "genders": sorted(genders),
+        "category": sorted(cats),
+        "tags": sorted(tags),
+        "visibility": visibility,
+        "recommended": ("CUSTOM" if custom else
+                        ("BED" if has_bed else
+                         ("SOFA" if has_sofa else
+                          ("FLOOR" if has_floor else
+                           (gen_locs[0] if gen_locs else "UNKNOWN"))))),
+    }
+
+
+def _usability(guide, is_seq):
+    """判断是否适合做人肉 canary。返回 (grade, reasons)。"""
+    reasons = []
+    grade = "GOOD"
+    if guide["custom"]:
+        reasons.append("需要特殊 custom location")
+        grade = "POOR"
+    if is_seq:
+        reasons.append("可能是 sequence 中一段(非独立列出)")
+        grade = "POOR"
+    if guide["n_actors"] == 0:
+        reasons.append("actor_count 不明/0")
+        grade = "POOR"
+    if guide["recommended"] == "UNKNOWN":
+        reasons.append("无明确 common location")
+        if grade != "POOR":
+            grade = "FAIR"
+    return grade, reasons
+
+
 def main():
-    ap = argparse.ArgumentParser()
+    import argparse as _ap
+    ap = _ap.ArgumentParser()
     ap.add_argument("--source", required=True, help="真实 source .package")
+    ap.add_argument("--easy-top", type=int, default=5, help="EASY_CANARY_CANDIDATES 数量")
     a = ap.parse_args()
     src = Path(a.source)
     if not src.is_file():
@@ -269,101 +357,190 @@ def main():
         print(f"ERROR: entry 数={len(blocks)} (须 479)", file=sys.stderr)
         return 6
 
-    parsed = {}
-    for ord0 in TARGET_ORDS:
+    # 预解析全部 entry (用于 sequence 检测 + easy candidates)
+    all_fields = []
+    all_actors = []
+    all_direct = []
+    all_names = []
+    for ord0 in range(len(blocks)):
         btext, (_s, _e) = blocks[ord0]
-        fields, actors, warns = _parse_block(btext)
-        parsed[ord0] = (fields, actors, warns)
+        f, act, d, w = _parse_block(btext)
+        all_fields.append(f)
+        all_actors.append(act)
+        all_direct.append(d)
+        all_names.append(_fv(f, "animation_raw_display_name"))
 
-    # ================= 原始 LOCATOR =================
+    # ============ 1. 三个 target 完整 LOCATOR ============
     for ord0 in TARGET_ORDS:
         tag = TARGET_PREFIX[ord0]
-        fields, actors, _w = parsed[ord0]
+        f = all_fields[ord0]
+        act = all_actors[ord0]
+        dn = _fv(f, "animation_raw_display_name")
         print(f"{tag}_LOCATOR:")
-        print(f"  ordinal={ord0}")
-        print(f"  display_name={_first_value(fields, 'animation_raw_display_name')}")
-        print(f"  animation_author={_first_value(fields, 'animation_author')}")
-        print(f"  animation_locations={_first_value(fields, 'animation_locations')}")
-        print(f"  animation_custom_locations={_first_value(fields, 'animation_custom_locations')}")
-        print(f"  animation_category={_first_value(fields, 'animation_category')}")
-        print(f"  animation_tags={_first_value(fields, 'animation_tags')}")
-        print(f"  animation_loops={_first_value(fields, 'animation_loops')}")
-        print(f"  animation_allowed_for_random={_first_value(fields, 'animation_allowed_for_random')}")
-        print(f"  actor_count={len(actors)}")
-        for i, actor in enumerate(actors):
-            print(f"  ACTORS:")
-            print(f"    actor_{i}_id={actor.get('actor_id')}")
-            print(f"    actor_{i}_animation_clip_name={actor.get('animation_clip_name')}")
-            print(f"    actor_{i}_animation_type={actor.get('animation_type')}")
-            print(f"    actor_{i}_animation_genders={actor.get('animation_genders')}")
+        print(f"  ENTRY_ORDINAL={ord0}")
+        print(f"  DISPLAY_NAME={dn}")
+        print(f"  animation_author={_fv(f, 'animation_author')}")
+        print(f"  animation_locations={_fv(f, 'animation_locations')}")
+        print(f"  animation_custom_locations={_fv(f, 'animation_custom_locations')}")
+        print(f"  animation_category={_fv(f, 'animation_category')}")
+        print(f"  animation_tags={_fv(f, 'animation_tags')}")
+        print(f"  animation_loops={_fv(f, 'animation_loops')}")
+        print(f"  animation_allowed_for_random={_fv(f, 'animation_allowed_for_random')}")
+        print(f"  actor_count={len(act)}")
+        for i, actor in enumerate(act):
+            print(f"  actor_{i}_id={actor.get('actor_id')}")
+            print(f"  actor_{i}_animation_clip_name={actor.get('animation_clip_name')}")
+            print(f"  actor_{i}_animation_type={actor.get('animation_type')}")
+            print(f"  actor_{i}_animation_genders={actor.get('animation_genders')}")
+        # 额外: entry 全部 direct child (影响 WW UI 筛选/显示)
+        skip = {"animation_raw_display_name", "animation_author"}
+        extra = [d for d in all_direct[ord0] if d[1] and d[1] not in skip]
+        if extra:
+            print("  DIRECT_CHILDREN_DUMP:")
+            for (tg, n, tx) in extra:
+                print(f"    tag={tg} n={n} text={tx}")
         print()
 
-    # ================= 中文 HUMAN_LOCATOR =================
+    # ============ 2. HUMAN_LOCATOR + 3. GAME_SEARCH_GUIDE + 4. USABILITY ============
     for ord0 in TARGET_ORDS:
         tag = TARGET_PREFIX[ord0]
-        fields, actors, _w = parsed[ord0]
+        f = all_fields[ord0]
+        act = all_actors[ord0]
+        dn = _fv(f, "animation_raw_display_name")
+        locs = _locations(f)
+        custom, custs = _has_custom_location(f)
+        is_seq = _is_sequence(f, all_names, ord0, dn)
+        guide = _game_guide(f, act)
+        usability, ureasons = _usability(guide, is_seq)
 
-        loc_raw = _first_value(fields, "animation_locations")
-        locs = [x.strip() for x in (loc_raw or "").split(",") if x.strip()] if loc_raw else []
-        loc_cn = "、".join(_cn_map(LOCATION_CN, x) for x in locs)
-        if not locs:
-            loc_cn = "UNKNOWN"
-
-        custom_raw = _first_value(fields, "animation_custom_locations")
+        loc_cn = "、".join(_cn_or_raw(LOCATION_CN, x) for x in locs) if locs else "UNKNOWN"
         custom_line = "UNKNOWN"
-        if custom_raw:
-            custs = [x.strip() for x in custom_raw.split(",") if x.strip()]
-            custom_line = "、".join(custs)
+        if custom:
             if all(not x.isdigit() for x in custs):
-                custom_line = "、".join(_cn_map(LOCATION_CN, x) for x in custs)
+                custom_line = "、".join(_cn_or_raw(LOCATION_CN, x) for x in custs)
             else:
                 custom_line = "、".join(custs) + " (CUSTOM_LOCATION_NAME=UNRESOLVED, 不猜家具)"
 
-        cat_raw = _first_value(fields, "animation_category")
-        cat_line = "UNKNOWN"
-        if cat_raw:
-            cats = [x.strip() for x in cat_raw.split(",") if x.strip()]
-            cat_line = "、".join(_cn_map(SEX_TYPE_CN, x) for x in cats)
-        tags_raw = _first_value(fields, "animation_tags")
-        tags = [x.strip() for x in (tags_raw or "").split(",") if x.strip()] if tags_raw else []
-        tag_cn = "、".join(_cn_map(SEX_TYPE_CN, x) for x in tags)
-        if not tags:
-            tag_cn = "UNKNOWN"
+        cat_line = "、".join(_cn_or_raw(SEX_TYPE_CN, x) for x in _split_list(_fv(f, "animation_category")))
+        if not _split_list(_fv(f, "animation_category")):
+            cat_line = "UNKNOWN"
+        tag_line = "、".join(_cn_or_raw(SEX_TYPE_CN, x) for x in _split_list(_fv(f, "animation_tags")))
+        if not _split_list(_fv(f, "animation_tags")):
+            tag_line = "UNKNOWN"
 
-        n_actors = len(actors)
-        actor_types = [a.get("animation_type") for a in actors]
-        atypes_cn = "、".join(_cn_map(ACTOR_TYPE_CN, x) for x in actor_types)
-
-        genders = [a.get("animation_genders") for a in actors]
-        genders_cn = "、".join(_cn_map(GENDER_CN, x) for x in genders)
-
-        loops_raw = _first_value(fields, "animation_loops")
+        atypes_cn = "、".join(_cn_or_raw(ACTOR_TYPE_CN, a.get("animation_type")) for a in act)
+        genders_cn = "、".join(_cn_or_raw(GENDER_CN, a.get("animation_genders")) for a in act)
+        seq_line = "可能(含 phase 兄弟/structure 证据)" if is_seq else "UNKNOWN/未见明确 sequence 结构"
 
         print(f"{tag}_HUMAN_LOCATOR:")
-        print(f"  名称={_first_value(fields, 'animation_raw_display_name')}")
-        print(f"  场景位置={loc_cn}")
-        if custom_raw:
-            print(f"  自定义场景={custom_line}")
-        print(f"  动作类型={cat_line}")
-        print(f"  标签={tag_cn}")
-        print(f"  参与人数={n_actors}")
+        print(f"  名称={dn}")
+        print(f"  作者={_fv(f, 'animation_author')}")
+        print(f"  需要的场景/物体={loc_cn}")
+        if custom:
+            print(f"  自定义物体={custom_line}")
+        print(f"  动作大类={cat_line}")
+        print(f"  动作标签={tag_line}")
+        print(f"  参与人数={len(act)}")
+        print(f"  参与者性别={genders_cn}")
         print(f"  参与者动作类型={atypes_cn}")
-        print(f"  性别限制={genders_cn}")
+        print(f"  是否可能为 animation sequence 中的一段={seq_line}")
         other = []
-        if loops_raw:
-            other.append(f"loops={loops_raw}")
-        for i, a in enumerate(actors):
-            aid = a.get("actor_id")
-            if aid:
-                other.append(f"actor{i}_id={aid}")
-            clip = a.get("animation_clip_name")
-            if clip:
-                other.append(f"actor{i}_clip={clip}")
-        other.append(f"author={_first_value(fields, 'animation_author')}")
-        other.append(f"allowed_for_random={_first_value(fields, 'animation_allowed_for_random')}")
-        print(f"  其他可定位信息={'; '.join(other)}")
+        if _fv(f, "animation_loops"):
+            other.append(f"loops={_fv(f,'animation_loops')}")
+        if _fv(f, "animation_allowed_for_random"):
+            other.append(f"allowed_for_random={_fv(f,'animation_allowed_for_random')}")
+        for i, actor in enumerate(act):
+            if actor.get("animation_clip_name"):
+                other.append(f"actor{i}_clip={actor.get('animation_clip_name')}")
+        print(f"  其他游戏内定位线索={'; '.join(other) if other else 'UNKNOWN'}")
         print()
 
+        # GAME_SEARCH_GUIDE
+        print(f"{tag}_GAME_SEARCH_GUIDE:")
+        print(f"  recommended_object_or_location={guide['recommended']}")
+        print(f"  required_actor_count={guide['n_actors']}")
+        print(f"  required_genders={'/'.join(guide['genders']) if guide['genders'] else 'UNKNOWN'}")
+        print(f"  likely_category={'/'.join(guide['category']) if guide['category'] else 'UNKNOWN'}")
+        print(f"  likely_tags={'/'.join(guide['tags']) if guide['tags'] else 'UNKNOWN'}")
+        v = guide["visibility"]
+        print(f"  VISIBLE_IN_GENERIC_FLOOR_MENU={v['floor']}")
+        print(f"  VISIBLE_IN_BED_MENU={v['bed']}")
+        print(f"  VISIBLE_IN_SOFA_MENU={v['sofa']}")
+        print()
+
+        # HUMAN_CANARY_USABILITY
+        print(f"{tag}_HUMAN_CANARY_USABILITY={usability}")
+        if ureasons:
+            print(f"  reasons: {'; '.join(ureasons)}")
+        print()
+
+    # ============ 5. EASY_CANARY_CANDIDATES ============
+    scored = []
+    seen = set()
+    for ord0 in range(len(blocks)):
+        if ord0 in TARGET_ORDS:
+            continue
+        f = all_fields[ord0]
+        act = all_actors[ord0]
+        dn = _fv(f, "animation_raw_display_name") or ""
+        locs_l = _locations(f)
+        custom, _c = _has_custom_location(f)
+        is_seq = _is_sequence(f, all_names, ord0, dn)
+        score = 0
+        why = []
+        # 场景: 常见 location 且非 custom
+        if custom:
+            continue
+        common = [x for x in locs_l if x.upper() in COMMON_LOCATIONS]
+        if not common:
+            continue  # 必须落在常见 location
+        if any(x.upper() in ("BED", "FLOOR", "SOFA", "COUCH") for x in locs_l):
+            score += 3
+            why.append("含 BED/FLOOR/SOFA 常见场景")
+        else:
+            score += 1
+            why.append("含常见场景")
+        # 独立可识别: 非 sequence
+        if is_seq:
+            continue
+        score += 2
+        why.append("非 sequence/可独立列出")
+        # actor_count 明确
+        if len(act) == 2:
+            score += 2
+            why.append("双人明确")
+        elif len(act) >= 1:
+            score += 1
+            why.append(f"{len(act)}人明确")
+        else:
+            continue
+        # display 名易搜索: 不含大量特殊符号/CUSTOM VOICES
+        if "*" not in dn and "CUSTOM VOICES" not in dn.upper():
+            score += 1
+            why.append("display 名简洁易搜")
+        # 无特殊 gender/type 条件
+        # 允许 for random
+        key = (dn, tuple(sorted(locs_l)), len(act))
+        if key in seen:
+            continue
+        seen.add(key)
+        scored.append((score, ord0, dn, locs_l, _fv(f, "animation_category"),
+                       _fv(f, "animation_tags"), len(act), why))
+
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    print("EASY_CANARY_CANDIDATES:")
+    for (score, ord0, dn, locs_l, cat, tags, na, why) in scored[:a.easy_top]:
+        print(f"  ordinal={ord0}")
+        print(f"    display={dn}")
+        print(f"    location={'/'.join(locs_l)}")
+        print(f"    category={cat}")
+        print(f"    tags={tags}")
+        print(f"    actor_count={na}")
+        print(f"    why_easy={'; '.join(why)}")
+    if not scored:
+        print("  (无可推荐)")
+
+    print()
     print("ZERO_WRITE_TO_MODS=YES")
     return 0
 
