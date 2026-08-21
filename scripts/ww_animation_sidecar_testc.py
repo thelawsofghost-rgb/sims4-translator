@@ -73,6 +73,17 @@ C_TARGETS = [
     (478, "C3", "大包C3"),
 ]
 TARGET_ORDS = {o for o, _t, _p in C_TARGETS}
+
+# Easy 真人验证版 (locator 推荐, 普通菜单可定位): 不改架构, 仅换 target 集。
+# 每 target 只改 display, 前缀不带数字后缀以免影响定位。
+EASY_TARGETS = [
+    (35,  "EASY_C1", "大包EASY_C1"),
+    (36,  "EASY_C2", "大包EASY_C2"),
+    (82,  "EASY_C3", "大包EASY_C3"),
+]
+EASY_ORDS = {o for o, _t, _p in EASY_TARGETS}
+EASY_OUT_DIR = "output/ww_animation_testc_easy_nevely42"
+EASY_PASS_KEY = "TEST_C_EASY_STATIC_PASS"
 SH_EXPECTED = "cd0093f2ec4b896121fa465672584c12384465b631c1d9128fe97d360b87d416"
 
 
@@ -257,7 +268,12 @@ def _entry_paired_semantic_diff(src_text: str, can_text: str, target_ordinals: s
 
 
 # ============================================================ 主流程
-def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
+def run(src: Path, out_dir: Path, force: bool, expected_sha: str, variant: bool = False) -> int:
+    # 选择 target 集 (False=C_TARGETS 原版; True=EASY_TARGETS)。不改架构, 仅换集。
+    targets = EASY_TARGETS if variant else C_TARGETS
+    ords = EASY_ORDS if variant else TARGET_ORDS
+    pass_key = EASY_PASS_KEY if variant else "TEST_C_LARGE_PACKAGE_STATIC_PASS"
+    print(f"RUN_MODE={'EASY' if variant else 'ORIGINAL'}")
     src_sha_before = wb.sha256(src)
 
     # ---- 解析 source: 必须恰好 1 个 WW XML ----
@@ -313,7 +329,7 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
     # ---- 对 3 个目标 entry 做 entry-scoped display 替换 ----
     edits = []
     used = set()
-    for ordinal0, tag, prefix in C_TARGETS:
+    for ordinal0, tag, prefix in targets:
         if ordinal0 >= n_entries:
             print(f"ERROR: target ordinal {ordinal0} 超出 entry 数 {n_entries} (fail-closed)", file=sys.stderr)
             return 3
@@ -356,7 +372,7 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
     new_xml = xml_text_orig[:inner_start] + new_inner + xml_text_orig[inner_end:]
 
     # ---- TEST C 专属语义差异 (以关闭 artifact 后重读为准; 此处仅作生成前自检) ----
-    _dc, _intl = _entry_paired_semantic_diff(xml_text_orig, new_xml, TARGET_ORDS)
+    _dc, _intl = _entry_paired_semantic_diff(xml_text_orig, new_xml, ords)
     if _dc is not None and _dc != 3 and not _intl:
         print(f"ERROR: 生成前语义差异异常 display={_dc} (须 3) (fail-closed)", file=sys.stderr)
         return 3
@@ -370,7 +386,7 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
         unchanged_eq = False
     else:
         for i in range(n_entries):
-            if i in TARGET_ORDS:
+            if i in ords:
                 continue
             if dv_src[i] != dv_new[i]:
                 unchanged_eq = False
@@ -413,7 +429,7 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
     side_body = wb.read_body_raw(out, sidx.entries[0]) if sidx and s_count == 1 else b""
     side_text = wb.decompress_maybe(side_body).decode("utf-8", "replace") if side_body else ""
     # 侧车 WW XML 与 source 的语义差异 (关闭 artifact 后重读)
-    ds2, idf2 = _entry_paired_semantic_diff(xml_text_orig, side_text, TARGET_ORDS)
+    ds2, idf2 = _entry_paired_semantic_diff(xml_text_orig, side_text, ords)
     if ds2 is None:
         ds2 = 0
         idf2 = idf2 or [("PARSE", "")]
@@ -441,7 +457,7 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
     sv_new2 = _display_values(side_text)
     c_match = True
     if len(sv_src) == n_entries and len(sv_new2) == n_entries:
-        for (ordinal0, tag, prefix) in C_TARGETS:
+        for (ordinal0, tag, prefix) in targets:
             if sv_new2[ordinal0] != f"【{prefix}】{sv_src[ordinal0]}":
                 c_match = False
     else:
@@ -451,12 +467,12 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
         s_count == 1 and tgi_equal and parser_ok and ranges_ok
         and dbpf_ver_equal and off_hi_eq and sz_hi_eq and f8_eq and f7_matches and stored_ok
         and ic2 == 0 and (ds2 is not None and ds2 == 3)
-        and unchanged_eq and unchanged_count == n_entries - len(C_TARGETS)
+        and unchanged_eq and unchanged_count == n_entries - len(targets)
         and c_match and source_sha_verified and src_file_unchanged
     )
 
     # ---- report ----
-    print("TEST_C_NEVELY42:")
+    print("TEST_C_NEVELY42_EASY:" if variant else "TEST_C_NEVELY42:")
     print(f"  SOURCE_PATH={src_path}")
     print(f"  SOURCE_SHA={src_sha_before}")
     print(f"  SOURCE_FILE_SIZE={src_file_size}")
@@ -499,7 +515,7 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
     print(f"  PARSER_VALID={'YES' if parser_ok else 'NO'}")
     print(f"  SOURCE_FILE_BYTES_UNCHANGED={'YES' if src_file_unchanged else 'NO'}")
     print(f"  SOURCE_SHA_VERIFIED={'YES' if source_sha_verified else 'NO'}")
-    print(f"  TEST_C_LARGE_PACKAGE_STATIC_PASS={'YES' if all_gates else 'NO'}")
+    print(f"  {pass_key}={'YES' if all_gates else 'NO'}")
     if not all_gates:
         if s_count != 1:
             print(f"    GATE_FAIL: SIDECAR_RESOURCE_COUNT={s_count}")
@@ -525,7 +541,7 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
             print(f"    GATE_FAIL: INTERNAL_XML_SEMANTIC_DIFF_COUNT != 0 ({internal2})")
         if ds2 != 3:
             print(f"    GATE_FAIL: DISPLAY_SEMANTIC_DIFF_COUNT != 3 ({ds2})")
-        if unchanged_count != n_entries - len(C_TARGETS) or not unchanged_eq:
+        if unchanged_count != n_entries - len(targets) or not unchanged_eq:
             print(f"    GATE_FAIL: UNCHANGED_DISPLAY ({unchanged_count}, equal={unchanged_eq})")
         if not c_match:
             print("    GATE_FAIL: C1/C2/C3 display 对应检验失败")
@@ -533,6 +549,17 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str) -> int:
             print("    GATE_FAIL: SOURCE_SHA_VERIFIED")
         if not src_file_unchanged:
             print("    GATE_FAIL: SOURCE_FILE_BYTES_UNCHANGED")
+    # spec 要求的简写键 (与上述详细键同一来源, 保证精确一致)
+    print(f"  TARGET_ENTRY_COUNT={len(targets)}")
+    print(f"  TARGET_ORDINAL={','.join(str(o) for o,_t,_p in targets)}")
+    for (ordinal0, _tag, prefix) in targets:
+        print(f"  OLD_DISPLAY\[{ordinal0}\]= {sv_src[ordinal0]}")
+        print(f"  NEW_DISPLAY\[{ordinal0}\]= {sv_new2[ordinal0]}")
+    print(f"  OFFSET_HIGH_BIT_EQUAL={'YES' if off_hi_eq else 'NO'}")
+    print(f"  SIZE_HIGH_BIT_EQUAL={'YES' if sz_hi_eq else 'NO'}")
+    print(f"  FIELD8_EQUAL={'YES' if f8_eq else 'NO'}")
+    print(f"  FIELD7_MATCHES_ACTUAL={'YES' if f7_matches else 'NO'}")
+    print(f"  STORED_SIZE_MATCHES_ACTUAL={'YES' if stored_ok else 'NO'}")
     print("ZERO_WRITE_TO_MODS=YES")
     return 0 if all_gates else 3
 
@@ -553,8 +580,9 @@ def _check_ranges(path: Path, sidx):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", required=True, help="真实 Nevely42 .package 路径")
-    ap.add_argument("--out-dir", default="output")
+    ap.add_argument("--out-dir", default="", help="输出目录 (默认: easy=output/ww_animation_testc_easy_nevely42, 原版=output)")
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--easy", action="store_true", help="EASY 真人验证版 (ordinal 35/36/82)")
     ap.add_argument("--expected-sha", default=SH_EXPECTED,
                     help="期望的 source SHA256 (默认=真机 Nevely42; 白盒可传 fixture SHA)")
     a = ap.parse_args()
@@ -562,7 +590,9 @@ def main():
     if not src.is_file():
         print("ERROR: source 不存在", file=sys.stderr)
         return 2
-    return run(src, Path(a.out_dir), a.force, a.expected_sha)
+    out_dir = (Path(EASY_OUT_DIR) if (a.easy and not a.out_dir) else
+               Path(a.out_dir) if a.out_dir else Path("output"))
+    return run(src, out_dir, a.force, a.expected_sha, variant=a.easy)
 
 
 if __name__ == "__main__":
