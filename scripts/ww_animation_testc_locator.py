@@ -331,7 +331,21 @@ def main():
     ap = _ap.ArgumentParser()
     ap.add_argument("--source", required=True, help="真实 source .package")
     ap.add_argument("--easy-top", type=int, default=5, help="EASY_CANARY_CANDIDATES 数量")
+    ap.add_argument("--ordinals", default="",
+                    help="可选: 覆盖 target 集, 逗号分隔 0-based ordinals, 如 --ordinals 35,36,82 (只读, 不改 writer)")
     a = ap.parse_args()
+    # target 集: 默认 C1/C2/C3 (0/239/478); 传 --ordinals 则用之(前缀按位置 TAG)
+    if a.ordinals.strip():
+        try:
+            custom_ords = tuple(int(x) for x in a.ordinals.split(",") if x.strip() != "")
+        except ValueError:
+            print("ERROR: --ordinals 须为逗号分隔整数", file=sys.stderr)
+            return 7
+        target_ords = custom_ords
+        target_prefix = {o: f"O{o}" for o in target_ords}
+    else:
+        target_ords = TARGET_ORDS
+        target_prefix = dict(TARGET_PREFIX)
     src = Path(a.source)
     if not src.is_file():
         print("ERROR: source 不存在", file=sys.stderr)
@@ -370,9 +384,9 @@ def main():
         all_direct.append(d)
         all_names.append(_fv(f, "animation_raw_display_name"))
 
-    # ============ 1. 三个 target 完整 LOCATOR ============
-    for ord0 in TARGET_ORDS:
-        tag = TARGET_PREFIX[ord0]
+    # ============ 1. target 完整 LOCATOR ============
+    for ord0 in target_ords:
+        tag = target_prefix[ord0]
         f = all_fields[ord0]
         act = all_actors[ord0]
         dn = _fv(f, "animation_raw_display_name")
@@ -402,8 +416,8 @@ def main():
         print()
 
     # ============ 2. HUMAN_LOCATOR + 3. GAME_SEARCH_GUIDE + 4. USABILITY ============
-    for ord0 in TARGET_ORDS:
-        tag = TARGET_PREFIX[ord0]
+    for ord0 in target_ords:
+        tag = target_prefix[ord0]
         f = all_fields[ord0]
         act = all_actors[ord0]
         dn = _fv(f, "animation_raw_display_name")
@@ -478,7 +492,7 @@ def main():
     scored = []
     seen = set()
     for ord0 in range(len(blocks)):
-        if ord0 in TARGET_ORDS:
+        if ord0 in target_ords:
             continue
         f = all_fields[ord0]
         act = all_actors[ord0]
