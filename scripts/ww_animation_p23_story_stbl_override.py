@@ -79,7 +79,8 @@ def main():
     ap.add_argument("--ordinals", default="299-306", help="ordinal 区间, 默认 299-306")
     ap.add_argument("-t", "--text", action="append", default=[], metavar="O=中文",
                     help="ordinal=中文 覆盖映射, 可多次; 缺省用 抓奸 N")
-    ap.add_argument("--game-dir", default=None, help="(本脚本不需要; 仅兼容 P22 调用习惯)")
+    ap.add_argument("--dir", help="Mods 目录 (递归扫 .package 里的 STBL), 用于反查真实 STBL TGI")
+    ap.add_argument("--game-dir", default=None, help="游戏数据目录 (可选, 递归扫 .package)")
     a = ap.parse_args()
 
     src = Path(a.source)
@@ -103,28 +104,11 @@ def main():
     idx, ierr = safe_parse(str(src))
     if ierr is not None or idx is None:
         print(f"ERROR: 源解析失败: {ierr}", file=sys.stderr); return 3
-    stbl_entries = [e for e in idx.entries if e.type_id == STBL]
-    if not stbl_entries:
-        print("ERROR: 源包内无 STBL 资源 (0x220557DA)", file=sys.stderr); return 9
-    src_stbl_e = stbl_entries[0]
-    backend = get_backend("readonly").open(str(src))
-    src_body = backend.read_small_resource(src_stbl_e) or b""
-    src_map = P22.parse_stbl(src_body)
-    # 反向: 源 STBL 文本 -> key 集合 (P22 section-4 兜底)
-    key_by_text = {}
-    for k, txt in src_map.items():
-        key_by_text.setdefault(txt, set()).add(k)
-
-    major, minor, header_comp, src_meta = wb.read_entry_meta_raw(src)
-    meta_map = {(m["type"], m["group"], m["inst"]): m for m in src_meta}
-    m0 = meta_map.get((src_stbl_e.type_id, src_stbl_e.group_id, src_stbl_e.instance_id)) or {}
 
     L = []
     L.append("=== P23 Story STBL override package 生成 (新建, 只读源) ===")
     L.append(f"源 = {src.name}")
     L.append(f"ordinals = {ordinals}")
-    L.append(f"源 STBL: type=0x{src_stbl_e.type_id:08X} group=0x{src_stbl_e.group_id:08X} "
-             f"inst=0x{src_stbl_e.instance_id:016X} (locale 编码于 instance)  keys={len(src_map)}")
     L.append("")
 
     # 用户自定义覆盖映射 ordinal->中文
@@ -133,44 +117,67 @@ def main():
         if "=" in t:
             o_s, zh = t.split("=", 1)
             override_zh[int(o_s)] = zh
-    L.append("=== 1) 提取 animation_id + 计算 STBL key + 中文映射 (复用 P22 逻辑) ===")
+
+    # ---- 扫描【所有】STBL 资源 (源 + --dir Mods + --game-dir), 复用 P22.scan_stbl_packages ----
+    L.append("=== 0) 扫描所有 STBL 资源 (源 + --dir + --game-dir) ===")
+    pkg_paths = [src]
+    scan_dirs = []
+    if a.dir:
+        if Path(a.dir).is_dir():
+            scan_dirs.append(Path(a.dir))
+        else:
+            L.append(f"  !! --dir 不存在: {a.dir} (跳过)")
+    if a.game_dir and Path(a.game_dir).is_dir():
+        scan_dirs.append(Path(a.game_dir))
+    for sd in scan_dirs:
+        pkg_paths.extend(sorted(p for p in sd.rglob("*.package") if p.is_file()))
+    pkg_paths = sorted(set(pkg_paths))
+    by_key, by_text, total_stbl = P22.scan_stbl_packages(pkg_paths)
+    L.append(f"  扫描 package 数 = {len(pkg_paths)}   STBL 资源总数 = {total_stbl}")
+    L.append(f"  唯一 key 数 = {len(by_key)}   样例文本数 = {len(by_text)}")
+    L.append("")
+
+    # ---- 1) 解析每个 ordinal 的 FNV key (复用 P22 提取逻辑) ----
+    L.append("=== 1) 提取 animation_id + 计算 FNV key (复用 P22 逻辑) ===")
     L.append("")
     rows = []
-    overrides = {}     # key -> 中文
+    overrides = {}     # fnv key -> 中文
     for o in ordinals:
         zh = override_zh.get(o, f"抓奸 {o - 298}")
-        # route A (forward): P22.extract_entry_anim_id —— 同一函数, 同一 blocks
         el = blocks[o]
         tag, raw, aid = P22.extract_entry_anim_id(el)
         if aid is not None:
             key_str = "story_animations." + str(aid)
             hk = P22.fnv32(key_str)
-            src_text = src_map.get(hk, "(源STBL无此key)")
-            overrides[hk] = zh
             L.append(f"  [{o}] animation_id={aid} (tag={tag}, raw={raw!r})  key={key_str!r}  "
-                     f"fnv32=0x{hk:08X}  源文本={src_text!r} -> 中文={zh!r}   [route=XML]")
+                     f"fnv32=0x{hk:08X}  [route=XML]")
             rows.append({"ordinal": o, "animation_id": aid, "key_str": key_str,
-                         "fnv32": f"0x{hk:08X}", "zh": zh, "src_text": src_text,
-                         "status": "OK"})
-            continue
-        # route B (reverse fallback): P22 section-4 —— 按原显示文本找 key
-        probe = f"Caught Cheating {o - 298}"
-        shs = sorted(key_by_text.get(probe, set()))
-        if shs:
-            hk = shs[0]
-            overrides[hk] = zh
-            L.append(f"  [{o}] !! XML 无 animation_id (tag={tag}, raw={raw!r}); 反向匹配 "
-                     f"{probe!r} -> STBL key 0x{hk:08X}  [route=TEXT-FALLBACK]")
-            rows.append({"ordinal": o, "animation_id": "", "key_str": "(反向文本)",
-                         "fnv32": f"0x{hk:08X}", "zh": zh, "src_text": probe,
-                         "status": "TEXT-FALLBACK"})
+                         "fnv32": f"0x{hk:08X}", "zh": zh, "status": "KEY", "tag": tag,
+                         "raw": raw})
         else:
-            L.append(f"  [{o}] !! 无 animation_id 且反向文本 {probe!r} 未命中 -> 无法确定 key, 计入缺失")
-            rows.append({"ordinal": o, "animation_id": "", "key_str": "", "fnv32": "",
-                         "zh": zh, "src_text": "", "status": "NO_KEY"})
+            # route B: 反向文本匹配 (所有扫描到的 STBL)
+            probe = f"Caught Cheating {o - 298}"
+            match_keys = set()
+            for k, lst in by_key.items():
+                for _iid, txt, _pn in lst:
+                    if txt == probe:
+                        match_keys.add(k)
+            if match_keys:
+                hk = sorted(match_keys)[0]
+                L.append(f"  [{o}] !! XML 无 animation_id (tag={tag}, raw={raw!r}); 反向文本 "
+                         f"{probe!r} -> STBL key 0x{hk:08X}  [route=TEXT-FALLBACK]")
+                rows.append({"ordinal": o, "animation_id": "", "key_str": "(反向文本)",
+                             "fnv32": f"0x{hk:08X}", "zh": zh, "status": "TEXT-FALLBACK",
+                             "tag": tag or "", "raw": raw or ""})
+            else:
+                L.append(f"  [{o}] !! 无 animation_id 且反向文本 {probe!r} 未命中 -> 无法确定 key")
+                rows.append({"ordinal": o, "animation_id": "", "key_str": "", "fnv32": "",
+                             "zh": zh, "status": "NO_KEY", "tag": tag or "", "raw": raw or ""})
+                continue
+        overrides[hk] = zh
     L.append("")
 
-    # 硬门: 必须解析出全部目标 ordinal 的 key, 否则 fail-closed (不静默跳过)
+    # ---- 硬门: 全部 ordinal 必须解析出 key ----
     expected = len(ordinals)
     resolved = len(overrides)
     L.append(f"  目标 ordinal={expected}  已解析 key={resolved}")
@@ -185,40 +192,99 @@ def main():
         return 6
     L.append("")
 
-    # 2) 合并覆盖: 保留源全部 key, 覆盖目标 key
-    L.append("=== 2) 合并覆盖 (源 STBL 全部 key + 目标 key 中文) ===")
-    merged = dict(src_map)
-    for k, zh in overrides.items():
-        merged[k] = zh
-    L.append(f"  源 keys={len(src_map)}  覆盖 keys={len(overrides)}  合并后 keys={len(merged)}")
-    if src_map:
-        same = sum(1 for k, v in merged.items() if src_map.get(k) == v)
-        L.append(f"  未变化 keys={same}  变化或新增 keys={len(merged) - same}")
+    # ---- 2) 按 FNV key 反查真实 STBL TGI (不跟随源 package STBL) ----
+    L.append("=== 2) 按 FNV key 反查真实 STBL TGI (落点表) ===")
+    per_inst_hit = {}   # instance -> 命中的覆盖 key 数
+    per_inst_txt = {}   # instance -> 该 key 的原文
+    L.append(f"  {len(overrides)} 个覆盖 key 的反查结果:")
+    for hk, zh in overrides.items():
+        hits = by_key.get(hk, [])
+        if not hits:
+            L.append(f"  !! key 0x{hk:08X} 未在任何扫描到的 STBL 中命中")
+        for iid, txt, pn in sorted(set((i, t, p) for i, t, p in hits)):
+            per_inst_hit[iid] = per_inst_hit.get(iid, 0) + 1
+            per_inst_txt.setdefault(iid, {})[hk] = txt
+            L.append(f"      0x{hk:08X}  (中文 {zh!r})  -> STBL inst=0x{iid:016X}  [{pn}]  orig={txt!r}")
+    L.append("")
+    if not per_inst_hit:
+        L.append("  !! 无任何 STBL 命中覆盖 key; 无法定位真实表。")
+        L.append("     -> 需要 --dir (Mods) 指向含真实 STBL 的 package, 或 --game-dir。")
+        txt = "\n".join(L)
+        (out_dir / "p23_story_stbl_override.txt").write_text(txt, encoding="utf-8")
+        print(txt)
+        print("P23_STORY_OVERRIDE=NO_STBL_HIT\n")
+        return 6
+    # 选 canonical 表: 命中覆盖 key 最多的 instance (同分取最小 instance, 确定性)
+    target_inst = max(sorted(per_inst_hit), key=lambda i: (per_inst_hit[i], -i))
+    L.append(f"  => 真实目标 STBL = inst=0x{target_inst:016X}  (命中 {per_inst_hit[target_inst]}/{len(overrides)} 个覆盖 key)")
     L.append("")
 
-    # 3) 写出新 package (source-faithful meta, 同 TGI)
+    # ---- 3) 读取目标表的完整 entries (作为 override 基底), 定位其所在 package + entry ----
+    L.append("=== 3) 读取目标 STBL 完整表 (override 基底) ===")
+    base_map = {}
+    target_pkg_name = None
+    target_tgi = None
+    for p in pkg_paths:
+        try:
+            i2, e2 = safe_parse(str(p))
+        except Exception:
+            continue
+        if e2 is not None or i2 is None:
+            continue
+        try:
+            b2 = get_backend("readonly").open(str(p))
+        except Exception:
+            continue
+        for e in i2.entries:
+            if e.type_id != STBL or e.instance_id != target_inst:
+                continue
+            data = b2.read_small_resource(e) or b""
+            em = P22.parse_stbl(data)
+            if not em:
+                continue
+            base_map.update(em)
+            target_pkg_name = p.name
+            target_tgi = (e.type_id, e.group_id, e.instance_id)
+    if not base_map or target_tgi is None:
+        L.append("  !! 无法读取目标 STBL 完整表; fail-closed。"); txt = "\n".join(L)
+        (out_dir / "p23_story_stbl_override.txt").write_text(txt, encoding="utf-8")
+        print(txt); print("P23_STORY_OVERRIDE=NO_BASE\n"); return 6
+    t_type, t_group, t_inst = target_tgi
+    L.append(f"  目标表基表: type=0x{t_type:08X} group=0x{t_group:08X} inst=0x{t_inst:016X}  "
+             f"keys={len(base_map)}  来源 package={target_pkg_name}")
+    L.append("")
+
+    # ---- 4) 合并覆盖: 保留目标表全部 key, 只覆盖目标 key ----
+    merged = dict(base_map)
+    for hk, zh in overrides.items():
+        merged[hk] = zh
+    same = sum(1 for k, v in merged.items() if base_map.get(k) == v)
+    L.append("=== 4) 合并覆盖 (目标表全部 key + 目标 key 中文) ===")
+    L.append(f"  目标表 keys={len(base_map)}  覆盖 keys={len(overrides)}  合并后 keys={len(merged)}")
+    L.append(f"  未变化 keys={same}  变化或新增 keys={len(merged) - same}")
+    L.append("")
+
+    # ---- 5) 写出新 package (以真实目标表 TGI/locale 为基底, source-faithful meta) ----
+    major, minor, header_comp, src_meta = wb.read_entry_meta_raw(src)
+    meta_map = {(m["type"], m["group"], m["inst"]): m for m in src_meta}
+    m0 = meta_map.get(target_tgi) or {}
     new_body = serialize_stbl_v5(merged)
     out_pkg = out_dir / f"{src.stem}_stbl_override.package"
     meta_for_stbl = {
-        "comp_state": False,
-        "comp_type": 0,
-        "mem_size": len(new_body),
-        "offset_high_bit": m0.get("offset_comp"),
-        "size_high_bit": m0.get("size_comp"),
+        "comp_state": False, "comp_type": 0, "mem_size": len(new_body),
+        "offset_high_bit": m0.get("offset_comp"), "size_high_bit": m0.get("size_comp"),
     }
-    wb.build_package(
-        [(src_stbl_e.type_id, src_stbl_e.group_id, src_stbl_e.instance_id, new_body, meta_for_stbl)],
-        out_pkg, header_comp=header_comp, major=major, minor=minor,
-    )
-    L.append("=== 3) 写出新 package ===")
+    wb.build_package([(t_type, t_group, t_inst, new_body, meta_for_stbl)],
+                     out_pkg, header_comp=header_comp, major=major, minor=minor)
+    L.append("=== 5) 写出新 package ===")
     L.append(f"  新package = {out_pkg}")
-    L.append(f"  STBL: type=0x{src_stbl_e.type_id:08X} group=0x{src_stbl_e.group_id:08X} "
-             f"inst=0x{src_stbl_e.instance_id:016X} (locale 同源)")
+    L.append(f"  STBL: type=0x{t_type:08X} group=0x{t_group:08X} inst=0x{t_inst:016X} "
+             f"(真实目标表 locale/TGI, 非源 package 内 STBL)")
     L.append(f"  major={major} minor={minor} header_comp=0x{header_comp:X}")
     L.append("")
 
-    # 4) 静态验证
-    L.append("=== 4) 静态验证 (重读新 package) ===")
+    # ---- 6) 静态验证 ----
+    L.append("=== 6) 静态验证 (重读新 package) ===")
     v_ok = True
     v_idx, v_err = safe_parse(str(out_pkg))
     if v_err is not None or v_idx is None:
@@ -229,10 +295,9 @@ def main():
             L.append(f"  !! 新包 STBL 资源数={len(v_stbl)} (需恰 1); 验证不通过"); v_ok = False
         else:
             e = v_stbl[0]
-            tgi_ok = (e.type_id == src_stbl_e.type_id and e.group_id == src_stbl_e.group_id
-                      and e.instance_id == src_stbl_e.instance_id)
+            tgi_ok = (e.type_id == t_type and e.group_id == t_group and e.instance_id == t_inst)
             L.append(f"  TGI: type=0x{e.type_id:08X} group=0x{e.group_id:08X} "
-                     f"inst=0x{e.instance_id:016X}  {'== 源 (locale 一致) OK' if tgi_ok else '!! != 源'}")
+                     f"inst=0x{e.instance_id:016X}  {'== 目标表 (locale 一致) OK' if tgi_ok else '!! != 目标表'}")
             if not tgi_ok:
                 v_ok = False
             vb = get_backend("readonly").open(str(out_pkg)).read_small_resource(e) or b""
@@ -252,14 +317,14 @@ def main():
                 L.append("  => 所有覆盖 key 存在且文本正确 (中文)")
     L.append("")
 
-    # 5) 结论 + 落点说明
-    L.append("=== 5) 结论 ===")
+    # ---- 7) 结论 ----
+    L.append("=== 7) 结论 ===")
     if v_ok:
-        L.append("  => STBL override package 生成 + 静态验证通过")
+        L.append(f"  => override 基底 = 真实目标表 inst=0x{t_inst:016X} (含 "
+                 f"{len(overrides)}/{len(overrides)} 覆盖 key); 生成 + 静态验证通过")
         L.append("  => 安装: 把新 package 放入 Mods（不改原 WW package 一行）")
-        L.append("  => 若游戏仍显示英文: 该 STBL 可能非游戏实际读取的那张表, 需按 P22 反向文本匹配定位真实表")
     else:
-        L.append("  => 验证失败 (见 4); 未交付。fail-closed 保持。")
+        L.append("  => 验证失败 (见 6); 未交付。fail-closed 保持。")
     L.append("")
     L.append("ZERO_WRITE_TO_MODS=YES (只写 --out-dir; 不改源)")
 
@@ -269,8 +334,9 @@ def main():
         w = csv.writer(f)
         w.writerow(["ordinal", "animation_id", "key_str", "fnv32", "zh", "src_text", "status"])
         for r in rows:
+            src_text = per_inst_txt.get(target_inst, {}).get(int(r["fnv32"], 16), "") if r["fnv32"] else ""
             w.writerow([r["ordinal"], r["animation_id"], r["key_str"], r["fnv32"],
-                        r["zh"], r["src_text"], r["status"]])
+                        r["zh"], src_text, r["status"]])
     print(txt)
     print(f"OUT_PKG={out_pkg}")
     print(f"OUT_TXT={out_dir/'p23_story_stbl_override.txt'}")
