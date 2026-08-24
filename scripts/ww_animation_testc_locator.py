@@ -352,6 +352,101 @@ def _usability(guide, is_seq):
     return grade, reasons
 
 
+def _safe_xpath(el, parent_map):
+    """基于 parent_map 祖先链构造简单 XPath (tag|n 属性)。"""
+    segs = []
+    node = el
+    while node is not None:
+        tag = node.tag.rsplit("}", 1)[-1]
+        n = node.get("n")
+        seg = tag + (f"[@n={n!r}]" if n is not None else "")
+        segs.append(seg)
+        node = parent_map.get(node)
+    return "/".join(reversed(segs))
+
+
+def _classify_container(el, parent_map):
+    """根据祖先链(经 parent_map)判断节点所在容器类型。"""
+    kinds = []
+    node = el
+    while node is not None:
+        tag = node.tag.rsplit("}", 1)[-1]
+        n = node.get("n")
+        if n:
+            if "stage" in n.lower():
+                kinds.append("stage")
+            elif "actor" in n.lower():
+                kinds.append("actor")
+            elif "override" in n.lower():
+                kinds.append("override")
+            elif "meta" in n.lower():
+                kinds.append("metadata")
+            elif "list" in n.lower() or tag == "L":
+                if kinds and kinds[-1] != "list":
+                    kinds.append("list")
+            else:
+                if kinds and kinds[-1] != "other":
+                    kinds.append("other")
+        node = parent_map.get(node)
+    if not kinds:
+        kinds.append("root")
+    return ",".join(dict.fromkeys(kinds))
+
+
+def _parse_block_tree(block_text):
+    """ET 解析并构建 parent_map。返回 (root, parent_map, warnings)。"""
+    try:
+        root = ET.fromstring(block_text.encode("utf-8"))
+    except Exception as e:
+        return None, {}, [f"parse_warn: {e}"]
+    pmap = {}
+    for parent in root.iter():
+        for child in parent:
+            pmap[child] = parent
+    return root, pmap, []
+
+
+def _text_equal_nodes(block_text, needle):
+    """只读：返回文本精确等于 needle 的所有节点详情。
+    每个: (xpath, n, text, tag, container_class)。"""
+    root, pmap, wrn = _parse_block_tree(block_text)
+    if root is None:
+        return [], wrn
+    out = []
+    for el in root.iter():
+        txt = (el.text or "").strip()
+        tag = el.tag.rsplit("}", 1)[-1]
+        if tag == "T" and txt == needle:
+            out.append((_safe_xpath(el, pmap), el.get("n"), txt, tag, _classify_container(el, pmap)))
+    return out, wrn
+
+
+def _field_names(root, pmap):
+    """返回 entry 树中全部 T 节点的 (n, 容器类别, 文本前32字)。"""
+    out = []
+    for el in root.iter():
+        tag = el.tag.rsplit("}", 1)[-1]
+        if tag == "T":
+            n = el.get("n")
+            txt = (el.text or "").strip()
+            out.append((n, _classify_container(el, pmap), txt[:40]))
+    return out
+
+
+def _candidate_field_census(fields_list):
+    """对全部 entry 统计候选字段名的出现次数 (用于判断是否存在)。"""
+    wanted = ["display_name", "title", "name", "stage_name", "animation_name",
+              "ui_name", "override", "display", "label", "loc_key", "string",
+              "tooltip", "description"]
+    cnt = {w: 0 for w in wanted}
+    for f in fields_list:
+        for w in wanted:
+            for k in f.keys():
+                if w in k.lower():
+                    cnt[w] += 1
+    return cnt
+
+
 def main():
     import argparse as _ap
     ap = _ap.ArgumentParser()
@@ -359,6 +454,10 @@ def main():
     ap.add_argument("--easy-top", type=int, default=5, help="EASY_CANARY_CANDIDATES 数量")
     ap.add_argument("--ordinals", default="",
                     help="可选: 覆盖 target 集, 逗号分隔 0-based ordinals, 如 --ordinals 35,36,82 (只读, 不改 writer)")
+    ap.add_argument("--text", default="",
+                    help="可选: 只输出文本值精确等于该字符串的 XML 节点 (含完整路径/父结构/容器分类), 不填则照常 dump")
+    ap.add_argument("--field-census", action="store_true",
+                    help="可选: 对 target entry 输出全部存在字段名(n=)清单 + 你关心的候选字段匹配情况")
     a = ap.parse_args()
     # target 集: 默认 C1/C2/C3 (0/239/478); 传 --ordinals 则用之(前缀按位置 TAG)
     if a.ordinals.strip():
@@ -444,6 +543,28 @@ def main():
         print("  ALL_TEXT_NODES_DUMP (path | n | text):")
         for (path, n, tx) in tnode:
             print(f"    {path}  n={n!r}  text={tx!r}")
+        # 只读: 文本值精确等于 --text 的所有节点 (完整路径/父结构/容器)
+        if a.text:
+            eq, wrn2 = _text_equal_nodes(blocks[ord0][0], a.text)
+            print(f"  TEXT_EQUAL_NODES for {a.text!r}:")
+            if wrn2:
+                for wmsg in wrn2:
+                    print(f"    warn: {wmsg}")
+            if not eq:
+                print("    (无文本值精确相等的 T 节点)")
+            for (xp, nattr, tx, tag, cls) in eq:
+                print(f"    XPath={xp}")
+                print(f"      n={nattr!r}")
+                print(f"      text={tx!r}")
+                print(f"      tag={tag}")
+                print(f"      container={cls}  (stage/list/override/metadata 判定)")
+        # 只读: 该 entry 全部字段名 (含候选字段是否存在)
+        if a.field_census:
+            root, pmap3, wrn3 = _parse_block_tree(blocks[ord0][0])
+            print(f"  ENTRY_FIELD_CENSUS (n | container | text[:40]):")
+            if root is not None:
+                for (nattr, cls, tx) in _field_names(root, pmap3):
+                    print(f"    n={nattr!r}  container={cls}  text={tx!r}")
         print()
 
     # ============ 2. HUMAN_LOCATOR + 3. GAME_SEARCH_GUIDE + 4. USABILITY ============
@@ -584,6 +705,21 @@ def main():
         print(f"    why_easy={'; '.join(why)}")
     if not scored:
         print("  (无可推荐)")
+
+    if a.field_census:
+        print("CANDIDATE_FIELD_GLOBAL_CENSUS (跨 479 entry, 出现 entry 数):")
+        cnt = _candidate_field_census(all_fields)
+        for w in sorted(cnt, key=lambda k: -cnt[k]):
+            print(f"  {w}: {cnt[w]} entries")
+        # 全部 distinct 字段名 (全局)
+        all_names_set = {}
+        for f in all_fields:
+            for k in f.keys():
+                all_names_set[k] = all_names_set.get(k, 0) + 1
+        print("ALL_FIELD_NAMES_GLOBAL (distinct n=, entry 出现次数):")
+        for k in sorted(all_names_set, key=lambda x: -all_names_set[x]):
+            print(f"  {k!r}: {all_names_set[k]}")
+        print()
 
     print()
     print("ZERO_WRITE_TO_MODS=YES")
