@@ -246,15 +246,22 @@ def main():
     lines.append(f"FAIL group: {a.fail}")
     lines.append(f"TOTAL_ENTRIES={n_entries}")
     lines.append("")
-    lines.append("【重点: 疑似 STORY 唯一键字段】(WW 可能用其覆盖 raw_display_name)")
+    lines.append("【疑似 STORY 唯一键全览】(任何一组出现的 STORY 候选都列出, 含两组逐 ordinal 值)")
     lines.append("-" * 90)
-    for r in diff_rows:
-        if r["story_hint"]:
-            lines.append(f"  {r['field']:32s} {r['nature']:12s}  OK={r['ok_values']!r}  FAIL={r['fail_values']!r}")
-            for o in a.ok:
-                lines.append(f"      OK  {o}: {ok_fields[o].get(r['field'], '—')}")
-            for o in a.fail:
-                lines.append(f"      FAIL {o}: {fail_fields[o].get(r['field'], '—')}")
+    story_all = [k for k in all_keys if (ok_sig.get(k) or {}).get("story_hint") or (fail_sig.get(k) or {}).get("story_hint")]
+    if story_all:
+        for k in story_all:
+            o, f = ok_sig.get(k), fail_sig.get(k)
+            nature = next((r["nature"] for r in diff_rows if r["field"] == k), "相同")
+            lines.append(f"  {k:28s} {nature:14s}  OK({o['present'] if o else 0}/{len(a.ok)}={o['uniq_values'] if o else '—'})  FAIL({f['present'] if f else 0}/{len(a.fail)}={f['uniq_values'] if f else '—'})")
+            if nature != "相同":
+                for grp_name, grp_ords, grp_map in (("OK", a.ok, ok_fields), ("FAIL", a.fail, fail_fields)):
+                    for o2 in grp_ords:
+                        v = grp_map[o2].get(k)
+                        if v:
+                            lines.append(f"      {grp_name} {o2}: {v}")
+    else:
+        lines.append("  (未发现 STORY 候选字段)")
     lines.append("")
     lines.append("【全部字段差异汇总】")
     lines.append("-" * 90)
