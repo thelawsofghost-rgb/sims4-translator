@@ -63,6 +63,7 @@ _spec.loader.exec_module(wb)
 
 WW_ANIM_XML = wb.WW_ANIM_XML
 DISP_FIELD = "animation_raw_display_name"
+DISP_FIELD_ALT = "animation_stage_name"   # WW UI 疑似实际显示字段(真人 A/B 验证)
 ENTRY_LIST_FIELD = "animations_list"
 
 # 0-based ordinals: 首 / 中 / 末 (479 entries)
@@ -84,6 +85,15 @@ EASY_TARGETS = [
 EASY_ORDS = {o for o, _t, _p in EASY_TARGETS}
 EASY_OUT_DIR = "output/ww_animation_testc_easy_nevely42"
 EASY_PASS_KEY = "TEST_C_EASY_STATIC_PASS"
+# --- EASY_STAGE 实验: 仅改 animation_stage_name (WW UI 疑似实际显示来源) ---
+EASY_STAGE_TARGETS = [
+    (35,  "EASY_STAGE_C1", "大包EASY_C1"),
+    (36,  "EASY_STAGE_C2", "大包EASY_C2"),
+    (82,  "EASY_STAGE_C3", "大包EASY_C3"),
+]
+EASY_STAGE_ORDS = {o for o, _t, _p in EASY_STAGE_TARGETS}
+EASY_STAGE_OUT_DIR = "output/ww_animation_testc_easy_stage_nevely42"
+EASY_STAGE_PASS_KEY = "TEST_C_EASY_STAGE_STATIC_PASS"
 SH_EXPECTED = "cd0093f2ec4b896121fa465672584c12384465b631c1d9128fe97d360b87d416"
 
 
@@ -161,6 +171,30 @@ def _replace_display_in_block(block_text: str, new_val: str):
     return old, new_block, len(matches)
 
 
+def _replace_field_in_block(block_text: str, field: str, prefix: str, require_one: bool = True):
+    """entry block 内精确替换 <T n=field>... </T> 的 inner text。
+
+    require_one=True (raw_display_name, 默认): 每 block 须恰 1 个, 否则 FAIL-CLOSED。
+    require_one=False (stage_name): 替换【全部】occurrence, 每个 NEW = 【prefix】+ 该 occurrence 原文本。
+    返回 (olds, new_block_text, node_count)。
+    """
+    pat = re.compile(
+        r'(<T\s+[^>]*\bn\s*=\s*"%s"[^>]*>)([^<]*)(</T>)' % re.escape(field), re.S
+    )
+    matches = list(pat.finditer(block_text))
+    if require_one and len(matches) != 1:
+        return None, block_text, len(matches)
+    olds = [m.group(2) for m in matches]
+    parts = []
+    last = 0
+    for m in matches:
+        parts.append(block_text[last:m.start(2)])
+        parts.append(f"【{prefix}】{m.group(2)}")
+        last = m.end(2)
+    parts.append(block_text[last:])
+    return olds, "".join(parts), len(matches)
+
+
 def _locate_animations_list(xml_text: str):
     """定位 <L n="animations_list"> ... </L> 的 inner 区间。返回 (inner_text, inner_start, inner_end)。"""
     s = re.search(r'<L\s+[^>]*\bn\s*=\s*"animations_list"[^>]*>', xml_text, re.S)
@@ -182,18 +216,31 @@ def _locate_animations_list(xml_text: str):
 
 
 # ============================================================ TEST C 专属 semantic 比较
-def _display_values(text):
-    """按序抽全部 display inner text (用于 476 unchanged 逐 entry 校验)。"""
-    pat = re.compile(r'<T\s+[^>]*\bn\s*=\s*"%s"[^>]*>([^<]*)</T>' % re.escape(DISP_FIELD), re.S)
+def _display_values(text, field=DISP_FIELD):
+    """按序抽全部 display inner text (用于 476 unchanged 逐 entry 校验)。字段可换(stage 实验)。"""
+    pat = re.compile(r'<T\s+[^>]*\bn\s*=\s*"%s"[^>]*>([^<]*)</T>' % re.escape(field), re.S)
     return [m.group(1) for m in pat.finditer(text)]
 
 
-def _is_display_node(el):
+def _per_entry_field_values(inner_text: str, field: str, n_entries: int):
+    """每 entry 的 field 值列表(按序)。用于 raw(每 entry 1 个)与 stage(每 entry 可多个) 校验。
+    返回 [ [val,...] x n_entries ]; 若 entry 块解析数与 n_entries 不符返回 None。"""
+    pat = re.compile(r'<T\s+[^>]*\bn\s*=\s*"%s"[^>]*>([^<]*)</T>' % re.escape(field), re.S)
+    blocks = _entry_blocks(inner_text)
+    if len(blocks) != n_entries:
+        return None
+    out = []
+    for btext, _r in blocks:
+        out.append([m.group(1) for m in pat.finditer(btext)])
+    return out
+
+
+def _is_display_node(el, field=DISP_FIELD):
     tag = el.tag.rsplit("}", 1)[-1] if isinstance(el.tag, str) else None
-    return tag == "T" and el.get("n") == DISP_FIELD
+    return tag == "T" and el.get("n") == field
 
 
-def _tree_diff(a, b, path, allow_display_text):
+def _tree_diff(a, b, path, allow_display_text, field=DISP_FIELD):
     """递归比较两 entry; 仅允许 display text 改变。返回 dict 或 None (display 变在非目标 entry)。"""
     tag_a = a.tag.rsplit("}", 1)[-1] if isinstance(a.tag, str) else None
     tag_b = b.tag.rsplit("}", 1)[-1] if isinstance(b.tag, str) else None
@@ -210,13 +257,13 @@ def _tree_diff(a, b, path, allow_display_text):
             res["internal"].append((path, f"child#{k} missing"))
             continue
         x, y = ca[k], cb[k]
-        if _is_display_node(x) and _is_display_node(y):
+        if _is_display_node(x, field) and _is_display_node(y, field):
             if x.text != y.text:
                 if not allow_display_text:
                     return None
                 res["display_changed"] = True
             continue
-        sub = _tree_diff(x, y, f"{path}/{tag_a}#{k}", allow_display_text)
+        sub = _tree_diff(x, y, f"{path}/{tag_a}#{k}", allow_display_text, field)
         if sub is None:
             return None
         res["display_changed"] = res["display_changed"] or sub["display_changed"]
@@ -224,10 +271,11 @@ def _tree_diff(a, b, path, allow_display_text):
     return res
 
 
-def _entry_paired_semantic_diff(src_text: str, can_text: str, target_ordinals: set):
+def _entry_paired_semantic_diff(src_text: str, can_text: str, target_ordinals: set, field=DISP_FIELD):
     """ordinal-by-ordinal entry 配对比较 (不 collapse; 适配多 entry 大包)。
 
     返回 (display_change_count, internal_diffs)。display text 变化仅在 target_ordinals 内允许。
+    field 可换 (stage 实验传 animation_stage_name)。
     """
     try:
         r1 = ET.fromstring(src_text)
@@ -256,7 +304,7 @@ def _entry_paired_semantic_diff(src_text: str, can_text: str, target_ordinals: s
     display_changes = 0
     internal = []
     for i, (a, b) in enumerate(zip(e1, e2)):
-        sub = _tree_diff(a, b, f"entry[{i}]", i in target_ordinals)
+        sub = _tree_diff(a, b, f"entry[{i}]", i in target_ordinals, field)
         if sub is None:
             internal.append((f"entry[{i}]", "display-text-change-outside-target"))
             continue
@@ -268,12 +316,23 @@ def _entry_paired_semantic_diff(src_text: str, can_text: str, target_ordinals: s
 
 
 # ============================================================ 主流程
-def run(src: Path, out_dir: Path, force: bool, expected_sha: str, variant: bool = False) -> int:
-    # 选择 target 集 (False=C_TARGETS 原版; True=EASY_TARGETS)。不改架构, 仅换集。
-    targets = EASY_TARGETS if variant else C_TARGETS
-    ords = EASY_ORDS if variant else TARGET_ORDS
-    pass_key = EASY_PASS_KEY if variant else "TEST_C_LARGE_PACKAGE_STATIC_PASS"
-    print(f"RUN_MODE={'EASY' if variant else 'ORIGINAL'}")
+def run(src: Path, out_dir: Path, force: bool, expected_sha: str, variant: bool = False, stage: bool = False) -> int:
+    # 选择 target 集 / 字段 (False/False=C_TARGETS 原版; True/False=EASY_TARGETS; False/True=EASY_STAGE 改 stage_name)。
+    if stage:
+        targets = EASY_STAGE_TARGETS
+        ords = EASY_STAGE_ORDS
+        field = DISP_FIELD_ALT
+        require_one = False
+        pass_key = EASY_STAGE_PASS_KEY
+        mode_name = "EASY_STAGE"
+    else:
+        targets = EASY_TARGETS if variant else C_TARGETS
+        ords = EASY_ORDS if variant else TARGET_ORDS
+        field = DISP_FIELD
+        require_one = True
+        pass_key = EASY_PASS_KEY if variant else "TEST_C_LARGE_PACKAGE_STATIC_PASS"
+        mode_name = "EASY" if variant else "ORIGINAL"
+    print(f"RUN_MODE={mode_name}  FIELD={field}")
     src_sha_before = wb.sha256(src)
 
     # ---- 解析 source: 必须恰好 1 个 WW XML ----
@@ -338,17 +397,32 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str, variant: bool 
             return 3
         used.add(ordinal0)
         btext, (_bst, _be) = blocks[ordinal0]
-        old, _nb, node_cnt = _replace_display_in_block(btext, "X")  # 先探 OLD
-        if node_cnt != 1:
-            print(f"ERROR: entry[{ordinal0}] display node 数 = {node_cnt} (须 1) (fail-closed)", file=sys.stderr)
-            return 3
-        new_val = f"【{prefix}】{old}"
-        old2, new_block, node_cnt2 = _replace_display_in_block(btext, new_val)
-        if node_cnt2 != 1 or old2 != old:
-            print(f"ERROR: entry[{ordinal0}] display 二次替换不一致 (fail-closed)", file=sys.stderr)
-            return 3
-        edits.append({"ordinal0": ordinal0, "tag": tag, "prefix": prefix,
-                      "old": old, "new": new_val, "block": new_block})
+        if require_one:
+            # raw_display_name: 恰 1 个 display 节点
+            old, _nb, node_cnt = _replace_display_in_block(btext, "X")  # 先探 OLD
+            if node_cnt != 1:
+                print(f"ERROR: entry[{ordinal0}] {field} node 数 = {node_cnt} (须 1) (fail-closed)", file=sys.stderr)
+                return 3
+            new_val = f"【{prefix}】{old}"
+            old2, new_block, node_cnt2 = _replace_display_in_block(btext, new_val)
+            if node_cnt2 != 1 or old2 != old:
+                print(f"ERROR: entry[{ordinal0}] {field} 二次替换不一致 (fail-closed)", file=sys.stderr)
+                return 3
+            edits.append({"ordinal0": ordinal0, "tag": tag, "prefix": prefix,
+                          "old": old, "new": new_val, "block": new_block})
+        else:
+            # stage_name: 替换【全部】occurrence, 每个 NEW = 【prefix】+ 该 occurrence 原文本
+            olds, new_block, node_cnt = _replace_field_in_block(btext, field, prefix, require_one=False)
+            if node_cnt < 1:
+                print(f"ERROR: entry[{ordinal0}] {field} node 数 = {node_cnt} (须 >=1) (fail-closed)", file=sys.stderr)
+                return 3
+            if not olds:
+                print(f"ERROR: entry[{ordinal0}] {field} 无内容 (fail-closed)", file=sys.stderr)
+                return 3
+            edits.append({"ordinal0": ordinal0, "tag": tag, "prefix": prefix,
+                          "old": olds[0], "new": f"【{prefix}】{olds[0]}",
+                          "new_all": [f"【{prefix}】{o}" for o in olds],
+                          "block": new_block})
 
     # 三个 OLD 来自三个不同 entry (由不同 ordinal 保证); 若文本重复仅警告 (大包内 animation 名重复合法)。
     olds = [e["old"] for e in edits]
@@ -372,23 +446,26 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str, variant: bool 
     new_xml = xml_text_orig[:inner_start] + new_inner + xml_text_orig[inner_end:]
 
     # ---- TEST C 专属语义差异 (以关闭 artifact 后重读为准; 此处仅作生成前自检) ----
-    _dc, _intl = _entry_paired_semantic_diff(xml_text_orig, new_xml, ords)
+    _dc, _intl = _entry_paired_semantic_diff(xml_text_orig, new_xml, ords, field)
     if _dc is not None and _dc != 3 and not _intl:
         print(f"ERROR: 生成前语义差异异常 display={_dc} (须 3) (fail-closed)", file=sys.stderr)
         return 3
 
-    # ---- 476 未改 display 逐 entry source-equivalent ----
-    dv_src = _display_values(xml_text_orig)
-    dv_new = _display_values(new_xml)
+    # ---- 476 未改 display 逐 entry source-equivalent (per-entry 列表; 兼容 raw/多stage) ----
+    pe_src = _per_entry_field_values(inner, field, n_entries)
+    pe_new = _per_entry_field_values(new_inner, field, n_entries)
     unchanged_count = 0
     unchanged_eq = True
-    if len(dv_src) != n_entries or len(dv_new) != n_entries:
+    if pe_src is None or pe_new is None:
         unchanged_eq = False
     else:
         for i in range(n_entries):
             if i in ords:
+                # target: 每 entry 至少改一处 field
+                if not pe_src[i] or not pe_new[i] or pe_src[i][0] == pe_new[i][0]:
+                    unchanged_eq = False
                 continue
-            if dv_src[i] != dv_new[i]:
+            if pe_src[i] != pe_new[i]:
                 unchanged_eq = False
                 break
             unchanged_count += 1
@@ -429,7 +506,7 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str, variant: bool 
     side_body = wb.read_body_raw(out, sidx.entries[0]) if sidx and s_count == 1 else b""
     side_text = wb.decompress_maybe(side_body).decode("utf-8", "replace") if side_body else ""
     # 侧车 WW XML 与 source 的语义差异 (关闭 artifact 后重读)
-    ds2, idf2 = _entry_paired_semantic_diff(xml_text_orig, side_text, ords)
+    ds2, idf2 = _entry_paired_semantic_diff(xml_text_orig, side_text, ords, field)
     if ds2 is None:
         ds2 = 0
         idf2 = idf2 or [("PARSE", "")]
@@ -453,15 +530,19 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str, variant: bool 
     source_sha_verified = (src_sha_before == expected_sha)
 
     # 验证 side_text 里 3 个改动分别对应 C1/C2/C3 (置位于目标 entry 的 display 值)
-    sv_src = _display_values(xml_text_orig)
-    sv_new2 = _display_values(side_text)
+    # 验证 3 个改动分别对应 (置于目标 entry 的 field 首个值)
     c_match = True
-    if len(sv_src) == n_entries and len(sv_new2) == n_entries:
-        for (ordinal0, tag, prefix) in targets:
-            if sv_new2[ordinal0] != f"【{prefix}】{sv_src[ordinal0]}":
-                c_match = False
-    else:
+    side_inner, _si, _se = _locate_animations_list(side_text)
+    pe_side = _per_entry_field_values(side_inner, field, n_entries) if side_inner else None
+    if pe_src is None or pe_side is None:
         c_match = False
+    else:
+        for (ordinal0, tag, prefix) in targets:
+            s0 = pe_src[ordinal0]
+            n0 = pe_side[ordinal0]
+            if (not s0) or (not n0) or n0[0] != f"【{prefix}】{s0[0]}":
+                c_match = False
+                break
 
     all_gates = (
         s_count == 1 and tgi_equal and parser_ok and ranges_ok
@@ -472,7 +553,9 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str, variant: bool 
     )
 
     # ---- report ----
-    print("TEST_C_NEVELY42_EASY:" if variant else "TEST_C_NEVELY42:")
+    hdr = "TEST_C_NEVELY42_EASY_STAGE:" if stage else ("TEST_C_NEVELY42_EASY:" if variant else "TEST_C_NEVELY42:")
+    print(hdr)
+    print(f"  MODIFIED_FIELD={field}")
     print(f"  SOURCE_PATH={src_path}")
     print(f"  SOURCE_SHA={src_sha_before}")
     print(f"  SOURCE_FILE_SIZE={src_file_size}")
@@ -544,7 +627,7 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str, variant: bool 
         if unchanged_count != n_entries - len(targets) or not unchanged_eq:
             print(f"    GATE_FAIL: UNCHANGED_DISPLAY ({unchanged_count}, equal={unchanged_eq})")
         if not c_match:
-            print("    GATE_FAIL: C1/C2/C3 display 对应检验失败")
+            print("    GATE_FAIL: target(c1/c2/c3) 对应检验失败")
         if not source_sha_verified:
             print("    GATE_FAIL: SOURCE_SHA_VERIFIED")
         if not src_file_unchanged:
@@ -553,8 +636,8 @@ def run(src: Path, out_dir: Path, force: bool, expected_sha: str, variant: bool 
     print(f"  TARGET_ENTRY_COUNT={len(targets)}")
     print(f"  TARGET_ORDINAL={','.join(str(o) for o,_t,_p in targets)}")
     for (ordinal0, _tag, prefix) in targets:
-        print(f"  OLD_DISPLAY\[{ordinal0}\]= {sv_src[ordinal0]}")
-        print(f"  NEW_DISPLAY\[{ordinal0}\]= {sv_new2[ordinal0]}")
+        print(f"  OLD_DISPLAY\[{ordinal0}\]= {pe_src[ordinal0][0] if pe_src and pe_src[ordinal0] else ''}")
+        print(f"  NEW_DISPLAY\[{ordinal0}\]= {pe_side[ordinal0][0] if pe_side and pe_side[ordinal0] else ''}")
     print(f"  OFFSET_HIGH_BIT_EQUAL={'YES' if off_hi_eq else 'NO'}")
     print(f"  SIZE_HIGH_BIT_EQUAL={'YES' if sz_hi_eq else 'NO'}")
     print(f"  FIELD8_EQUAL={'YES' if f8_eq else 'NO'}")
@@ -582,7 +665,8 @@ def main():
     ap.add_argument("--source", required=True, help="真实 Nevely42 .package 路径")
     ap.add_argument("--out-dir", default="", help="输出目录 (默认: easy=output/ww_animation_testc_easy_nevely42, 原版=output)")
     ap.add_argument("--force", action="store_true")
-    ap.add_argument("--easy", action="store_true", help="EASY 真人验证版 (ordinal 35/36/82)")
+    ap.add_argument("--easy", action="store_true", help="EASY 真人验证版 (ordinal 35/36/82, 改 raw_display_name)")
+    ap.add_argument("--easy-stage", action="store_true", help="EASY_STAGE 实验 (ordinal 35/36/82, 仅改 animation_stage_name)")
     ap.add_argument("--expected-sha", default=SH_EXPECTED,
                     help="期望的 source SHA256 (默认=真机 Nevely42; 白盒可传 fixture SHA)")
     a = ap.parse_args()
@@ -590,6 +674,12 @@ def main():
     if not src.is_file():
         print("ERROR: source 不存在", file=sys.stderr)
         return 2
+    if a.easy and a.easy_stage:
+        print("ERROR: --easy 与 --easy-stage 互斥", file=sys.stderr)
+        return 2
+    if a.easy_stage:
+        out_dir = (Path(EASY_STAGE_OUT_DIR) if not a.out_dir else Path(a.out_dir))
+        return run(src, out_dir, a.force, a.expected_sha, variant=False, stage=True)
     out_dir = (Path(EASY_OUT_DIR) if (a.easy and not a.out_dir) else
                Path(a.out_dir) if a.out_dir else Path("output"))
     return run(src, out_dir, a.force, a.expected_sha, variant=a.easy)
