@@ -10,26 +10,27 @@ P23 Story STBL override package 生成 (只读源, 新建 package)
   - P18/P19/P20/P21: Story display = get_localized_string_id(hash("story_animations."+id)),
     hash 即 FNV-32。
   - P22: 已确认 fnv32("story_animations."+str(animation_id)) 命中 STBL key。
-本脚本:
-  1. 从源 WW package 读取其 STBL 资源 (type 0x220557DA), 提取:
-       type / group / instance / locale(即 instance) / compression meta / header_comp / major/minor
-  2. 对目标 ordinal (默认 299-306), 从源 WW_ANIM_XML 提取真实 animation_id,
-     计算 key = fnv32("story_animations."+str(id)), 映射到中文 (默认 抓奸 N / 可 -t 自定义)。
-  3. 基于源 STBL 的 key->text 合并覆盖层: 保留其它所有 key, 只覆盖目标 key 为中文。
-     若目标 key 在源 STBL 中不存在, 也新增 (override 仍生效, 因游戏按 key 查表)。
-  4. 写出新 package (仅含该 STBL, source-faithful meta, 同 type/group/instance/locale)。
-  5. 静态验证: 重读新 package -> 每个 key 存在 / text==中文 / TGI==源 TGI (locale 一致)。
+本脚本 (text-first):
+  1. 从源 WW_ANIM_XML 的每个目标 ordinal (默认 299-306) 提取英文显示名
+     animation_raw_display_name (真实 WW Story 条目无 animation_id)。
+  2. 全 STBL 扫描 (源 + --dir Mods + --game-dir), 以英文文本精确反查 key hash /
+     instance / package。
+  3. 选命中覆盖文本最多的真实 STBL 为基底 (保留其全部 key), 覆盖目标 key 为中文。
+  4. 写出新 package (仅含该 STBL, 同 TGI/locale, source-faithful meta)。
+  5. 静态验证: 重读新 package -> 每个 key 存在 / text==中文 / TGI==目标表。
 
+不再使用 animation_id / story_animations hash 路径。
 输出: pkg 路径 + STBL 资源信息 + key 覆盖列表 + 验证结果。
 
-fail-closed: 源缺->2; 无 WW_ANIM_XML->3; --dir 缺->4(占位, 本脚本不需要 Mods 写);
-  源无 STBL->9; 构建/验证失败->6; 正常 0。
+fail-closed: 源缺->2; 无 WW_ANIM_XML->3; --dir 缺->4(占位);
+  源无 STBL->9; 构建/验证失败->6; 目标 ordinal 任一未解析->6 (PARTIAL_RESOLVE / NO_STBL_HIT)。
+  正常 0。
   只读源; 只写 --out_dir 内的新 package; ZERO_WRITE_TO_MODS=YES (除非 --out-dir 指向 Mods)。
 
 用法:
   python scripts\\ww_animation_p23_story_stbl_override.py \\
-      "<WW.package>" --out-dir output\\ww_p23 [--ordinals 299-306] \\
-      [-t '299=抓奸 1' -t '300=抓奸 2' ...]
+      "<WW.package>" --dir "<Mods>" --game-dir "<Game>" --out-dir output\\ww_p23 \\
+      [--ordinals 299-306] [-t '299=抓奸 1' -t '300=抓奸 2' ...]
 """
 import argparse
 import csv
@@ -51,7 +52,7 @@ except Exception as ex:
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-import ww_animation_p22_story_stbl as P22        # parse_stbl / fnv32 / parse_anim_id / extract_entry_anim_id
+import ww_animation_p22_story_stbl as P22        # parse_stbl / fnv32 / parse_ordinals / scan_stbl_packages
 import ww_animation_canary_builder as wb          # build_package / read_entry_meta_raw / read_body_raw
 
 WW_ANIM_XML = 0x7DF2169C
@@ -70,6 +71,21 @@ def serialize_stbl_v5(entries, version=5):
     head += _struct.pack("<Q", len(pairs))
     head += b"\x00\x00" + _struct.pack("<I", len(body))
     return head + body
+
+
+DISPLAY_FIELD = "animation_raw_display_name"
+
+
+def extract_entry_display_name(el):
+    """el = ET entry; 返回 (display 节点 tag, raw 文本) 或 (None, None).
+    取该 entry 内第一个 <T n="animation_raw_display_name"> 的文本 (英文显示名)."""
+    for child in el.iter():
+        n = child.get("n")
+        if (n or "") == DISPLAY_FIELD:
+            raw = (child.text or "").strip()
+            tag = child.tag.rsplit("}", 1)[-1] if isinstance(child.tag, str) else child.tag
+            return tag, raw
+    return None, None
 
 
 def main():
@@ -137,53 +153,57 @@ def main():
     L.append(f"  唯一 key 数 = {len(by_key)}   样例文本数 = {len(by_text)}")
     L.append("")
 
-    # ---- 1) 解析每个 ordinal 的 FNV key (复用 P22 提取逻辑) ----
-    L.append("=== 1) 提取 animation_id + 计算 FNV key (复用 P22 逻辑) ===")
+    # ---- 1) 从每个 ordinal 的 XML entry 提取英文显示名 (text-first) ----
+    # 真实 WW Story 条目无 animation_id; 用 animation_raw_display_name 反向查 STBL。
+    L.append("=== STORY TEXT RESOLVE ===")
     L.append("")
     rows = []
-    overrides = {}     # fnv key -> 中文
+    overrides = {}     # fnv key(stbl key hash) -> 中文
+    per_resolve = {}   # ordinal -> 解析详情
     for o in ordinals:
         zh = override_zh.get(o, f"抓奸 {o - 298}")
         el = blocks[o]
-        tag, raw, aid = P22.extract_entry_anim_id(el)
-        if aid is not None:
-            key_str = "story_animations." + str(aid)
-            hk = P22.fnv32(key_str)
-            L.append(f"  [{o}] animation_id={aid} (tag={tag}, raw={raw!r})  key={key_str!r}  "
-                     f"fnv32=0x{hk:08X}  [route=XML]")
-            rows.append({"ordinal": o, "animation_id": aid, "key_str": key_str,
-                         "fnv32": f"0x{hk:08X}", "zh": zh, "status": "KEY", "tag": tag,
-                         "raw": raw})
-        else:
-            # route B: 反向文本匹配 (所有扫描到的 STBL)
-            probe = f"Caught Cheating {o - 298}"
-            match_keys = set()
-            for k, lst in by_key.items():
-                for _iid, txt, _pn in lst:
-                    if txt == probe:
-                        match_keys.add(k)
-            if match_keys:
-                hk = sorted(match_keys)[0]
-                L.append(f"  [{o}] !! XML 无 animation_id (tag={tag}, raw={raw!r}); 反向文本 "
-                         f"{probe!r} -> STBL key 0x{hk:08X}  [route=TEXT-FALLBACK]")
-                rows.append({"ordinal": o, "animation_id": "", "key_str": "(反向文本)",
-                             "fnv32": f"0x{hk:08X}", "zh": zh, "status": "TEXT-FALLBACK",
-                             "tag": tag or "", "raw": raw or ""})
-            else:
-                L.append(f"  [{o}] !! 无 animation_id 且反向文本 {probe!r} 未命中 -> 无法确定 key")
-                rows.append({"ordinal": o, "animation_id": "", "key_str": "", "fnv32": "",
-                             "zh": zh, "status": "NO_KEY", "tag": tag or "", "raw": raw or ""})
-                continue
+        dtag, dtext = extract_entry_display_name(el)
+        if not dtext:
+            L.append(f"  [{o}] !! 无 {DISPLAY_FIELD} 节点 (tag={dtag!r}) -> 无英文文本; 无法反查")
+            rows.append({"ordinal": o, "text": "", "key": "", "instance": "",
+                         "source": "", "zh": zh, "status": "NO_TEXT"})
+            continue
+        # 全 STBL 扫描: 找 text == dtext 的精确匹配
+        match_keys = set()
+        hit_inst = None
+        hit_src = None
+        for k, lst in by_key.items():
+            for _iid, txt, _pn in lst:
+                if txt == dtext:
+                    match_keys.add(k)
+                    hit_inst = _iid
+                    hit_src = _pn
+        if not match_keys:
+            L.append(f"  [{o}] text={dtext!r} 无 STBL 命中 -> 无法确定 key")
+            rows.append({"ordinal": o, "text": dtext, "key": "", "instance": "",
+                         "source": "", "zh": zh, "status": "NO_HIT"})
+            continue
+        hk = sorted(match_keys)[0]
         overrides[hk] = zh
+        L.append(f"  [{o}]")
+        L.append(f"    text={dtext}")
+        L.append(f"    key=0x{hk:08X}")
+        L.append(f"    stbl_instance=0x{hit_inst:016X}" if hit_inst is not None else "    stbl_instance=(未记)")
+        L.append(f"    source={hit_src}" if hit_src else "    source=(未记)")
+        rows.append({"ordinal": o, "text": dtext, "key": f"0x{hk:08X}",
+                     "instance": f"0x{hit_inst:016X}" if hit_inst is not None else "",
+                     "source": hit_src or "", "zh": zh, "status": "OK"})
+        per_resolve[o] = {"key": hk, "inst": hit_inst}
     L.append("")
 
-    # ---- 硬门: 全部 ordinal 必须解析出 key ----
+    # ---- 硬门: 8/8 ordinal 必须找到英文文本并反查到 key ----
     expected = len(ordinals)
     resolved = len(overrides)
     L.append(f"  目标 ordinal={expected}  已解析 key={resolved}")
     if resolved < expected:
         L.append("  !! 存在未解析 ordinal; fail-closed, 不写出覆盖包。")
-        missing = [r["ordinal"] for r in rows if not r["fnv32"]]
+        missing = [r["ordinal"] for r in rows if not r["key"]]
         L.append(f"    未解析 ordinal: {missing}")
         txt = "\n".join(L)
         (out_dir / "p23_story_stbl_override.txt").write_text(txt, encoding="utf-8")
@@ -192,8 +212,8 @@ def main():
         return 6
     L.append("")
 
-    # ---- 2) 按 FNV key 反查真实 STBL TGI (不跟随源 package STBL) ----
-    L.append("=== 2) 按 FNV key 反查真实 STBL TGI (落点表) ===")
+    # ---- 2) 把反查到的实例聚合成真实目标 STBL TGI ----
+    L.append("=== 2) 按 key 反查真实 STBL instance (落点表) ===")
     per_inst_hit = {}   # instance -> 命中的覆盖 key 数
     per_inst_txt = {}   # instance -> 该 key 的原文
     L.append(f"  {len(overrides)} 个覆盖 key 的反查结果:")
@@ -316,6 +336,14 @@ def main():
             if not missing and not wrong:
                 L.append("  => 所有覆盖 key 存在且文本正确 (中文)")
     L.append("")
+    # === TARGET STBL ===
+    L.append("=== TARGET STBL ===")
+    L.append(f"instance={t_inst:#018x}")
+    L.append(f"type=0x{t_type:08X} group=0x{t_group:08X}")
+    L.append(f"source={target_pkg_name}")
+    L.append(f"resolved={len(overrides)}/{len(ordinals)}")
+    L.append("生成 package。")
+    L.append("")
 
     # ---- 7) 结论 ----
     L.append("=== 7) 结论 ===")
@@ -332,11 +360,10 @@ def main():
     (out_dir / "p23_story_stbl_override.txt").write_text(txt, encoding="utf-8")
     with open(out_dir / "p23_story_stbl_override.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["ordinal", "animation_id", "key_str", "fnv32", "zh", "src_text", "status"])
+        w.writerow(["ordinal", "text", "key", "stbl_instance", "source", "zh", "status"])
         for r in rows:
-            src_text = per_inst_txt.get(target_inst, {}).get(int(r["fnv32"], 16), "") if r["fnv32"] else ""
-            w.writerow([r["ordinal"], r["animation_id"], r["key_str"], r["fnv32"],
-                        r["zh"], src_text, r["status"]])
+            w.writerow([r["ordinal"], r["text"], r["key"], r["instance"],
+                        r["source"], r["zh"], r["status"]])
     print(txt)
     print(f"OUT_PKG={out_pkg}")
     print(f"OUT_TXT={out_dir/'p23_story_stbl_override.txt'}")
