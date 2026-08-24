@@ -224,6 +224,76 @@ def ints_near(data: bytes, off: int, radius: int = 48):
     return out[:8]
 
 
+def hexdump_line(data: bytes, base: int, off: int, width: int = 16):
+    """打印从 off 开始 width 字节的 hexdump 行 (含绝对偏移 + ascii)。返回下一个未打印偏移。"""
+    chunk = data[off:off + width]
+    hexs = " ".join(f"{b:02x}" for b in chunk)
+    asci = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+    print(f"    {base:>8}  {hexs:<47}  |{asci}|")
+    return off + width
+
+
+def _is_plausible_oid(v: int) -> str:
+    """启发式标注整数值大概是什么类型 (非结论)。"""
+    if v == 0:
+        return "zero/null"
+    if 1 <= v <= 100000:
+        return "small (index/count?)"
+    if v & 0xFFFFFFFF00000000 == 0:
+        return "u32-like"
+    if v >> 40 == 0 and v >= (1 << 32):
+        return "mid u64 (instance?)"
+    if v >> 56 == 0:
+        return "48-bit instance/TGI?"
+    return "large u64 (hash/random?)"
+
+
+def binary_dump_around(data: bytes, off: int, term: str, radius: int = 64):
+    """输出搜索词命中位置的二进制结构: 对齐 hexdump + u32/u64 注解。只读。"""
+    s = max(0, off - radius)
+    e = min(len(data), off + len(term.encode("utf-8")) + radius)
+    print(f"    BINARY_STRUCTURE @offset={off} (围绕 {term!r}, ±{radius}):")
+    # 字符串终止方式探测
+    pre = data[max(0, off - 8):off]
+    if len(pre) >= 4 and pre[-4:-1] == b"\x00\x00\x00":
+        print(f"      string_kind: 长度前缀候选 (前 4 字节小端长度={struct.unpack_from('<I', data, off-4)[0] if off>=4 else '?'})")
+    elif off > 0 and data[off - 1] == 0:
+        print("      string_kind: 空字符串(NUL)列表候选 (前一字节为 NUL)")
+    # 前导字段 (off 之前 width 网格上的整数)
+    print(f"      -- 前方 48 字节整数注解 (网格对齐, 每 4B 读 u32/u64) --")
+    g = max(0, off - 48)
+    for i in range(g, off, 4):
+        if i + 4 > len(data):
+            break
+        u32 = struct.unpack_from("<I", data, i)[0]
+        u64 = struct.unpack_from("<Q", data, i)[0] if i + 8 <= len(data) else None
+        marks = []
+        if u64 is not None and u64 != u32:
+            marks.append(f"u64={u64} ({_is_plausible_oid(u64)})")
+        if u64 is None or u64 == u32:
+            marks.append(f"u32={u32} ({_is_plausible_oid(u32)})")
+        if u32 == 0 and (i + 8 <= len(data)) and struct.unpack_from("<Q", data, i)[0] != 0:
+            continue
+        print(f"      +{i - off:>4}  u32_le[{i:>8}]={u32:>12}  " + "  ".join(marks))
+    print(f"      -- hexdump --")
+    cur = s
+    while cur < e:
+        cur = hexdump_line(data, cur, cur)
+    # 后随字段 (字符串之后)
+    p = off + len(term.encode("utf-8"))
+    print(f"      -- 字符串之后 32 字节整数注解 --")
+    for i in range(p, min(p + 32, len(data) - 3), 4):
+        u32 = struct.unpack_from("<I", data, i)[0]
+        u64 = struct.unpack_from("<Q", data, i)[0] if i + 8 <= len(data) else None
+        marks = []
+        if u64 is not None and u64 != u32:
+            marks.append(f"u64={u64} ({_is_plausible_oid(u64)})")
+        if u64 is None or u64 == u32:
+            marks.append(f"u32={u32} ({_is_plausible_oid(u32)})")
+        if marks:
+            print(f"      +{i - p:>4}  u32_le[{i:>8}]={u32:>12}  " + "  ".join(marks))
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -234,7 +304,12 @@ def main():
                     help="要搜索的字符串 (可多次; 默认: You Belong To Me 1 / Go To Sleep TWO SIMS 1)")
     ap.add_argument("--field-census", action="store_true",
                     help="额外扫描字段名 (animation_raw_display_name/animation_stage_name/display/name/title/string/loc)")
-    ap.add_argument("--max-json-nodes", type=int, default=2000, help="JSON 容器扫描节点上限保护")
+    ap.add_argument("--binary-dump", action="store_true",
+                    help="对每个字节层命中输出附近二进制结构 (hexdump + u32/u64 注解 + 字符串终止探测)")
+    ap.add_argument("--anchor", default=None,
+                    help="候选锚点字符串 (如 PosePack clip) —— 输出其它命中相对它的偏移/距离")
+    ap.add_argument("--radius", type=int, default=64,
+                    help="--binary-dump 围绕半径 (默认 64)")
     a = ap.parse_args()
 
     p = Path(a.file)
@@ -244,6 +319,9 @@ def main():
     data = p.read_bytes()
 
     searches = a.search or ["You Belong To Me 1", "Go To Sleep TWO SIMS 1"]
+    # 若给了 --anchor 且没显式给 --search, 把 anchor 也纳入搜索以便定位
+    if a.anchor and a.anchor not in searches:
+        searches = list(searches) + [a.anchor]
     if a.field_census:
         searches += ["animation_raw_display_name", "animation_stage_name",
                      "display", "name", "title", "string", "loc"]
@@ -294,10 +372,16 @@ def main():
     print("3) 字符串搜索命中")
     print("=" * 70)
     total = 0
+    all_byte_offsets = {}  # term -> {enc: [offsets]}, 用于 anchor 关联
     for lname, ld in layers:
         hits, ctx = scan_bytes(ld, searches)
         if not hits:
             continue
+        # 记录该层的 offset 供 anchor 关联 (仅 utf-8)
+        acc = all_byte_offsets.setdefault(lname, {})
+        for (_t, enc, _o) in hits:
+            if enc == "utf-8":
+                acc.setdefault(_t, []).append(_o)
         unique_terms = sorted(set(t for t, _e, _o in hits))
         print(f"  --- 层 [{lname}] 命中 ---")
         print(f"      命中 {len(hits)} 处; 含搜索词: {unique_terms}")
@@ -305,9 +389,11 @@ def main():
             c = ctx[(term, enc, off)]
             print(f"    offset={off:>8}  enc={enc:8}  term={term!r}")
             print(f"      [.. {_ascii_ctx(c)} ..]")
-            ints = ints_near(ld, off)
-            if ints:
-                print(f"      附近 int (u32_le, 启发, 非结论): {ints}")
+            if a.binary_dump:
+                if enc == "utf-8":
+                    binary_dump_around(ld, off, term, radius=a.radius)
+                else:
+                    print("      (UTF-16LE 命中, 跳过二进制结构 dump)")
             total += 1
     if total == 0:
         print("  原始/解压字节层: 无命中")
@@ -341,6 +427,26 @@ def main():
             pass
         if longints:
             print(f"      结构内 8 字节长整数候选 (instance-like): {sorted(set(longints))[:12]}")
+
+    # 锚点关联: 其它命中相对 anchor 的距离 (同一字节层)
+    if a.anchor:
+        print()
+        print("=" * 70)
+        print(f"ANCHOR_RELATIVE: 相对锚点 {a.anchor!r} 的距离 (逐层, utf-8)")
+        print("=" * 70)
+        for lname, acc in all_byte_offsets.items():
+            anch = acc.get(a.anchor, [])
+            anchor_offset = anch[0] if anch else None
+            print(f"  --- 层 [{lname}] ---")
+            if anchor_offset is None:
+                print(f"      锚点 {a.anchor!r} 未命中")
+                continue
+            print(f"      锚点首命中 offset={anchor_offset}")
+            for t in sorted(acc, key=lambda x: acc[x][0]):
+                if t == a.anchor:
+                    continue
+                for o in acc[t]:
+                    print(f"      {t!r:45} offset={o:>8}  相对锚点={o - anchor_offset:>+9}")
 
     print()
     print("ZERO_WRITE_TO_MODS=YES")
