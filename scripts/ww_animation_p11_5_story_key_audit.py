@@ -182,8 +182,8 @@ def main():
         for f in sorted(add_only):
             ords = by_field[f]
             o = a.ok[0]
-            p, v, is_kn, is_kv, t = ords.get(o, ("?", "?", False, False, ""))
-            L.append(f"  {f!r}  path={p}  value={v!r}  key形态值={is_kv}  TGI={t or '-'}")
+            p, v, is_kn, is_kv, t = ords.get(o, ("", "", False, False, ""))
+            L.append(f"  {f!r}  path={p or '—'}  value={v or '(缺失)'!r}  key形态值={is_kv}  TGI={t or '-'}")
     else:
         L.append("  (无 — 无 Addicted 独有 key 字段)")
     L.append("")
@@ -193,8 +193,8 @@ def main():
         for f in sorted(cc_only):
             ords = by_field[f]
             o = a.fail[0]
-            p, v, is_kn, is_kv, t = ords.get(o, ("?", "?", False, False, ""))
-            L.append(f"  {f!r}  path={p}  value={v!r}  key形态值={is_kv}  TGI={t or '-'}")
+            p, v, is_kn, is_kv, t = ords.get(o, ("", "", False, False, ""))
+            L.append(f"  {f!r}  path={p or '—'}  value={v or '(缺失)'!r}  key形态值={is_kv}  TGI={t or '-'}")
     else:
         L.append("  (无 — 无 Caught Cheating 独有 key 字段)")
     L.append("")
@@ -225,8 +225,10 @@ def main():
 
     # --- 4) 结构 root-path 全对比 (字段路径差异, 含非 key 字段) ---
     L.append("=== 4) 全字段 root path 对比 (结构差异) ===")
-    # 用 node_dump 重建完整字段路径集 (所有 T/E/I 节点, 含 n)
-    full_paths = {}
+    # 完整字段路径集: 每个 field 为所有分析 ordinal 都建条目(缺失用空占位),
+    # 保证报告阶段 .get() 取不到时不抛 KeyError。
+    full_paths = {}   # n -> {ordinal -> (path, value)}
+    present_in = {}   # n -> set(ordinal) 真实出现(不含占位), 供独有字段判定
     for o in all_ords:
         root = blocks[o]
         paths = path_maps[o]
@@ -238,18 +240,23 @@ def main():
             v = (node.text or "").strip()
             p = node_root_path(root, node, paths)
             full_paths.setdefault(n, {})[o] = (p, v)
-    only_in_add = {n for n, d in full_paths.items() if set(d) & ok_set and not (set(d) & fail_set)}
-    only_in_cc = {n for n, d in full_paths.items() if set(d) & fail_set and not (set(d) & ok_set)}
+            present_in.setdefault(n, set()).add(o)
+    # 为每个见过的字段补齐所有 ordinal (缺失 -> 空占位), 杜绝 KeyError
+    for n in list(full_paths):
+        for o in all_ords:
+            full_paths[n].setdefault(o, ("", ""))
+    only_in_add = {n for n, s in present_in.items() if s & ok_set and not (s & fail_set)}
+    only_in_cc = {n for n, s in present_in.items() if s & fail_set and not (s & ok_set)}
     if only_in_add:
         L.append("  仅 Addicted 有的字段:")
         for n in sorted(only_in_add):
-            p, v = full_paths[n][a.ok[0]]
-            L.append(f"    {n!r} path={p} value={v!r}")
+            p, v = full_paths[n].get(a.ok[0], ("", ""))
+            L.append(f"    {n!r} path={p or '—'} value={v or '(缺失)'}")
     if only_in_cc:
         L.append("  仅 Caught Cheating 有的字段:")
         for n in sorted(only_in_cc):
-            p, v = full_paths[n][a.fail[0]]
-            L.append(f"    {n!r} path={p} value={v!r}")
+            p, v = full_paths[n].get(a.fail[0], ("", ""))
+            L.append(f"    {n!r} path={p or '—'} value={v or '(缺失)'}")
     if not only_in_add and not only_in_cc:
         L.append("  (无仅单系列字段 — 结构字段集合一致)")
     L.append("")
