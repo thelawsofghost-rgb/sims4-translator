@@ -83,33 +83,24 @@ def is_key_name(n):
     return any(f in nl for f in KEY_NAME_FRAG)
 
 
-_PARENT_OF = {}
+def build_path_map(root):
+    """一次遍历, 为 root 下所有节点计算 root-path 字符串与父子序号。
+    不依赖 list.index(cur), 遍历时直接记录 child index。
+    返回 {"node_id": "root[i][j]..."}。"""
+    paths = {id(root): "root"}
+    stack = [(root, "root")]
+    while stack:
+        el, el_path = stack.pop()
+        for idx, c in enumerate(el):
+            c_path = f"{el_path}[{idx}]"
+            paths[id(c)] = c_path
+            stack.append((c, c_path))
+    return paths
 
 
-def build_parent_map(root):
-    _PARENT_OF.clear()
-    _PARENT_OF[id(root)] = None
-    def walk(el, parent):
-        for c in el:
-            _PARENT_OF[id(c)] = parent
-            walk(c, el)
-    walk(root, root)
-
-
-def node_root_path(root, node):
-    """基于 _PARENT_OF 回溯路径; root 自身 -> 'root'。"""
-    if node is root:
-        return "root"
-    segs = []
-    cur = node
-    while cur is not root:
-        p = _PARENT_OF.get(id(cur))
-        if p is None:
-            break
-        idx = list(p).index(cur)
-        segs.append(idx)
-        cur = p
-    return "root[" + "][".join(str(x) for x in reversed(segs)) + "]"
+def node_root_path(root, node, paths):
+    """用 build_path_map 的结果取路径; 不再回溯/不再 list.index。"""
+    return paths.get(id(node), "root?")
 
 
 def main():
@@ -135,9 +126,10 @@ def main():
     if blocks is None:
         print(f"ERROR: {err}", file=sys.stderr); return 4
 
-    # 构建父子表 (node_root_path 依赖 _PARENT_OF)
+    # 构建每 ord 的 root-path 映射 (一次遍历带 index, 不依赖 list.index)
+    path_maps = {}
     for o, root in blocks.items():
-        build_parent_map(root)
+        path_maps[o] = build_path_map(root)
 
     ok_set, fail_set = set(a.ok), set(a.fail)
 
@@ -146,14 +138,14 @@ def main():
     key_rows = []
     for o in all_ords:
         root = blocks[o]
-        build_parent_map(root)
+        paths = path_maps[o]
         for node in root.iter():
             lt = node.tag.rsplit('}', 1)[-1] if isinstance(node.tag, str) else None
             if lt not in ("T", "E", "I"):
                 continue
             n = node.get("n") or ""
             v = (node.text or "").strip()
-            p = node_root_path(root, node)
+            p = node_root_path(root, node, paths)
             tgis = _p7.find_tgis(v)
             is_kn = is_key_name(n)
             is_kv = is_key_value(v) or bool(tgis)
@@ -237,14 +229,14 @@ def main():
     full_paths = {}
     for o in all_ords:
         root = blocks[o]
-        build_parent_map(root)
+        paths = path_maps[o]
         for node in root.iter():
             lt = node.tag.rsplit('}', 1)[-1] if isinstance(node.tag, str) else None
             if lt not in ("T", "E", "I"):
                 continue
             n = node.get("n") or ""
             v = (node.text or "").strip()
-            p = node_root_path(root, node)
+            p = node_root_path(root, node, paths)
             full_paths.setdefault(n, {})[o] = (p, v)
     only_in_add = {n for n, d in full_paths.items() if set(d) & ok_set and not (set(d) & fail_set)}
     only_in_cc = {n for n, d in full_paths.items() if set(d) & fail_set and not (set(d) & ok_set)}
