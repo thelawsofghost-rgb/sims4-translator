@@ -283,29 +283,48 @@ def run(src: Path, out_dir: Path, force: bool, ordinal: int, new_instance: int) 
         print(f"ERROR: 应仅 ordinal {ordinal} 变化; 实际={diff_idx} (fail-closed)", file=sys.stderr)
         return 3
 
-    # ---- 压缩 body (同源风格) ----
-    new_body_comp = wb.compress_like(body_orig, new_xml.encode("utf-8"))
-    new_body_raw = new_xml.encode("utf-8")
+    # ---- 压缩 body (严格同 SIDECAR_TESTC 的 proven-good 路径) ----
+    new_body = wb.compress_like(body_orig, new_xml.encode("utf-8"))
+    new_decomp_len = len(wb.decompress_maybe(new_body))
+    new_stored_len = len(new_body)
 
-    # ---- 组装 items: 其余条目全部源样 (TGI+body), 仅 WW XML 换 inst+body ----
+    # ---- WW XML 输出的 compression metadata: 严格复刻 SIDECAR_TESTC (proven-good),
+    #      唯一区别 = instance。
+    #      关键修复: read_entry_meta_raw 的 meta dict 没有 offset_high_bit/size_high_bit 键,
+    #      高位布尔在 offset_comp/size_comp; 之前 meta.get(...) 返回 None 致 build_package
+    #      回退 comp 推导 => 索引高位错乱 => Sims 4 无法启动。现在显式映射。
+    src_off_hi = int(ww_meta["offset_comp"])
+    src_sz_hi = int(ww_meta["size_comp"])
+    src_f8 = ww_meta["comp_type"]
+    item_meta = {
+        "comp_state": True,
+        "comp_type": src_f8,
+        "mem_size": new_decomp_len,
+        "offset_high_bit": src_off_hi,
+        "size_high_bit": src_sz_hi,
+    }
+    print(f"WW_XML_META src_off_hi={src_off_hi} src_sz_hi={src_sz_hi} comp_type={src_f8} "
+          f"body_compressed={wb._is_zlib(new_body)} new_stored_len={new_stored_len} mem_size={new_decomp_len}")
+
+    # ---- 组装 items: 全部条目源样 (TGI+body), 仅 WW XML 仅换 instance (body+meta 同 SIDECAR) ----
     items = []
-    other_meta_map = {}
     for idx_i, e in enumerate(idx.entries):
         meta = entries_meta[idx_i]
         t, g, inst = e.type_id, e.group_id, e.instance_id
         if (t, g, inst) == src_tgi:
-            # WW XML: 换 instance + 新 body; 保留源 comp metadata 风格
-            items.append((t, g, new_instance, new_body_comp, {
-                "comp_state": bool(meta.get("comp_type", 0)),
-                "comp_type": meta.get("comp_type", 0) or (0x5A42 if bool(meta.get("comp_type", 0)) else 0),
-                "mem_size": wb._decomp_len(new_body_comp),
-                "offset_high_bit": meta.get("offset_high_bit"),
-                "size_high_bit": meta.get("size_high_bit"),
-            }))
+            items.append((t, g, new_instance, new_body, item_meta))
         else:
             body = wb.read_body_raw(src, e)
-            items.append((t, g, inst, body, meta))
-    print(f"ITEM_COUNT={len(items)}  (源 {len(idx.entries)})")
+            # 其余 entry 保留源样: meta 需把 offset_raw/size_raw 的高位布尔映射为 high_bit 传给 build_package
+            other_meta = {
+                "comp_state": bool(meta["comp_type"]),
+                "comp_type": meta["comp_type"],
+                "mem_size": meta["mem_size"],
+                "offset_high_bit": int(meta["offset_comp"]),
+                "size_high_bit": int(meta["size_comp"]),
+            }
+            items.append((t, g, inst, body, other_meta))
+    print(f"ITEM_COUNT={len(items)}  (源 {len(idx.entries)}); 含其余条目 body 源样保留")
 
     # ---- 静态验证 (写前) ----
     print()
@@ -351,6 +370,33 @@ def run(src: Path, out_dir: Path, force: bool, ordinal: int, new_instance: int) 
             v4b = len(ww2) == 1 and ww2[0].instance_id == new_instance and n2 == len(idx.entries)
             print(f"  [V4b] sidecar 重读: 单WW_XML新inst={v4b}, entry数 {n2}==source {len(idx.entries)}")
             ok &= v4b
+
+        # V5: header_comp/版本与 source 一致; 非 WW 条目 TGI+高位元数据均保源 (防再次破坏索引)
+        probe_hc = wb.read_entry_meta_raw(probe)[2]
+        v5 = (probe_hc == hdr_comp)
+        _v52, _v53 = True, True
+        om = wb.read_entry_meta_raw(probe)[3]
+        if len(om) != len(entries_meta):
+            _v52 = False
+        else:
+            for mi, m in enumerate(entries_meta):
+                mo = om[mi]
+                if (m["type"], m["group"], m["inst"]) == src_tgi:
+                    # WW XML: instance 变为 new; 高位/类型保留 source
+                    if not (mo["inst"] == new_instance and
+                            int(mo["offset_comp"]) == int(m["offset_comp"]) and
+                            int(mo["size_comp"]) == int(m["size_comp"]) and
+                            mo["comp_type"] == m["comp_type"]):
+                        _v52 = False
+                else:
+                    if not (mo["type"] == m["type"] and mo["group"] == m["group"] and
+                            mo["inst"] == m["inst"] and
+                            int(mo["offset_comp"]) == int(m["offset_comp"]) and
+                            int(mo["size_comp"]) == int(m["size_comp"]) and
+                            mo["comp_type"] == m["comp_type"]):
+                        _v53 = False
+        print(f"  [V5] header_comp/版式保源={v5}  WW_XML_高位保源={_v52}  非WW条目TGI+高位保源={_v53}")
+        ok &= v5 and _v52 and _v53
 
     print(f"  STATIC_PASS={ok}")
     if not ok:
