@@ -206,6 +206,32 @@ def _fv(fields, key):
     return fields.get(key)
 
 
+def _all_text_nodes(block_text):
+    """只读：递归 dump entry XML 内【所有文本节点】的路径 + n + text(去空白)。
+    用于寻找 WW UI 实际读取的 display 字段(如 stage 内嵌套字段)。返回 [(path, n, text), ...]。"""
+    out = []
+    try:
+        root = ET.fromstring(block_text.encode("utf-8"))
+    except Exception as e:
+        return [("<parse_error>", None, str(e))]
+
+    def walk(el, path):
+        tag = el.tag.rsplit("}", 1)[-1]
+        p = f"{path}/{tag}"
+        n = el.get("n")
+        lab = p + (f"[@n={n!r}]" if n is not None else "")
+        # 元素自身文本(若有非空)
+        txt = (el.text or "").strip()
+        if txt:
+            out.append((lab, n, txt))
+        # 递归子元素 (含 tail 已并入各自元素 text)
+        for sub in el:
+            walk(sub, p)
+
+    walk(root, "")
+    return out
+
+
 def _split_list(raw):
     return [x.strip() for x in (raw or "").split(",") if x.strip()] if raw else []
 
@@ -413,6 +439,11 @@ def main():
             print("  DIRECT_CHILDREN_DUMP:")
             for (tg, n, tx) in extra:
                 print(f"    tag={tg} n={n} text={tx}")
+        # 递归全部文本节点 (含 stages/嵌套 display 候选; 用于定位 WW UI 实际读的字段)
+        tnode = _all_text_nodes(blocks[ord0][0])
+        print("  ALL_TEXT_NODES_DUMP (path | n | text):")
+        for (path, n, tx) in tnode:
+            print(f"    {path}  n={n!r}  text={tx!r}")
         print()
 
     # ============ 2. HUMAN_LOCATOR + 3. GAME_SEARCH_GUIDE + 4. USABILITY ============
