@@ -60,32 +60,37 @@ def _local(tag):
     return tag.rsplit('}', 1)[-1] if isinstance(tag, str) else None
 
 
-def _replace_4fields(block_text, zh, zh_clip):
-    """替换 clip_name + raw_display + stage + next_stages 内匹配文本。
-    返回 (old_display, old_clip, new_block, chain_hits, chain_misses, err)。
-    clip_name 必须是唯一 <T> 节点, 否则 fail-closed。"""
+def _replace_4fields(block_text, zh, zh_clip_list):
+    """替换 clip_name(可多 <T> 列表) + raw_display + stage + next_stages 内匹配文本。
+    返回 (old_display, old_clips, new_block, chain_hits, chain_misses, err)。
+    clip_name: 收集 entry 内所有 <T n=animation_clip_name> 节点(按文档序), 位置 i 的值
+      替换为 zh_clip_list[i]; 要求 数量/顺序 不变 (缺名/多余/类型异常 -> fail-closed)。"""
     root = ET.fromstring(block_text)
     err = []
     replaced_display = None
-    replaced_clip = None
-    clip_cnt = 0
+    old_clips = []   # (源值) 列表
+    clip_nodes = []  # 实际匹配到的 T 节点对象, 按文档序
     for el in root.iter():
         n = el.get("n")
         if not n:
             continue
         lt = _local(el.tag)
-        if n == CLIP_FIELD and lt == "T":
-            clip_cnt += 1
-            if replaced_clip is None:
-                replaced_clip = (el.text or "").strip()
-            el.text = zh_clip
+        if n == CLIP_FIELD:
+            if lt == "T":
+                clip_nodes.append(el)
+            else:
+                err.append(f"animation_clip_name 节点类型={lt} (需全部 T)")
         elif n == DISPLAY_FIELD and lt == "T":
             replaced_display = replaced_display or (el.text or "").strip()
             el.text = zh
         elif n == STAGE_FIELD and lt == "T":
             el.text = zh
-    if clip_cnt != 1:
-        err.append(f"animation_clip_name 节点数={clip_cnt} (需恰1)")
+    old_clips = [(el.text or "").strip() for el in clip_nodes]
+    if len(clip_nodes) != len(zh_clip_list):
+        err.append(f"animation_clip_name 节点数={len(clip_nodes)} != 提供新名数={len(zh_clip_list)}")
+    else:
+        for el, nv in zip(clip_nodes, zh_clip_list):
+            el.text = nv
     chain_hits, chain_misses = [], []
     for el in root.iter():
         n = el.get("n")
@@ -100,7 +105,7 @@ def _replace_4fields(block_text, zh, zh_clip):
             elif v:
                 chain_misses.append(v)
     new_block = ET.tostring(root, encoding="unicode")
-    return replaced_display, replaced_clip, new_block, chain_hits, chain_misses, err
+    return replaced_display, old_clips, new_block, chain_hits, chain_misses, err
 
 
 def main():
@@ -218,24 +223,31 @@ def main():
         ordinal = int(ord_s)
         zh = tr_map[ord_s]
         sc = src_clips.get(ordinal, [])
+        # 只取 T 节点(按文档序), 保持数量/顺序
+        src_clip_vals = [t for tag, t in sc if tag == "T"]
+        non_t = [tag for tag, t in sc if tag != "T"]
         if not sc:
             print(f"ERROR: ordinal {ordinal} 无 animation_clip_name (M4 需该字段)", file=sys.stderr); return 3
-        if len(sc) != 1 or sc[0][0] != "T":
-            print(f"ERROR: ordinal {ordinal} clip_name 形态异常 {sc} (需单一<T>)", file=sys.stderr); return 3
-        src_clip = sc[0][1]
-        # 唯一新 clip name
+        if non_t:
+            print(f"ERROR: ordinal {ordinal} clip_name 存在非 T 节点 {non_t} (需全 T)", file=sys.stderr); return 3
+        if not src_clip_vals:
+            print(f"ERROR: ordinal {ordinal} clip_name T 节点为空", file=sys.stderr); return 3
+        # 唯一新 clip list: 逐 T 节点独立派生 (数量/顺序不变)
         if a.clip_template:
-            zh_clip = a.clip_template
+            if len(src_clip_vals) != 1:
+                print(f"ERROR: --clip-template 仅适用于单 clip (当前 {len(src_clip_vals)} 个); 请用 --clip-suffix 派生", file=sys.stderr); return 3
+            zh_clip_list = [a.clip_template]
         else:
-            zh_clip = f"{src_clip}_{a.clip_suffix}"
-        old_disp, old_clip, new_block, hits, miss, repl_err = _replace_4fields(entry_blocks[ordinal], zh, zh_clip)
+            zh_clip_list = [f"{v}_{a.clip_suffix}" for v in src_clip_vals]
+        # 唯一性前提: 每个新名都必须 != 对应源名
+        if any(nv == ov for nv, ov in zip(zh_clip_list, src_clip_vals)):
+            print(f"ERROR: ordinal {ordinal} 有 新clip==源clip (无唯一性) 源自 {src_clip_vals!r}", file=sys.stderr); return 3
+        old_disp, old_clips, new_block, hits, miss, repl_err = \
+            _replace_4fields(entry_blocks[ordinal], zh, zh_clip_list)
         if old_disp is None:
             print(f"ERROR: ordinal {ordinal} raw_display 定位失败", file=sys.stderr); return 3
         if repl_err:
             print(f"ERROR: ordinal {ordinal} {repl_err} (fail-closed)", file=sys.stderr); return 3
-        # 新 clip 必须 != 源 clip (唯一性前提)
-        if zh_clip == src_clip:
-            print(f"ERROR: ordinal {ordinal} 新clip==源clip ({zh_clip!r}), 无唯一性 (fail-closed)", file=sys.stderr); return 3
         if miss and not a.allow_unmapped_chain:
             print(f"ERROR: ordinal {ordinal} next_stages 未映射 {miss} (fail-closed)", file=sys.stderr); return 3
         inst = _m3._gen_inst(src_inst, ordinal, zh, 0)
@@ -254,10 +266,13 @@ def main():
                 new_inner.append(b)
         new_xml = xml_text_orig[:inner_start] + "".join(new_inner) + xml_text_orig[inner_end:]
         new_body = wb.compress_like(body_orig, new_xml.encode("utf-8"))
-        jobs.append({"ordinal": ordinal, "zh": zh, "clip": zh_clip, "old_clip": src_clip,
+        jobs.append({"ordinal": ordinal, "zh": zh, "clip": zh_clip_list,
+                     "old_clip": src_clip_vals,
                      "inst": inst, "body": new_body, "new_xml": new_xml})
-        print(f"  job ordinal={ordinal}  display={old_disp!r}->{zh!r}  "
-              f"clip={src_clip!r}->{zh_clip!r}  inst=0x{inst:016X}")
+        print(f"  job ordinal={ordinal}  display={old_disp!r}->{zh!r}")
+        for ov, nv in zip(src_clip_vals, zh_clip_list):
+            print(f"        clip {ov!r} -> {nv!r}")
+        print(f"        inst=0x{inst:016X}")
 
     # ---- 组装 (与 M3 同骨架) ----
     items = [(src_tgi[0], src_tgi[1], src_tgi[2], body_orig,
@@ -332,8 +347,13 @@ def main():
     print(f"OUT_PATH={out_path}")
     print(f"OUT_SHA256={wb.sha256(out_path)}")
     print(f"NEW_INSTANCES={[hex(j['inst']) for j in jobs]}")
-    clip_map_str = ', '.join(f"{j['ordinal']}: " + j["old_clip"] + "->" + j["clip"] for j in jobs)
-    print(f"CLIP_MAP = {clip_map_str}")
+    clip_lines = []
+    for j in jobs:
+        pairs = ', '.join(f"{ov!r}->{nv!r}" for ov, nv in zip(j["old_clip"], j["clip"]))
+        clip_lines.append(f"  ord{j['ordinal']}: {pairs}")
+    print("CLIP_MAP (ordinal: 源clip->新clip, 数量/顺序不变):")
+    for l in clip_lines:
+        print(l)
     print("M4_BATCH PASS=YES")
     print("ZERO_WRITE_TO_MODS=YES (仅本 out-dir 产物)")
     return 0
