@@ -159,27 +159,47 @@ def main():
     if ww_first is None:
         print(f"ERROR: {werr}", file=sys.stderr); return 3
 
-    found = {}
-    for tn in TARGET_NAMES:
-        hits = [p for p in d.rglob(tn)]
-        if hits:
-            found[tn] = hits[0]
+    # 目标 .pyc 藏于 .ts4script (zip) 内部成员 —— 复用 P14 的 zip 扫描思路
+    found = {}      # tn -> {ts4script: Path, member: str, data: bytes}
+    import zipfile as _zipfile
+    for sp in [p for p in d.rglob("*.ts4script") if p.is_file()]:
+        try:
+            with _zipfile.ZipFile(sp) as z:
+                for name in z.namelist():
+                    base = Path(name).name
+                    if base in TARGET_NAMES and base not in found:
+                        found[base] = {
+                            "ts4script": sp, "member": name,
+                            "data": z.read(name),
+                        }
+        except Exception:
+            pass
     if not found:
-        print("ERROR: 未找到 animations_loader.pyc / animation_instance.pyc", file=sys.stderr)
+        print("ERROR: 未找到 animations_loader.pyc / animation_instance.pyc (含 .ts4script zip 内成员)",
+              file=sys.stderr)
         return 5
 
     L = []
     L.append("=== P15 WW 核心 .pyc 深挖 (只读, xdis 引擎) ===")
     L.append(f"源 = {src.name}")
-    L.append(f"目标 pyc = {[str(found[t]) for t in found]}")
+    L.append("=== FOUND TARGET PYC ===")
+    for tn in TARGET_NAMES:
+        if tn in found:
+            f = found[tn]
+            L.append(f"ts4script: {f['ts4script']}")
+            L.append(f"member:    {f['member']}")
+            L.append(f"pyc size:  {len(f['data'])}")
+            L.append("")
     L.append(f"关键字 = {KEY}")
     L.append("")
 
     csv_rows = []
     all_funcs = {}   # tn -> list(func dict)
-    for tn, path in found.items():
+    import io as _io
+    from xdis.load import load_module_from_file_object
+    for tn, f in found.items():
         try:
-            res = load_module(str(path))
+            res = load_module_from_file_object(_io.BytesIO(f["data"]), filename=tn)
         except Exception as ex:
             L.append(f"### {tn}  xdis 解析失败: {ex}")
             csv_rows.append([tn, "(xdis失败)", str(ex)])
@@ -237,9 +257,10 @@ def main():
     L.append("=== 重点回答 ===")
     # STORY 分支: 找分支重建结果里 == 'STORY' / == 'story'
     story_branches = []
-    for tn, path in found.items():
+    for tn, f in found.items():
         try:
-            res = load_module(str(path)); ver, co = res[0], res[3]
+            res = load_module_from_file_object(_io.BytesIO(f["data"]), filename=tn)
+            ver, co = res[0], res[3]
             opc = get_opc(ver)
         except Exception:
             continue
@@ -257,9 +278,10 @@ def main():
         L.append("   未在字节码中直接找到 == 'STORY' 比较 (可能用常量/枚举/别名)")
     # display_name 赋值点 (STORE_FAST/STORE_ATTR display_name)
     dn_assign = []
-    for tn, path in found.items():
+    for tn, f in found.items():
         try:
-            res = load_module(str(path)); ver, co = res[0], res[3]
+            res = load_module_from_file_object(_io.BytesIO(f["data"]), filename=tn)
+            ver, co = res[0], res[3]
             opc = get_opc(ver)
         except Exception:
             continue
