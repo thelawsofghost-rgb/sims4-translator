@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+TEST C READ-ONLY WW CACHE FORENSIC ANALYZER (只读, 不修改任何文件)。
+
+目标: 分析 WickedWhims 导出缓存文件 (如 animations_data_cache.ww),
+回答 Dorothy 四问:
+  1. 文件格式识别  (header / magic / 是否压缩或序列化)
+  2. 搜索字符串:    "You Belong To Me 1" / "Go To Sleep TWO SIMS 1"
+  3. 若存在:       输出附近结构 (offset / key / value / 是否关联 TGI/instance/animation ID)
+  4. 搜索字段名:    animation_raw_display_name / animation_stage_name / display /
+                    name / title / string / loc
+
+设计原则:
+  - 完全只读: 只 open('rb').read() 输入文件, 绝不写任何文件。
+  - 格式无关探测: 先探测 magic/压缩/序列化, 再按探测结果解码。
+  - 安全反序列化: 对 pickle 只用受限 unpickler (find_class 一律拒绝 → 绝不执行任意代码,
+    只重建内置 dict/list/tuple/str/int/float/bool/None)。
+  - 多编码/多容器扫描: 原始字节 + zlib 解压 + gzip 解压 + JSON 解析 + 受限 pickle 重建,
+    各层都做字符串定位 (UTF-8 / UTF-16LE)。
+  - 输出全部命中及其周围上下文 + 可能的 TGI/instance/int 关联, 不猜测语义。
+
+用法:
+  python scripts/ww_cache_forensic.py --file "Desktop/animations_data_cache.ww"
+  python scripts/ww_cache_forensic.py --file X.ww --search "You Belong To Me 1" --search "Go To Sleep TWO SIMS 1"
+  python scripts/ww_cache_forensic.py --file X.ww --field-census  (字段名搜索见内置需求 #4)
+
+ZERO_WRITE_TO_MODS=YES
+"""
+
+import argparse
+import gzip
+import io
+import json
+import pickle
+import re
+import struct
+import sys
+import zlib
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# 1. 文件格式识别
+# ---------------------------------------------------------------------------
+_KNOWN_MAGICS = {
+    b"\x80": "python pickle (PICKLE, 可能多协议; 低字节决定协议版本)",
+    b"\x1f\x8b": "gzip (GZIP)",
+    b"\x78\x9c": "zlib (ZLIB, deflate)",
+    b"\x78\x01": "zlib (ZLIB, no/low compression)",
+    b"\x78\xda": "zlib (ZLIB, best compression)",
+    b"{": "JSON object开头",
+    b"[": "JSON array开头",
+    b"\x89PNG": "PNG image (非动画缓存, 误选?)",
+    b"MZ": "PE/EXE (非数据)",
+}
+
+
+def identify_header(data: bytes) -> dict:
+    head = data[:32]
+    res = {
+        "size": len(data),
+        "head_hex": head.hex(),
+        "head_ascii": "".join(chr(b) if 32 <= b < 127 else "." for b in head),
+        "magic_hits": [],
+    }
+    for magic, desc in _KNOWN_MAGICS.items():
+        if data.startswith(magic):
+            res["magic_hits"].append(f"{magic!r} = {desc}")
+    # compression euristics
+    res["is_zlib"] = _is_zlib(data)
+    res["is_gzip"] = data[:2] == b"\x1f\x8b"
+    # pickle protocol sniff (protocol in byte1 for \x80 + proto)
+    if data[:1] == b"\x80" and len(data) >= 2:
+        res["pickle_proto"] = data[1]
+    return res
+
+
+def _is_zlib(b: bytes) -> bool:
+    return len(b) >= 2 and b[0] == 0x78 and b[1] in (0x01, 0x5E, 0x9C, 0xDA)
+
+
+def try_decompress(data: bytes):
+    """尝试 zlib / gzip 解压。返回 (label, payload) 或 (label, None)。"""
+    if _is_zlib(data):
+        try:
+            return "zlib", zlib.decompress(data)
+        except Exception:
+            pass
+    if data[:2] == b"\x1f\x8b":
+        try:
+            return "gzip", gzip.decompress(data)
+        except Exception:
+            pass
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# 安全反序列化 (绝不执行任意代码)
+# ---------------------------------------------------------------------------
+class _SafeUnpickler(pickle.Unpickler):
+    """受限 unpickler: 只允许内置容器/标量, 拒绝任何 class/import (防任意代码执行)。"""
+
+    def find_class(self, module, name):
+        raise pickle.UnpicklingError(f"blocked import {module}.{name}")
+
+
+class _RestrictedBuilder:
+    """从受限 unpickler 得到的张量中递归收集 dict/list/标量, 供字符串扫描。"""
+
+    def __init__(self):
+        self.containers = []
+
+    def walk(self, obj):
+        self.containers.append(obj)
+
+
+def safe_unpickle(data: bytes):
+    """受限反序列化。返回 (obj, err)。仅重建内置容器/标量。"""
+    try:
+        u = _SafeUnpickler(io.BytesIO(data))
+        # 部分文件是裸 pickle, 也可能是多层嵌套 dump; 保护超长/异常
+        u.load()  # noqa: B301 已受限
+        return u, None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+# ---------------------------------------------------------------------------
+# 字符串/字段扫描
+# ---------------------------------------------------------------------------
+def byte_find_all(hay: bytes, needle: bytes):
+    """返回 needle 在 hay 中的所有 byte offset (重叠不计, 逐个平移)。"""
+    out = []
+    start = 0
+    while True:
+        i = hay.find(needle, start)
+        if i < 0:
+            break
+        out.append(i)
+        start = i + 1
+    return out
+
+
+def scan_bytes(data: bytes, searches):
+    """在给定字节串中, 对每个搜索词(及 UTF-16LE 变体)找全部 offset + 上下文。"""
+    hits = []
+    for term in searches:
+        tb = term.encode("utf-8")
+        t16 = term.encode("utf-16-le")
+        for off in byte_find_all(data, tb):
+            hits.append((term, "utf-8", off))
+        for off in byte_find_all(data, t16):
+            hits.append((term, "utf-16le", off))
+    # 上下文: offset-60 .. offset+120 (ASCII 可视化)
+    ctx = {}
+    for term, enc, off in hits:
+        s = max(0, off - 60)
+        e = min(len(data), off + len(term.encode("utf-8" if enc == "utf-8" else "utf-16-le")) + 90)
+        ctx[(term, enc, off)] = data[s:e]
+    return hits, ctx
+
+
+def _ascii_ctx(b: bytes) -> str:
+    s = "".join(chr(x) if 32 <= x < 127 else "." for x in b)
+    return s
+
+
+def scan_json(obj, searches, path="$"):
+    """递归 JSON, 收集含搜索词的字符串节点及其 key/path。返回 list[dict]。"""
+    found = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, str):
+                for t in searches:
+                    if t in v:
+                        found.append({"path": f"{path}.{k}", "key": k, "value": v})
+            else:
+                found.extend(scan_json(v, searches, f"{path}.{k}"))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            if isinstance(v, str):
+                for t in searches:
+                    if t in v:
+                        found.append({"path": f"{path}[{i}]", "key": i, "value": v})
+            else:
+                found.extend(scan_json(v, searches, f"{path}[{i}]"))
+    return found
+
+
+def scan_container(obj, searches, path="$", key=None, depth=0):
+    """通用递归: dict/list/tuple/str 容器, 找含搜索词的字符串, 输出 path/key/value。"""
+    found = []
+    if depth > 64:
+        return found
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, str):
+                for t in searches:
+                    if t in v:
+                        found.append({"path": f"{path}.{k}", "key": k, "value": v})
+            else:
+                found.extend(scan_container(v, searches, f"{path}.{k}", key=k, depth=depth + 1))
+    elif isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            if isinstance(v, str):
+                for t in searches:
+                    if t in v:
+                        found.append({"path": f"{path}[{i}]", "key": i, "value": v})
+            else:
+                found.extend(scan_container(v, searches, f"{path}[{i}]", depth=depth + 1))
+    return found
+
+
+def ints_near(data: bytes, off: int, radius: int = 48):
+    """在 off 附近找可能的 4/8 字节整数 (TGI/instance/id 候选)。只读启发。"""
+    out = []
+    s = max(0, off - radius)
+    e = min(len(data), off + radius)
+    window = data[s:e]
+    for i in range(0, len(window) - 3, 1):
+        u32 = struct.unpack_from("<I", window, i)[0]
+        if u32 > 1000 and u32 != 0xFFFFFFFF:
+            out.append(("u32_le", s + i, u32))
+    return out[:8]
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--file", required=True, help="WW 缓存文件路径 (只读)")
+    ap.add_argument("--search", action="append", default=[],
+                    help="要搜索的字符串 (可多次; 默认: You Belong To Me 1 / Go To Sleep TWO SIMS 1)")
+    ap.add_argument("--field-census", action="store_true",
+                    help="额外扫描字段名 (animation_raw_display_name/animation_stage_name/display/name/title/string/loc)")
+    ap.add_argument("--max-json-nodes", type=int, default=2000, help="JSON 容器扫描节点上限保护")
+    a = ap.parse_args()
+
+    p = Path(a.file)
+    if not p.is_file():
+        print("ERROR: 文件不存在", file=sys.stderr)
+        return 2
+    data = p.read_bytes()
+
+    searches = a.search or ["You Belong To Me 1", "Go To Sleep TWO SIMS 1"]
+    if a.field_census:
+        searches += ["animation_raw_display_name", "animation_stage_name",
+                     "display", "name", "title", "string", "loc"]
+
+    print("=" * 70)
+    print("1) 文件格式识别")
+    print("=" * 70)
+    hdr = identify_header(data)
+    for k, v in hdr.items():
+        print(f"  {k}: {v!r}")
+
+    print()
+    print("=" * 70)
+    print("2) 内容/解压/序列化分层探测")
+    print("=" * 70)
+    layers = [("raw", data)]
+    label, payload = try_decompress(data)
+    if payload:
+        layers.append((label, payload))
+        print(f"  检测到 {label} 解压, 解压后 {len(payload)} 字节")
+    else:
+        print("  未检测到 zlib/gzip 整体压缩")
+
+    # JSON?
+    json_obj = None
+    for lname, ld in layers:
+        t = ld.lstrip()
+        if t[:1] in (b"{", b"["):
+            try:
+                json_obj = json.loads(ld)
+                print(f"  [{lname}] 可解析为 JSON (顶层类型={type(json_obj).__name__})")
+                break
+            except Exception as e:
+                print(f"  [{lname}] JSON 解析失败: {e}")
+
+    # pickle? (受限, 只重建内置容器/标量)
+    pickle_obj = None
+    if hdr.get("pickle_proto") is not None or data[:1] in (b"}", b")", b"\x80"):
+        obj, err = safe_unpickle(data)
+        if err is None:
+            pickle_obj = obj
+            print("  可安全(受限)反序列化为 pickle 对象")
+        else:
+            print(f"  受限 pickle 解包失败 (可能非纯 pickle 或包含自定义类): {err}")
+
+    print()
+    print("=" * 70)
+    print("3) 字符串搜索命中")
+    print("=" * 70)
+    total = 0
+    for lname, ld in layers:
+        hits, ctx = scan_bytes(ld, searches)
+        if not hits:
+            continue
+        unique_terms = sorted(set(t for t, _e, _o in hits))
+        print(f"  --- 层 [{lname}] 命中 ---")
+        print(f"      命中 {len(hits)} 处; 含搜索词: {unique_terms}")
+        for (term, enc, off) in sorted(hits, key=lambda x: x[2]):
+            c = ctx[(term, enc, off)]
+            print(f"    offset={off:>8}  enc={enc:8}  term={term!r}")
+            print(f"      [.. {_ascii_ctx(c)} ..]")
+            ints = ints_near(ld, off)
+            if ints:
+                print(f"      附近 int (u32_le, 启发, 非结论): {ints}")
+            total += 1
+    if total == 0:
+        print("  原始/解压字节层: 无命中")
+
+    # JSON/pickle 结构化层
+    for lname, obj in (("json", json_obj), ("pickle", pickle_obj)):
+        if obj is None:
+            continue
+        f = scan_container(obj, searches)
+        if not f:
+            continue
+        print(f"  --- 结构化层 [{lname}] 含搜索词的字符串节点 ---")
+        for it in f:
+            print(f"    path={it['path']}  key={it['key']!r}  value={it['value']!r}")
+        # 附: 该层是否有 TGI/instance 类似长整数 (启发)
+        longints = []
+
+        def _li(o):
+            if isinstance(o, int) and o > (1 << 32) and o < (1 << 64):
+                longints.append(o)
+            elif isinstance(o, dict):
+                for _k, v in o.items():
+                    _li(v)
+            elif isinstance(o, (list, tuple)):
+                for v in o:
+                    _li(v)
+
+        try:
+            _li(obj)
+        except RecursionError:
+            pass
+        if longints:
+            print(f"      结构内 8 字节长整数候选 (instance-like): {sorted(set(longints))[:12]}")
+
+    print()
+    print("ZERO_WRITE_TO_MODS=YES")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
