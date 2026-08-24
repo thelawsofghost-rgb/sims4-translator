@@ -90,6 +90,9 @@ def main():
     ordinals = P22.parse_ordinals(a.ordinals)
 
     # 1) 从源提取 WW_ANIM_XML entry + STBL 资源
+    # P22 的 key 定位逻辑【直接复用】: ① 从 XML entry 提取 animation_id (forward),
+    # ② 若 forward 失败, 用 P22 反向文本匹配 (Caught Cheating N -> STBL key) 兜底。
+    # 不做任何重新从 XML root 搜寻 animation_id 的额外实现 —— 完全等同 P22。
     ww_first, werr = P22.P7.load_xml(src)
     if ww_first is None:
         print(f"ERROR: {werr}", file=sys.stderr); return 3
@@ -103,11 +106,14 @@ def main():
     stbl_entries = [e for e in idx.entries if e.type_id == STBL]
     if not stbl_entries:
         print("ERROR: 源包内无 STBL 资源 (0x220557DA)", file=sys.stderr); return 9
-    # 取第一个 STBL (通常 WW 只有一张 Story 本地化表); 若多张, 取含目标 key 的那张
     src_stbl_e = stbl_entries[0]
     backend = get_backend("readonly").open(str(src))
     src_body = backend.read_small_resource(src_stbl_e) or b""
     src_map = P22.parse_stbl(src_body)
+    # 反向: 源 STBL 文本 -> key 集合 (P22 section-4 兜底)
+    key_by_text = {}
+    for k, txt in src_map.items():
+        key_by_text.setdefault(txt, set()).add(k)
 
     major, minor, header_comp, src_meta = wb.read_entry_meta_raw(src)
     meta_map = {(m["type"], m["group"], m["inst"]): m for m in src_meta}
@@ -127,28 +133,56 @@ def main():
         if "=" in t:
             o_s, zh = t.split("=", 1)
             override_zh[int(o_s)] = zh
-    L.append("=== 1) 提取 animation_id + 计算 STBL key + 中文映射 ===")
+    L.append("=== 1) 提取 animation_id + 计算 STBL key + 中文映射 (复用 P22 逻辑) ===")
     L.append("")
     rows = []
     overrides = {}     # key -> 中文
     for o in ordinals:
+        zh = override_zh.get(o, f"抓奸 {o - 298}")
+        # route A (forward): P22.extract_entry_anim_id —— 同一函数, 同一 blocks
         el = blocks[o]
         tag, raw, aid = P22.extract_entry_anim_id(el)
-        if aid is None:
-            L.append(f"  [{o}] !! 无 animation_id 节点 (tag={tag}, raw={raw!r}) -> 跳过")
-            rows.append({"ordinal": o, "animation_id": "", "key_str": "", "fnv32": "",
-                         "zh": "", "src_text": "", "status": "NO_ANIM_ID"})
+        if aid is not None:
+            key_str = "story_animations." + str(aid)
+            hk = P22.fnv32(key_str)
+            src_text = src_map.get(hk, "(源STBL无此key)")
+            overrides[hk] = zh
+            L.append(f"  [{o}] animation_id={aid} (tag={tag}, raw={raw!r})  key={key_str!r}  "
+                     f"fnv32=0x{hk:08X}  源文本={src_text!r} -> 中文={zh!r}   [route=XML]")
+            rows.append({"ordinal": o, "animation_id": aid, "key_str": key_str,
+                         "fnv32": f"0x{hk:08X}", "zh": zh, "src_text": src_text,
+                         "status": "OK"})
             continue
-        key_str = "story_animations." + str(aid)
-        hk = P22.fnv32(key_str)
-        zh = override_zh.get(o, f"抓奸 {o - 298}")
-        src_text = src_map.get(hk, "(源STBL无此key)")
-        overrides[hk] = zh
-        L.append(f"  [{o}] animation_id={aid}  key={key_str!r}  fnv32=0x{hk:08X}  "
-                 f"源文本={src_text!r}  ->  中文={zh!r}")
-        rows.append({"ordinal": o, "animation_id": aid, "key_str": key_str,
-                     "fnv32": f"0x{hk:08X}", "zh": zh, "src_text": src_text,
-                     "status": "OK"})
+        # route B (reverse fallback): P22 section-4 —— 按原显示文本找 key
+        probe = f"Caught Cheating {o - 298}"
+        shs = sorted(key_by_text.get(probe, set()))
+        if shs:
+            hk = shs[0]
+            overrides[hk] = zh
+            L.append(f"  [{o}] !! XML 无 animation_id (tag={tag}, raw={raw!r}); 反向匹配 "
+                     f"{probe!r} -> STBL key 0x{hk:08X}  [route=TEXT-FALLBACK]")
+            rows.append({"ordinal": o, "animation_id": "", "key_str": "(反向文本)",
+                         "fnv32": f"0x{hk:08X}", "zh": zh, "src_text": probe,
+                         "status": "TEXT-FALLBACK"})
+        else:
+            L.append(f"  [{o}] !! 无 animation_id 且反向文本 {probe!r} 未命中 -> 无法确定 key, 计入缺失")
+            rows.append({"ordinal": o, "animation_id": "", "key_str": "", "fnv32": "",
+                         "zh": zh, "src_text": "", "status": "NO_KEY"})
+    L.append("")
+
+    # 硬门: 必须解析出全部目标 ordinal 的 key, 否则 fail-closed (不静默跳过)
+    expected = len(ordinals)
+    resolved = len(overrides)
+    L.append(f"  目标 ordinal={expected}  已解析 key={resolved}")
+    if resolved < expected:
+        L.append("  !! 存在未解析 ordinal; fail-closed, 不写出覆盖包。")
+        missing = [r["ordinal"] for r in rows if not r["fnv32"]]
+        L.append(f"    未解析 ordinal: {missing}")
+        txt = "\n".join(L)
+        (out_dir / "p23_story_stbl_override.txt").write_text(txt, encoding="utf-8")
+        print(txt)
+        print("P23_STORY_OVERRIDE=PARTIAL_RESOLVE\n")
+        return 6
     L.append("")
 
     # 2) 合并覆盖: 保留源全部 key, 覆盖目标 key
@@ -158,7 +192,6 @@ def main():
         merged[k] = zh
     L.append(f"  源 keys={len(src_map)}  覆盖 keys={len(overrides)}  合并后 keys={len(merged)}")
     if src_map:
-        # 只展示与覆盖重叠的 key 变化 + 新增
         same = sum(1 for k, v in merged.items() if src_map.get(k) == v)
         L.append(f"  未变化 keys={same}  变化或新增 keys={len(merged) - same}")
     L.append("")
