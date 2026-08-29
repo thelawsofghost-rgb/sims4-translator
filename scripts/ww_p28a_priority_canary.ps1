@@ -87,7 +87,19 @@ if ($LASTEXITCODE -ne 0) { Fail "CFG_PROPOSE_FAIL(exit $LASTEXITCODE)" }
 $appendReq   = ($prop | Where-Object { $_ -like "APPEND_REQUIRED=*" }) -replace "APPEND_REQUIRED=",""
 $appendB64   = ($prop | Where-Object { $_ -like "APPEND_LINES=*" })    -replace "APPEND_LINES=",""
 $proposedPrio= ($prop | Where-Object { $_ -like "PROPOSED_PRIORITY=*" }) -replace "PROPOSED_PRIORITY=",""
+$srcEff      = ($prop | Where-Object { $_ -like "SOURCE_EFFECTIVE_PRIORITY=*" }) -replace "SOURCE_EFFECTIVE_PRIORITY=",""
+$ovrEff      = ($prop | Where-Object { $_ -like "P27_OVERRIDE_EFFECTIVE_PRIORITY=*" }) -replace "P27_OVERRIDE_EFFECTIVE_PRIORITY=",""
+$prioRel     = ($prop | Where-Object { $_ -like "PRIORITY_RELATION=*" }) -replace "PRIORITY_RELATION=",""
+
+# ---- fail-closed: 必须可证明 override > source 才允许任何写操作 ----
+# Sims4 precedence: 数值越大 priority 越高; 高者覆盖低者. 需 OVERRIDE_HIGHER.
+Write-Output "SOURCE_EFFECTIVE_PRIORITY=$srcEff"
+Write-Output "P27_OVERRIDE_EFFECTIVE_PRIORITY=$ovrEff"
+if ($prioRel -notlike "OVERRIDE_HIGHER*") {
+    Fail "OVERRIDE_PRIORITY_NOT_HIGHER: $prioRel (override must exceed source)"
+}
 if (-not $proposedPrio) { Fail "no proposed priority" }
+Write-Output "PRIORITY_RELATION=$prioRel"
 
 # ---------- 4. 备份 (不覆盖既有备份) ----------
 if (Test-Path -LiteralPath $CFG_BACKUP) {

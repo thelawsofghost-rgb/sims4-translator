@@ -12,30 +12,32 @@ ww_p28a_cfg_audit.py —— P28A 只读审计 Resource.cfg (Linux/沙箱可测, 
 对 Resource.cfg 解析:
   * 逐行读取 (UTF-8/ASCII 均可; 失败降级 latin-1 不影响 ASCII 关键字提取)
   * 识别 'Priority <int>' 行 (大小写不敏感), 其后 'PackedFile <pattern>' 归属当前 Priority
-  * 计算 min_priority (Sims4: 数值越小 = 优先级越高/越晚加载优先)
-  * 对给定相对路径, 用 1 段 '*' 与跨段 '**' 规则做 glob 匹配判读命中
+  * Sims4 precedence 语义: 数值越大 priority 越高, 高者覆盖低者
+  * 对给定相对路径, 用 1 段 '*' 与跨段 '**' 规则做 glob 匹配; 命中多规则取有效最高 priority
 
 输出 (ASCII, 除文件内容原样引用的路径/规则外):
   RESOURCE_CFG_EXISTS=YES|NO
   RESOURCE_CFG_SHA_BEFORE=<sha256>   (仅文件存在时)
-  PRIORITY_MIN=<int>
+  PRIORITY_MIN/MAX=<int>
   PRIORITY_COUNT=<int>
   RULE_COUNT=<int>
-  ROOT_PKG_COVERED=YES|NO        (root '*.package' 命中当前 root override)
-  SUBDIR_PKG_COVERED=YES|NO      (子目录规则命中 '2026.7.20/' 源包)
-  P27_DIR_COVERED=YES|NO         (已存在 P27_Overrides 规则?)
-  P27_EXISTING_PRIORITY=<int|0>
-  PROPOSED_PRIORITY=<int>        (要新增的高优先级, 必 < min; 若已有更低则复用)
+  ROOT_PKG_COVERED/SUBDIR_PKG_COVERED/P27_DIR_COVERED=YES|NO
+  SOURCE_EFFECTIVE_PRIORITY=<int>     (源包有效最高, 0=未命中)
+  P27_OVERRIDE_EFFECTIVE_PRIORITY=<int>(当前 P27 override 有效最高, 0=未命中)
+  OLD_ROOT_EFFECTIVE_PRIORITY=<int>   (旧 root 包有效最高)
+  PRIORITY_RELATION=OVERRIDE_HIGHER   (目标: override > source)
+  PROPOSED_PRIORITY=<int>             (新增专用规则 priority = 全局最高+margin)
   APPEND_REQUIRED=YES|NO
-  APPEND_LINES=<base64>          (待追加的原始 cfg 行, base64 编码, 防止换行/编码歧义)
+  APPEND_LINES=<base64>               (待追加的原始 cfg 行, base64)
   VERDICT=OK|FAIL
   REASON=<code>
 
 退出码:
-  0 = 可决策 (存在 && 可解析; VERDICT=OK 或已给出 APPEND_REQUIRED)
+  0 = 可决策 (VERDICT=OK, 且已给出 APPEND_REQUIRED)
   2 = cfg 不存在
   3 = 无任何 Priority 规则 (无法建立优先级依据, fail-closed)
-  4 = 无法读取
+  4 = 无法证明 OVERRIDE_PRIORITY_NOT_HIGHER (fail-closed, 绝不部署)
+  5 = 无法读取
 
 用法:
   python scripts\\ww_p28a_cfg_audit.py check  "<resource.cfg>" ["<root_override.abs>"] ["<subdir_src.abs>"]
@@ -47,7 +49,7 @@ import hashlib
 import os
 import re
 import sys
-from pathlib import PurePath, Path
+from pathlib import Path
 
 P27_DIR = "P27_Overrides"
 P27_PATTERN = "PackedFile P27_Overrides/*.package"
@@ -158,17 +160,26 @@ def main():
         print("REASON=NO_PRIORITY_RULES")
         return 3
     min_prio = min(prios)
+    max_prio = max(prios)
     print(f"PRIORITY_MIN={min_prio}")
+    print(f"PRIORITY_MAX={max_prio}")
     print(f"PRIORITY_COUNT={len(prios)}")
     print(f"RULE_COUNT={len(rules)}")
 
     # 判读轨迹: root override 相对 Mods 根 = 文件名 (在根, 无子目录)
-    root_rel = PurePath(root_abs).name if root_abs else ROOT_OVERRIDE
-    sub_rel = str(PurePath(sub_abs)) if sub_abs else f"{SUB_SOURCE_SEED}/{PurePath(sub_abs or 'WW_Nevely42_Animations.package').name}"
+    def base_name(p):
+        # 兼容 Windows '\\' 与 POSIX '/' 分隔的绝对路径, 取末段文件名
+        import ntpath
+        return ntpath.basename(p.replace("/", "\\")) if p else ""
 
+    root_rel = base_name(root_abs) if root_abs else ROOT_OVERRIDE
+    sub_rel = (sub_abs if sub_abs else f"{SUB_SOURCE_SEED}/WW_Nevely42_Animations.package").replace("\\", "/")
+
+
+    p27_override_rel = f"{P27_DIR}/{base_name(root_abs) if root_abs else ROOT_OVERRIDE}"
     root_cov, root_prio = classify(rules, root_rel)
     sub_cov, sub_prio = classify(rules, sub_rel)
-    p27_cov, p27_prio = classify(rules, f"{P27_DIR}/{PurePath(root_abs).name if root_abs else ROOT_OVERRIDE}")
+    p27_cov, p27_prio = classify(rules, p27_override_rel)
 
     print(f"ROOT_PKG_COVERED={'YES' if root_cov else 'NO'}")
     print(f"ROOT_PKG_PRIO={root_prio if root_cov else 0}")
@@ -178,27 +189,45 @@ def main():
 
     # 专门规则: 显式指向 P27_Overrides 的 PackedFile (非通用 glob 覆盖)
     dedicated_p27 = [r for r in rules if "P27_Overrides" in r["pattern"].replace("\\", "/")]
-    ded_p27_prio = min(r["prio"] for r in dedicated_p27) if dedicated_p27 else None
+    ded_p27_prio = max(r["prio"] for r in dedicated_p27) if dedicated_p27 else None
     print(f"P27_DIR_DEDICATED_RULE={'YES' if dedicated_p27 else 'NO'}")
     print(f"P27_DEDICATED_PRIORITY={ded_p27_prio if ded_p27_prio is not None else 0}")
 
-    # 决策: 需要新增高优先级规则吗?
-    #   原则: 不盲目追加/不制造无依据规则. 仅当尚无针对 P27_Overrides 的显式规则时新增,
-    #   且新 Priority 必须严格低于(数值更小于)当前所有规则的最小值 -> 明确最高优先级.
+    # ===================================================================
+    # Sims 4 precedence 语义: 数值越大 priority 越高; 高者覆盖低者.
+    # 对每一类包: 命中多个规则时取有效最高 priority (Sims4 实际 precedence).
+    # 目标必须可证明: P27_OVERRIDE_EFFECTIVE_PRIORITY > SOURCE_EFFECTIVE_PRIORITY
+    # ===================================================================
+    def eff(rules, rel):
+        vals = [r["prio"] for r in rules if glob_match(r["pattern"], rel)]
+        return max(vals) if vals else None
+
+    src_eff = eff(rules, sub_rel)            # 源包有效最高 priority
+    ovr_eff = eff(rules, p27_override_rel)   # P27 override 有效最高
+    root_eff = eff(rules, root_rel)          # 旧 root 包有效最高
+    print(f"SOURCE_EFFECTIVE_PRIORITY={src_eff if src_eff is not None else 0}")
+    print(f"P27_OVERRIDE_EFFECTIVE_PRIORITY={ovr_eff if ovr_eff is not None else 0}")
+    print(f"OLD_ROOT_EFFECTIVE_PRIORITY={root_eff if root_eff is not None else 0}")
+
+    # ---- 决策 ----
     append_required = False
-    if ded_p27_prio is not None and ded_p27_prio <= min_prio:
-        # 已存在专门且优先级不劣于全局最低 -> 复用, 不追加
-        proposed = ded_p27_prio
+    if ovr_eff is not None and ovr_eff > src_eff:
+        # 已存在可证明高于源包的 override 有效优先级 -> 复用, 不追加
+        proposed = ovr_eff
+        print("PRIORITY_RELATION=OVERRIDE_HIGHER")
         print("APPEND_REQUIRED=NO")
     else:
-        # 无专门规则, 或专门规则优先级不够高 -> 新增一条严格更优的规则
-        proposed = max(1, min_prio - 100)
-        if proposed >= min_prio or proposed < 1:
-            proposed = max(1, min_prio - 1)   # min>1 时取 min-1; min=1 时保持 1
+        # 无法证明 override > source -> 必须新增一条严格高于所有可能与源包竞争的 priority
+        #   取全局最高 + 裕量, 确保严格大于 source 及一切现有规则.
+        margin = 100
+        proposed = max_prio + margin
+        if not (proposed > src_eff):
+            # 极端: 若 still 不满足, fail-closed
+            print("VERDICT=FAIL")
+            print("REASON=OVERRIDE_PRIORITY_NOT_HIGHER")
+            return 4
         append_required = True
-        # 若已有专门规则但不够优, 提示 (不覆盖, 仍追加一条更优) — 不删原规则
-        if ded_p27_prio is not None:
-            print("NOTE=EXISTING_DEDICATED_P27_RULE_LOWER_THAN_MIN")
+        print(f"PRIORITY_RELATION=OVERRIDE_HIGHER (proposed {proposed} > source {src_eff})")
         print("APPEND_REQUIRED=YES")
 
     print(f"PROPOSED_PRIORITY={proposed}")
