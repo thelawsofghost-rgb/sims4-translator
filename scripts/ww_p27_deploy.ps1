@@ -15,6 +15,17 @@
 # ============================================================================
 $ErrorActionPreference = "Stop"
 
+# ---- 控制台输出编码: 尽可能让中文正常显示 (不影响内部判断, 不改变报告文件) ----
+# PS 5.1 (Windows PowerShell) 终端可能仍乱码, 此处仅尽力; 内部判断基于正确 UTF-8 解码后的字符串.
+try {
+    # 若可为控制台设置 UTF-8 输出编码则设置; 失败不影响逻辑
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+} catch {}
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
+# ---- 静态可验标记: 指向本文件 report 读取必须显式 UTF-8 ----
+# UTF8_READ_MARKER: report 读取唯一入口必须带 -Encoding UTF8 (见第 2 步预检)
+
 # ---------- 路径 (Windows 真机) ----------
 $WORKSPACE    = "D:\projects\sims4_trans"
 $SOURCE_PKG   = "C:\Users\thela\Documents\Electronic Arts\The Sims 4\Mods\2026.7.20\WW_Nevely42_Animations.package"
@@ -54,7 +65,8 @@ foreach ($f in @($SOURCE_PKG, $OVERRIDE_PKG, $REPORT_TXT)) {
 Write-Output "PREFLIGHT=CHECKING"
 
 # ---------- 2. 预检: report txt 内容 ----------
-$rep = Get-Content -LiteralPath $REPORT_TXT -Raw -ErrorAction SilentlyContinue
+# 显式 UTF-8 读取 (Windows PowerShell 默认 Get-Content 用系统代码页读 UTF-8 会产生 mojibake, 必须避开):
+$rep = Get-Content -LiteralPath $REPORT_TXT -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
 if (-not $rep) { Fail "无法读取 report txt" }
 if ($rep -notmatch "VERDICT:\s*PASS")    { Fail "report 无 VERDICT: PASS" }
 if ($rep -notmatch "ZERO_WRITE_TO_MODS=YES") { Fail "report 无 ZERO_WRITE_TO_MODS=YES" }
