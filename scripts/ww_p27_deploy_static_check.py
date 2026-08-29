@@ -28,6 +28,12 @@ REPORT_CHECK = HERE / "ww_p27_report_check.py"
 # 中文安全字面量 (出现在安全判断里就必须拒绝)
 CN_LITERALS = ["抓奸", "已替换校验"]
 
+# P28A PS1 待检文件
+P28_PS1 = [
+    HERE / "ww_p28a_priority_canary.ps1",
+    HERE / "ww_p28a_priority_rollback.ps1",
+]
+
 
 def chk_report_utf8():
     if not REPORT_CHECK.is_file():
@@ -65,11 +71,29 @@ def chk_ps1_calls_validators():
     return True, "ps1 双重 validator 调用: OK"
 
 
+def chk_p28a_ascii():
+    """P28A ps1: 全 ASCII (去注释后不含中文安全字面量) + 调用 cfg_audit."""
+    for f in P28_PS1:
+        if not f.is_file():
+            return False, f"missing {f.name}"
+        t = f.read_text(encoding="utf-8")
+        code_only = "\n".join(ln for ln in t.splitlines() if not ln.strip().startswith("#"))
+        hits = [w for w in CN_LITERALS if w in code_only]
+        if hits:
+            return False, f"{f.name} 代码内含中文安全字面量: {hits}"
+    # canary 必须调用 cfg_audit
+    c = (HERE / "ww_p28a_priority_canary.ps1").read_text(encoding="utf-8")
+    if "ww_p28a_cfg_audit.py" not in c:
+        return False, "canary 未调用 ww_p28a_cfg_audit.py"
+    return True, "P28A ps1 全 ASCII + 调用 cfg_audit: OK"
+
+
 def main():
     checks = [
         ("A. report_check UTF-8", chk_report_utf8),
         ("B. ps1 无中文安全字面量", chk_ps1_no_cn_safety),
         ("C. ps1 双重 validator", chk_ps1_calls_validators),
+        ("D. P28A ps1 全 ASCII + cfg_audit", chk_p28a_ascii),
     ]
     all_ok = True
     for name, fn in checks:
