@@ -35,13 +35,18 @@ New-Item -ItemType Directory -Path $TMP_DIR -Force | Out-Null
 
 # ---------- 运行 Python 的健壮封装 ----------
 # 返回: $code(exit) , $stdoutLines(array) , $stderrText(string)
+# 注意: 参数名必须用 $PyArgs 而非 $Args —— $args 是 PowerShell 自动变量(大小写不敏感),
+#       名为 $Args 的参数绑定会失效, 导致 @PyArgs 为空、Python 收不到 CLI 参数.
 function Run-Python {
-    param([string]$Script, [string[]]$Args)
+    param(
+        [string]$Script,
+        [string[]]$PyArgs
+    )
     $stderrFile = Join-Path $TMP_DIR "py_err.txt"
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        $stdout = & python $Script @Args 2> $stderrFile
+        $stdout = & python $Script @PyArgs 2> $stderrFile
         $code = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prevEAP
@@ -90,25 +95,25 @@ foreach ($f in @($OVERRIDE_PKG, $REPORT_TXT, $SOURCE_PKG)) {
 if (-not (Test-Path -LiteralPath $RESOURCE_CFG)) { Fail "Resource.cfg missing: $RESOURCE_CFG" }
 
 # ---------- 1. 阶段1 (只读审计): 通过 P27 双重验证 ----------
-$r = Run-Python $REPORT_CHECK @($REPORT_TXT)
+$r = Run-Python -Script $REPORT_CHECK -PyArgs @($REPORT_TXT)
 if ($r[0] -ne 0) { Write-Output "PY_STDERR=$($r[2])"; Fail "REPORT_CHECK_FAIL(exit $($r[0]))" }
 Write-Output (($r[1] | Where-Object { $_ -like "REPORT_CHECK=*" }) -join '')
 $repLine = $r[1] | Where-Object { $_ -like "INSTANCE=*0x43F3438A94EDEB2B*" }
 if (-not $repLine) { Fail "report instance not real" }
 Write-Output "P27_REPORT_CHECK=PASS"
 
-$r = Run-Python $TGI_CHECK @($OVERRIDE_PKG)
+$r = Run-Python -Script $TGI_CHECK -PyArgs @($OVERRIDE_PKG)
 if ($r[0] -ne 0) { Write-Output "PY_STDERR=$($r[2])"; Fail "TGI_CHECK_FAIL(exit $($r[0]))" }
 Write-Output "P27_TGI_CHECK=PASS"
 
 # ---------- 2. 阶段1 (只读审计): Resource.cfg 判读 ----------
 Write-Output "--- RESOURCE_CFG AUDIT (read-only) ---"
-$aud = Run-Python $CFG_AUDIT @("check", $RESOURCE_CFG, $OLD_ROOT_OVERRIDE, $SOURCE_PKG)
+$aud = Run-Python -Script $CFG_AUDIT -PyArgs @("check", $RESOURCE_CFG, $OLD_ROOT_OVERRIDE, $SOURCE_PKG)
 if ($aud[0] -ne 0) { Write-Output "PY_STDERR=$($aud[2])"; Fail "CFG_AUDIT_FAIL(exit $($aud[0]))" }
 $aud[1] | ForEach-Object { Write-Output $_ }
 
 # ---------- 3. 阶段2 决策 (propose) ----------
-$pr = Run-Python $CFG_AUDIT @("propose", $RESOURCE_CFG, $OLD_ROOT_OVERRIDE, $SOURCE_PKG)
+$pr = Run-Python -Script $CFG_AUDIT -PyArgs @("propose", $RESOURCE_CFG, $OLD_ROOT_OVERRIDE, $SOURCE_PKG)
 if ($pr[0] -ne 0) { Write-Output "PY_STDERR=$($pr[2])"; Fail "CFG_PROPOSE_FAIL(exit $($pr[0]))" }
 $prop = $pr[1]
 $appendReq   = ($prop | Where-Object { $_ -like "APPEND_REQUIRED=*" }) -replace "APPEND_REQUIRED=",""

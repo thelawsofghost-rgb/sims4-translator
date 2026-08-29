@@ -91,14 +91,16 @@ def chk_p28a_ascii():
 def chk_p28a_native_stderr():
     """E) P28A canary 必须用 Run-Python 封装所有 native 调用, 且 stderr 重定向到文件;
     禁止旧的 PS5.1 '& python ... 2>&1' (EAP=Stop 下触发 NativeCommandError 吞 traceback).
-    F) 必须命令 Run-Python 存在且用 '2> $stderrFile' 捕获 stderr."""
+    F) 必须命令 Run-Python 存在且用 '2> $stderrFile' 捕获 stderr.
+    H) 禁止 '"$($Args)/@Args' collision: PowerShell 的 '$"args"' 自动变量大小写不敏感,
+       param 名为 '$"Args"' 会绑定失效导致 Python 收不到 CLI 参数. 必须用 $"PyArgs"/@PyArgs.
+    I) 所有调用必须显式命名 -Script / -PyArgs; 每个调用参数数量符合各 CLI schema."""
     p = HERE / "ww_p28a_priority_canary.ps1"
     if not p.is_file():
         return False, f"missing {p.name}"
     t = p.read_text(encoding="utf-8")
     code = "\n".join(ln for ln in t.splitlines() if not ln.strip().startswith("#"))
     # 所有 & python 调用都必须出现在 Run-Python 函数体内 (仅 1 处定义)
-    n_raw = code.count("& python")
     n_runpy = code.count("Run-Python ")
     if n_runpy < 4:
         return False, f"canary native 调用未全部走 Run-Python (found Run-Python x{n_runpy})"
@@ -110,7 +112,60 @@ def chk_p28a_native_stderr():
     # 禁止残留 '2>&1' 直接 native 合并 (PS5.1 风险)
     if "2>&1" in code:
         return False, "canary 残留 '2>&1' native stderr 合并 (PS5.1 NativeCommandError 风险)"
-    return True, "E/F: native 走 Run-Python + stderr 落盘 + 无 2>&1: OK"
+    # H) 禁止 $Args/@Args collision
+    if "$Args" in code or "@Args" in code:
+        return False, "canary 使用 $Args/@Args —— 与 PowerShell 自动变量 $args 冲突, Python 收不到参数"
+    # 必须使用 $PyArgs / @PyArgs
+    if "$PyArgs" not in code or "@PyArgs" not in code:
+        return False, "canary 未使用 $PyArgs/@PyArgs 传递 Python 参数"
+    # I) 显式命名调用; 且没有裸位置调用 "Run-Python <script> <args>"
+    for pat in ['Run-Python  "', 'Run-Python $', 'Run-Python \'']:
+        if pat in code:
+            return False, f"canary 存在非命名位置调用: {pat.strip()!r} (要求 -Script -PyArgs 显式命名)"
+    # 验证 4 个调用点参数基元数量 (仅做可读性检查, 精确数量以各 CLI schema 为准)
+    need = {
+        "$REPORT_CHECK": 1,
+        "$TGI_CHECK": 1,
+    }
+    # cfg audit 调用含 mode + 3 路径 = 4 参数
+    ok_calls = all(l.startswith("Run-Python -Script") for l in code.splitlines() if l.strip().startswith("Run-Python"))
+    if not ok_calls:
+        return False, "存在未显式命名的 Run-Python 调用"
+    return True, "E/F/H/I: native 走 Run-Python + stderr 落盘 + 无 $Args/@Args (用 $PyArgs) + 显式命名: OK"
+
+
+def chk_p28a_argv_counts():
+    """J) 校验每个 Run-Python 调用点的 -PyArgs 元素数量, 严格匹配各 Python CLI schema.
+    report_check=1, tgi_check=1, cfg_audit check/propose=4 (mode + cfg + root + sub)."""
+    p = HERE / "ww_p28a_priority_canary.ps1"
+    if not p.is_file():
+        return False, f"missing {p.name}"
+    t = p.read_text(encoding="utf-8")
+    import re
+    # 解析每行: Run-Python -Script <VAR> -PyArgs @( a, b, ... )
+    pat = re.compile(r"Run-Python\s+-Script\s+(\$\w+)\s+-PyArgs\s+@\(([^)]*)\)")
+    # 变量映射到脚本名
+    var_map = {"$REPORT_CHECK": "report_check", "$TGI_CHECK": "tgi_check", "$CFG_AUDIT": "cfg_audit"}
+    expected = {"report_check": {1}, "tgi_check": {1}, "cfg_audit": {4}}  # cfg_audit check/propose 均 4
+    calls = pat.findall(t)
+    if len(calls) != 4:
+        return False, f"应发现 4 个 Run-Python 调用, 实际 {len(calls)}"
+    for var, inner in calls:
+        if var not in var_map:
+            return False, f"未知脚本变量 {var}"
+        name = var_map[var]
+        # 纯位置参数计数: 忽略 $ 变量与引号, 按顶层逗号分割
+        items = re.split(r",", inner)
+        count = sum(1 for it in items if it.strip())
+        # "check"/"propose" 是字符串字面量也算 1 个
+        if count not in expected[name]:
+            return False, f"{name} 调用参数数量 {count} 不符合 schema {sorted(expected[name])}: {inner.strip()}"
+    # cfg_audit 两个调用必须一个是 check 一个是 propose
+    if t.count('-Script $CFG_AUDIT -PyArgs @("check"') != 1:
+        return False, "cfg_audit 缺 check 调用"
+    if t.count('-Script $CFG_AUDIT -PyArgs @("propose"') != 1:
+        return False, "cfg_audit 缺 propose 调用"
+    return True, "J: 各调用点 argv 数量符合 CLI schema (report=1, tgi=1, cfg=4 check+propose): OK"
 
 
 def chk_p28a_audit_defensive():
@@ -136,7 +191,8 @@ def main():
         ("B. ps1 无中文安全字面量", chk_ps1_no_cn_safety),
         ("C. ps1 双重 validator", chk_ps1_calls_validators),
         ("D. P28A ps1 全 ASCII + cfg_audit", chk_p28a_ascii),
-        ("E. native 走 Run-Python + stderr 落盘", chk_p28a_native_stderr),
+        ("E/H/I. native Run-Python + $PyArgs + 显式命名", chk_p28a_native_stderr),
+        ("J. argv 数量符合 CLI schema", chk_p28a_argv_counts),
         ("G. cfg_audit glob 防御 + 递归有界", chk_p28a_audit_defensive),
     ]
     all_ok = True
