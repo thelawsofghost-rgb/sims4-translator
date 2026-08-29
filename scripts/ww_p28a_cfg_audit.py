@@ -142,12 +142,19 @@ def classify(rules, rel_path):
 
 def main():
     if len(sys.argv) < 3:
-        print("usage: ww_p28a_cfg_audit.py check|propose <resource.cfg> [root_override_abs] [subdir_src_abs]")
+        print("usage: ww_p28a_cfg_audit.py check|propose <resource.cfg> [root_override_abs] [subdir_src_abs] [--p27-dir P28B_Overrides]")
         return 2
     mode = sys.argv[1].lower()
     cfg = Path(sys.argv[2])
     root_abs = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else None
     sub_abs = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else None
+    # 可选覆盖 override 目录名 (默认 P27_Overrides; P28B 传入 P28B_Overrides 复用同一审计决策)
+    p27_dir = P27_DIR
+    if "--p27-dir" in sys.argv:
+        _i = sys.argv.index("--p27-dir")
+        if len(sys.argv) > _i + 1 and sys.argv[_i + 1]:
+            p27_dir = sys.argv[_i + 1]
+    _P27_DIR = p27_dir
 
     if not cfg.is_file():
         print("RESOURCE_CFG_EXISTS=NO")
@@ -214,7 +221,7 @@ def main():
     sub_rel = rel_to_base(sub_abs, mods_root) if (sub_abs and mods_root) else None
     if sub_rel is None:
         sub_rel = (sub_abs if sub_abs else f"{SUB_SOURCE_SEED}/WW_Nevely42_Animations.package").replace("\\", "/")
-    p27_override_rel = f"{P27_DIR}/{base_name(root_abs) if root_abs else ROOT_OVERRIDE}"
+    p27_override_rel = f"{_P27_DIR}/{base_name(root_abs) if root_abs else ROOT_OVERRIDE}"
 
     # ---- 诊断输出 (read-only) ----
     print(f"MODS_ROOT={mods_root or ''}")
@@ -233,7 +240,7 @@ def main():
     print(f"P27_DIR_COVERED={'YES' if p27_cov else 'NO'} (generic glob)")
 
     # 专门规则: 显式指向 P27_Overrides 的 PackedFile (非通用 glob 覆盖)
-    dedicated_p27 = [r for r in rules if "P27_Overrides" in r["pattern"].replace("\\", "/")]
+    dedicated_p27 = [r for r in rules if _P27_DIR in r["pattern"].replace("\\", "/")]
     ded_p27_prio = max(r["prio"] for r in dedicated_p27) if dedicated_p27 else None
     print(f"P27_DIR_DEDICATED_RULE={'YES' if dedicated_p27 else 'NO'}")
     print(f"P27_DEDICATED_PRIORITY={ded_p27_prio if ded_p27_prio is not None else 0}")
@@ -302,7 +309,7 @@ def main():
     print(f"PROPOSED_PRIORITY={proposed}")
 
     # 待追加行 (base64, 避免编码/换行歧义) —— 始终给出, ps1 仅在 APPEND_REQUIRED=YES 时追加
-    lines_txt = f"Priority {proposed}\nPackedFile {P27_DIR}/*.package\n"
+    lines_txt = f"Priority {proposed}\nPackedFile {_P27_DIR}/*.package\n"
     enc = base64.b64encode(lines_txt.encode("utf-8")).decode("ascii")
     print(f"APPEND_LINES={enc}")
 
