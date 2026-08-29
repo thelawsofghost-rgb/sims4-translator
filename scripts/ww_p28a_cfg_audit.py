@@ -130,11 +130,12 @@ def _seg(pat, s):
 
 
 def classify(rules, rel_path):
-    """返回 (covered:bool, prio:int|None) — 命中规则的最低 prio(数值最小=最强)."""
+    """返回 (covered:bool, prio:int|None) — 命中规则的有效最高 priority (数值大=高优先).
+    仅用于判读信息输出; 决策主路径使用 eff()."""
     best = None
     for r in rules:
         if glob_match(r["pattern"], rel_path):
-            if best is None or r["prio"] < best:
+            if best is None or r["prio"] > best:
                 best = r["prio"]
     return (best is not None, best)
 
@@ -177,17 +178,50 @@ def main():
     print(f"PRIORITY_COUNT={len(prios)}")
     print(f"RULE_COUNT={len(rules)}")
 
-    # 判读轨迹: root override 相对 Mods 根 = 文件名 (在根, 无子目录)
+    # 判读轨迹: 包相对 Mods 根 (Resource.cfg.parent) 的 POSIX 风格路径.
+    # 关键: source 是真实存在文件, 其 relative 必须从 cfg.parent 可靠计算, 不能用完整绝对路径
+    #      (否则匹配不到 '2026.7.20/*.package' 之类的规则 → src_eff=None).
     def base_name(p):
-        # 兼容 Windows '\\' 与 POSIX '/' 分隔的绝对路径, 取末段文件名
         import ntpath
         return ntpath.basename(p.replace("/", "\\")) if p else ""
 
+    def to_posix(p):
+        if not p:
+            return ""
+        s = p.replace("\\", "/")
+        m = re.match(r"^[A-Za-z]:/(.*)$", s)  # 去 drive letter
+        if m:
+            s = "/" + m.group(1)
+        return re.sub(r"^/+", "", s)
+
+    def rel_to_base(full_abs, base_abs):
+        """full_abs 相对 base_abs 的 POSIX 相对路径; 大小写不敏感; 不在其下则 None."""
+        def segs(p):
+            s = [x for x in to_posix(p).split("/") if x not in ("", ".")]
+            return s, [x.lower() for x in s]
+        fs, fl = segs(full_abs)
+        bs, bl = segs(base_abs)
+        if not bs or len(fs) < len(bs):
+            return None
+        for a, b in zip(fl, bl):
+            if a != b:
+                return None
+        return "/".join(fs[len(bs):]) or None
+
+    mods_root = str(cfg.parent) if cfg.parent else None
     root_rel = base_name(root_abs) if root_abs else ROOT_OVERRIDE
-    sub_rel = (sub_abs if sub_abs else f"{SUB_SOURCE_SEED}/WW_Nevely42_Animations.package").replace("\\", "/")
-
-
+    # source 相对路径: 优先从 cfg.parent 计算; 否则退回 seed 相对路径 (测试/无法确定根时).
+    sub_rel = rel_to_base(sub_abs, mods_root) if (sub_abs and mods_root) else None
+    if sub_rel is None:
+        sub_rel = (sub_abs if sub_abs else f"{SUB_SOURCE_SEED}/WW_Nevely42_Animations.package").replace("\\", "/")
     p27_override_rel = f"{P27_DIR}/{base_name(root_abs) if root_abs else ROOT_OVERRIDE}"
+
+    # ---- 诊断输出 (read-only) ----
+    print(f"MODS_ROOT={mods_root or ''}")
+    print(f"SOURCE_FULL_PATH={sub_abs or ''}")
+    print(f"SOURCE_REL_PATH={sub_rel}")
+    print(f"OLD_ROOT_REL_PATH={root_rel}")
+    print(f"P27_TARGET_REL_PATH={p27_override_rel} (virtual, 文件可不存在)")
     root_cov, root_prio = classify(rules, root_rel)
     sub_cov, sub_prio = classify(rules, sub_rel)
     p27_cov, p27_prio = classify(rules, p27_override_rel)
@@ -214,11 +248,34 @@ def main():
         return max(vals) if vals else None
 
     src_eff = eff(rules, sub_rel)            # 源包有效最高 priority
-    ovr_eff = eff(rules, p27_override_rel)   # P27 override 有效最高
+    ovr_eff = eff(rules, p27_override_rel)   # P27 override 有效最高 (虚拟目标)
     root_eff = eff(rules, root_rel)          # 旧 root 包有效最高
-    print(f"SOURCE_EFFECTIVE_PRIORITY={src_eff if src_eff is not None else 0}")
-    print(f"P27_OVERRIDE_EFFECTIVE_PRIORITY={ovr_eff if ovr_eff is not None else 0}")
-    print(f"OLD_ROOT_EFFECTIVE_PRIORITY={root_eff if root_eff is not None else 0}")
+
+    # ---- fail-closed 守卫: 任何 priority 未解析都不能参与比较 (绝不 int>None) ----
+    if src_eff is None:
+        # 源包是真实存在的文件, 必应命中至少一条规则; 未解析 = 审计/规则异常, 拒绝部署.
+        print("SOURCE_EFFECTIVE_PRIORITY=UNRESOLVED")
+        print("P27_OVERRIDE_EFFECTIVE_PRIORITY=UNRESOLVED")
+        print("OLD_ROOT_EFFECTIVE_PRIORITY=UNRESOLVED")
+        print("VERDICT=FAIL")
+        print("REASON=SOURCE_PRIORITY_UNRESOLVED")
+        return 4
+
+    print(f"SOURCE_EFFECTIVE_PRIORITY={src_eff}")
+    print(f"P27_OVERRIDE_EFFECTIVE_PRIORITY={ovr_eff if ovr_eff is not None else 'UNRESOLVED'}")
+    print(f"OLD_ROOT_EFFECTIVE_PRIORITY={root_eff if root_eff is not None else 'UNRESOLVED'}")
+
+    # ---- 命中规则诊断: 列出 source 与 override target 命中的每条规则 ----
+    src_hits = [(r["prio"], r["pattern"]) for r in rules if glob_match(r["pattern"], sub_rel)]
+    p27_hits = [(r["prio"], r["pattern"]) for r in rules if glob_match(r["pattern"], p27_override_rel)]
+    print(f"SOURCE_MATCH_COUNT={len(src_hits)}")
+    for i, (prio, pat) in enumerate(sorted(src_hits, reverse=True), 1):
+        print(f"SOURCE_MATCH_RULE_{i}_PRIORITY={prio}")
+        print(f"SOURCE_MATCH_RULE_{i}_PATTERN={pat}")
+    print(f"P27_TARGET_MATCH_COUNT={len(p27_hits)}")
+    for i, (prio, pat) in enumerate(sorted(p27_hits, reverse=True), 1):
+        print(f"P27_TARGET_MATCH_RULE_{i}_PRIORITY={prio}")
+        print(f"P27_TARGET_MATCH_RULE_{i}_PATTERN={pat}")
 
     # ---- 决策 ----
     append_required = False
@@ -228,17 +285,18 @@ def main():
         print("PRIORITY_RELATION=OVERRIDE_HIGHER")
         print("APPEND_REQUIRED=NO")
     else:
-        # 无法证明 override > source -> 必须新增一条严格高于所有可能与源包竞争的 priority
-        #   取全局最高 + 裕量, 确保严格大于 source 及一切现有规则.
+        # 无法证明 override > source -> 拟新增一条严格高于一切现有规则的 priority,
+        #   并以"拟议规则加入后的模型"重新计算 override 有效优先级, 证明严格大于 source 才放行.
         margin = 100
         proposed = max_prio + margin
-        if not (proposed > src_eff):
-            # 极端: 若 still 不满足, fail-closed
+        # 拟议规则加入后的 override 有效优先级 = max(现有 override 命中, proposed)
+        new_ovr_eff = proposed if ovr_eff is None else max(ovr_eff, proposed)
+        if not (new_ovr_eff > src_eff):
             print("VERDICT=FAIL")
             print("REASON=OVERRIDE_PRIORITY_NOT_HIGHER")
             return 4
         append_required = True
-        print(f"PRIORITY_RELATION=OVERRIDE_HIGHER (proposed {proposed} > source {src_eff})")
+        print(f"PRIORITY_RELATION=OVERRIDE_HIGHER (proposed {new_ovr_eff} > source {src_eff})")
         print("APPEND_REQUIRED=YES")
 
     print(f"PROPOSED_PRIORITY={proposed}")

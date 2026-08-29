@@ -184,6 +184,41 @@ def chk_p28a_audit_defensive():
     return True, "G: cfg_audit glob 防御 + 递归有界 + parse 行级防御: OK"
 
 
+def chk_p28a_src_unresolved_guard():
+    """K) 禁止 int>None: 必须存在 src_eff is None 的 fail-closed 分支 (SOURCE_PRIORITY_UNRESOLVED),
+    且任何 priority 比较前面必须有 None 守卫, 绝不直接比较 None."""
+    a = HERE / "ww_p28a_cfg_audit.py"
+    if not a.is_file():
+        return False, f"missing {a.name}"
+    t = a.read_text(encoding="utf-8")
+    if "SOURCE_PRIORITY_UNRESOLVED" not in t:
+        return False, "cfg_audit 缺少 SOURCE_PRIORITY_UNRESOLVED fail-closed 分支"
+    if "if src_eff is None:" not in t:
+        return False, "cfg_audit 缺少 src_eff is None 守卫"
+    # 比较处必须全部受 None 守卫保护 (检查所有 '> src_eff' 与 '> ovr_eff' 前面存在 None 判断)
+    if "new_ovr_eff" in t and "if not (new_ovr_eff > src_eff)" not in t:
+        return False, "拟议后比较缺失"
+    if "if ovr_eff is not None and ovr_eff > src_eff" not in t:
+        return False, "override 比较缺少 None 守卫"
+    return True, "K: 所有 priority 比较均有 None 守卫, 无 int>None: OK"
+
+def chk_p28a_relpath_logic():
+    """L) source 相对路径必须从 Resource.cfg.parent 计算 (rel_to_base), 优先于退回 seed; 视同 Windows path semantics."""
+    a = HERE / "ww_p28a_cfg_audit.py"
+    if not a.is_file():
+        return False, f"missing {a.name}"
+    t = a.read_text(encoding="utf-8")
+    if "def rel_to_base" not in t or "def to_posix" not in t:
+        return False, "cfg_audit 缺少 rel_to_base/to_posix (Windows path 语义)"
+    if "rel_to_base(sub_abs, mods_root)" not in t:
+        return False, "cfg_audit 未从 cfg.parent 计算 source relative"
+    if "SOURCE_REL_PATH" not in t or "SOURCE_MATCH_COUNT" not in t or "SOURCE_MATCH_RULE_" not in t:
+        return False, "cfg_audit 缺少 SOURCE_* 诊断输出"
+    if ".lower()" not in t:
+        return False, "cfg_audit 缺少大小写不敏感比较 (Windows)"
+    return True, "L: source relative 从 cfg.parent 计算 + 大小写不敏感 + 诊断输出: OK"
+
+
 
 def main():
     checks = [
@@ -194,6 +229,8 @@ def main():
         ("E/H/I. native Run-Python + $PyArgs + 显式命名", chk_p28a_native_stderr),
         ("J. argv 数量符合 CLI schema", chk_p28a_argv_counts),
         ("G. cfg_audit glob 防御 + 递归有界", chk_p28a_audit_defensive),
+        ("K. priority 比较无 int>None 守卫", chk_p28a_src_unresolved_guard),
+        ("L. source relative 从 cfg.parent 计算", chk_p28a_relpath_logic),
     ]
     all_ok = True
     for name, fn in checks:
