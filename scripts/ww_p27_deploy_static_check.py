@@ -88,12 +88,56 @@ def chk_p28a_ascii():
     return True, "P28A ps1 全 ASCII + 调用 cfg_audit: OK"
 
 
+def chk_p28a_native_stderr():
+    """E) P28A canary 必须用 Run-Python 封装所有 native 调用, 且 stderr 重定向到文件;
+    禁止旧的 PS5.1 '& python ... 2>&1' (EAP=Stop 下触发 NativeCommandError 吞 traceback).
+    F) 必须命令 Run-Python 存在且用 '2> $stderrFile' 捕获 stderr."""
+    p = HERE / "ww_p28a_priority_canary.ps1"
+    if not p.is_file():
+        return False, f"missing {p.name}"
+    t = p.read_text(encoding="utf-8")
+    code = "\n".join(ln for ln in t.splitlines() if not ln.strip().startswith("#"))
+    # 所有 & python 调用都必须出现在 Run-Python 函数体内 (仅 1 处定义)
+    n_raw = code.count("& python")
+    n_runpy = code.count("Run-Python ")
+    if n_runpy < 4:
+        return False, f"canary native 调用未全部走 Run-Python (found Run-Python x{n_runpy})"
+    if code.count("function Run-Python") != 1:
+        return False, "缺少 Run-Python 帮助函数定义"
+    # 必须有 stderr 重定向到文件
+    if "2> $stderrFile" not in code:
+        return False, "Run-Python 未把 stderr 重定向到文件 (无法完整捕获 traceback)"
+    # 禁止残留 '2>&1' 直接 native 合并 (PS5.1 风险)
+    if "2>&1" in code:
+        return False, "canary 残留 '2>&1' native stderr 合并 (PS5.1 NativeCommandError 风险)"
+    return True, "E/F: native 走 Run-Python + stderr 落盘 + 无 2>&1: OK"
+
+
+def chk_p28a_audit_defensive():
+    """G) cfg_audit 必须防御: glob_match 不抛异常 (防御包裹) + _gm 递归有界 + parse_cfg 行级防御."""
+    a = HERE / "ww_p28a_cfg_audit.py"
+    if not a.is_file():
+        return False, f"missing {a.name}"
+    t = a.read_text(encoding="utf-8")
+    if "except Exception:" not in t or "return False" not in t:
+        return False, "cfg_audit glob_match 缺少防御包裹"
+    if "_BOUND" not in t:
+        return False, "cfg_audit _gm 缺少递归界 _BOUND"
+    parse_src = t.split("def parse_cfg")[1]
+    if "except Exception:" not in parse_src:
+        return False, "cfg_audit parse_cfg 缺少行级防御"
+    return True, "G: cfg_audit glob 防御 + 递归有界 + parse 行级防御: OK"
+
+
+
 def main():
     checks = [
         ("A. report_check UTF-8", chk_report_utf8),
         ("B. ps1 无中文安全字面量", chk_ps1_no_cn_safety),
         ("C. ps1 双重 validator", chk_ps1_calls_validators),
         ("D. P28A ps1 全 ASCII + cfg_audit", chk_p28a_ascii),
+        ("E. native 走 Run-Python + stderr 落盘", chk_p28a_native_stderr),
+        ("G. cfg_audit glob 防御 + 递归有界", chk_p28a_audit_defensive),
     ]
     all_ok = True
     for name, fn in checks:

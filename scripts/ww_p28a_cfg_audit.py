@@ -66,47 +66,58 @@ def sha256_file(p):
 
 
 def parse_cfg(text):
-    """返回 (rules, priorities) : rules=[{'prio':int,'pattern':str}...], priorities=set"""
-    rules = []
-    cur = None
-    for raw in text.splitlines():
-        line = raw.strip()
-        m = re.match(r"(?i)^\s*Priority\s+(\d+)\s*$", line)
-        if m:
-            # 只认行首关键字, 避免误匹配 PackedFile 内含 Priority 的情况
-            cur = int(m.group(1))
+    """返回 list of {'prio':int,'pattern':str}. 逐行防御: 任何单行解析异常都跳过该行, 不中断."""
+    rules, cur = [], None
+    for raw in (text or "").splitlines():
+        try:
+            line = raw.strip()
+            if not line:
+                continue
+            m = re.match(r"(?i)^\s*Priority\s+(\d+)\s*$", line)
+            if m:
+                cur = int(m.group(1))
+                continue
+            m2 = re.match(r"(?i)^\s*PackedFile\s+(.+?)\s*$", line)
+            if m2 and cur is not None:
+                rules.append({"prio": cur, "pattern": m2.group(1).strip()})
+        except Exception:
             continue
-        m2 = re.match(r"(?i)^\s*PackedFile\s+(.+?)\s*$", line)
-        if m2:
-            if cur is None:
-                continue  # 无归属 Priority 的 PackedFile, 忽略 (不参与决策)
-            rules.append({"prio": cur, "pattern": m2.group(1)})
     return rules
 
 
 def glob_match(pattern, rel_path):
     """Sims4 风格小 glob: '*'=单段内任意, '**'=跨段. 返回 bool.
-    统一把 '\\' 与 '/' 都视为路径分隔符, 平台无关."""
+    统一把 '\\' 与 '/' 都视为路径分隔符, 平台无关.
+    防御: 递归深度受限, 绝不抛出 (任何异常按不匹配处理)."""
     def norm(s):
         return s.replace("\\", "/")
-    seg_pat = norm(pattern).split("/")
-    seg_path = norm(rel_path).split("/")
-    return _gm(seg_pat, seg_path)
+    try:
+        seg_pat = norm(pattern).split("/")
+        seg_path = norm(rel_path).split("/")
+        return _gm(seg_pat, seg_path, 0)
+    except Exception:
+        # 防御: 任何匹配异常都不应中断审计; 视为不命中.
+        return False
 
 
-def _gm(pats, segs):
+_BOUND = 5000
+
+
+def _gm(pats, segs, depth):
+    if depth > _BOUND:
+        return False
     if not pats:
         return not segs
     p = pats[0]
     if p == "**":
         # 匹配 0..n 段
         for i in range(len(segs) + 1):
-            if _gm(pats[1:], segs[i:]):
+            if _gm(pats[1:], segs[i:], depth + 1):
                 return True
         return False
     if not segs:
         return False
-    return _seg(p, segs[0]) and _gm(pats[1:], segs[1:])
+    return _seg(p, segs[0]) and _gm(pats[1:], segs[1:], depth + 1)
 
 
 def _seg(pat, s):

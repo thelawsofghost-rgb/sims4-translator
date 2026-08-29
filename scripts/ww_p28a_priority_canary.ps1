@@ -19,11 +19,37 @@
 #   * 双重独立验证 (report_check + tgi_check) 全 PASS 才允许任何写操作。
 #
 # 本文件 ASCII-only; 中文语义判断全部在 Python 侧完成。
+#
+# PS5.1 兼容铁律: 调用 native (python) 时绝不能因 stderr 触发 NativeCommandError 吞掉 traceback.
+# 统一走 Run-Python 帮助函数: 把 stderr 重定向到临时文件完整保存, $ErrorActionPreference 局部置 Continue,
+# 依 $LASTEXITCODE 判成败; 失败即打印完整 stderr (真实 traceback) + fail-closed 退出. 不依赖 stderr 为空.
 # ============================================================================
 $ErrorActionPreference = "Stop"
 
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 $OutputEncoding = [System.Text.Encoding]::UTF8
+
+# ---------- 临时 stderr 目录 ----------
+$TMP_DIR = Join-Path $env:TEMP ("p28a_" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $TMP_DIR -Force | Out-Null
+
+# ---------- 运行 Python 的健壮封装 ----------
+# 返回: $code(exit) , $stdoutLines(array) , $stderrText(string)
+function Run-Python {
+    param([string]$Script, [string[]]$Args)
+    $stderrFile = Join-Path $TMP_DIR "py_err.txt"
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $stdout = & python $Script @Args 2> $stderrFile
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    $errText = ""
+    if (Test-Path -LiteralPath $stderrFile) { $errText = (Get-Content -LiteralPath $stderrFile -Raw -Encoding UTF8) }
+    return ,@($code, @($stdout), $errText)
+}
 
 # ---------- 路径 (Windows 真机, 全 ASCII) ----------
 $WORKSPACE   = "D:\projects\sims4_trans"
@@ -64,26 +90,27 @@ foreach ($f in @($OVERRIDE_PKG, $REPORT_TXT, $SOURCE_PKG)) {
 if (-not (Test-Path -LiteralPath $RESOURCE_CFG)) { Fail "Resource.cfg missing: $RESOURCE_CFG" }
 
 # ---------- 1. 阶段1 (只读审计): 通过 P27 双重验证 ----------
-$repOut = & python $REPORT_CHECK $REPORT_TXT 2>&1
-if ($LASTEXITCODE -ne 0) { Fail "REPORT_CHECK_FAIL: $($repOut -join ';')" }
-Write-Output (($repOut | Where-Object { $_ -like "REPORT_CHECK=*" }) -join '')
-$repLine = $repOut | Where-Object { $_ -like "INSTANCE=*0x43F3438A94EDEB2B*" }
+$r = Run-Python $REPORT_CHECK @($REPORT_TXT)
+if ($r[0] -ne 0) { Write-Output "PY_STDERR=$($r[2])"; Fail "REPORT_CHECK_FAIL(exit $($r[0]))" }
+Write-Output (($r[1] | Where-Object { $_ -like "REPORT_CHECK=*" }) -join '')
+$repLine = $r[1] | Where-Object { $_ -like "INSTANCE=*0x43F3438A94EDEB2B*" }
 if (-not $repLine) { Fail "report instance not real" }
 Write-Output "P27_REPORT_CHECK=PASS"
 
-$tgiOut = & python $TGI_CHECK $OVERRIDE_PKG 2>&1
-if ($LASTEXITCODE -ne 0) { Fail "TGI_CHECK_FAIL: $($tgiOut -join ';')" }
+$r = Run-Python $TGI_CHECK @($OVERRIDE_PKG)
+if ($r[0] -ne 0) { Write-Output "PY_STDERR=$($r[2])"; Fail "TGI_CHECK_FAIL(exit $($r[0]))" }
 Write-Output "P27_TGI_CHECK=PASS"
 
 # ---------- 2. 阶段1 (只读审计): Resource.cfg 判读 ----------
 Write-Output "--- RESOURCE_CFG AUDIT (read-only) ---"
-$aud = & python $CFG_AUDIT check $RESOURCE_CFG $OLD_ROOT_OVERRIDE $SOURCE_PKG 2>&1
-if ($LASTEXITCODE -ne 0) { Fail "CFG_AUDIT_FAIL(exit $LASTEXITCODE): $($aud -join ';')" }
-$aud | ForEach-Object { Write-Output $_ }
+$aud = Run-Python $CFG_AUDIT @("check", $RESOURCE_CFG, $OLD_ROOT_OVERRIDE, $SOURCE_PKG)
+if ($aud[0] -ne 0) { Write-Output "PY_STDERR=$($aud[2])"; Fail "CFG_AUDIT_FAIL(exit $($aud[0]))" }
+$aud[1] | ForEach-Object { Write-Output $_ }
 
 # ---------- 3. 阶段2 决策 (propose) ----------
-$prop = & python $CFG_AUDIT propose $RESOURCE_CFG $OLD_ROOT_OVERRIDE $SOURCE_PKG 2>&1
-if ($LASTEXITCODE -ne 0) { Fail "CFG_PROPOSE_FAIL(exit $LASTEXITCODE)" }
+$pr = Run-Python $CFG_AUDIT @("propose", $RESOURCE_CFG, $OLD_ROOT_OVERRIDE, $SOURCE_PKG)
+if ($pr[0] -ne 0) { Write-Output "PY_STDERR=$($pr[2])"; Fail "CFG_PROPOSE_FAIL(exit $($pr[0]))" }
+$prop = $pr[1]
 $appendReq   = ($prop | Where-Object { $_ -like "APPEND_REQUIRED=*" }) -replace "APPEND_REQUIRED=",""
 $appendB64   = ($prop | Where-Object { $_ -like "APPEND_LINES=*" })    -replace "APPEND_LINES=",""
 $proposedPrio= ($prop | Where-Object { $_ -like "PROPOSED_PRIORITY=*" }) -replace "PROPOSED_PRIORITY=",""
