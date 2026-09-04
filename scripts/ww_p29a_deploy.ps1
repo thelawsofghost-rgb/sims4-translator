@@ -38,7 +38,9 @@ $SRC_MOD        = Join-Path $WORKSPACE "scripts\ww_p29a_mod.py"
 $STATIC         = Join-Path $WORKSPACE "scripts\ww_p29a_static_check.py"
 $PSCHK          = Join-Path $WORKSPACE "scripts\ww_p29a_ps1_static_check.py"
 $LOGIC          = Join-Path $WORKSPACE "scripts\ww_p29a_logic_test.py"
+$PY37G          = Join-Path $WORKSPACE "scripts\ww_p29a_py37_gate.py"
 $BUILD_WIN      = Join-Path $WORKSPACE "scripts\ww_p29a_build_on_win.ps1"
+$BUILDER_PY     = Join-Path $WORKSPACE "scripts\ww_p29a_build_ts4script.py"
 $DEBUG_TS4      = Join-Path $MODS "ww_p29a_debug.ts4script"
 $STAGE          = Join-Path $WORKSPACE "dist\ww_p29a_debug.ts4script"
 $FLAG_P28C_DEP  = Join-Path $WORKSPACE "dist\ww_p29a_deployed_p28c.flag"
@@ -72,6 +74,7 @@ if (-not (Test-Path -LiteralPath $SRC_MOD))    { Fail "hook source missing: $SRC
 if (-not (Test-Path -LiteralPath $STATIC))     { Fail "static_check missing" }
 if (-not (Test-Path -LiteralPath $PSCHK))      { Fail "ps1_static_check missing" }
 if (-not (Test-Path -LiteralPath $LOGIC))      { Fail "logic_test missing" }
+if (-not (Test-Path -LiteralPath $PY37G))       { Fail "py37 gate missing: $PY37G" }
 if (-not (Test-Path -LiteralPath $BUILD_WIN))  { Fail "build_on_win missing" }
 if ($SkipP28C) {
     Write-Output "P28C_STEP=SKIPPED (-SkipP28C)"
@@ -98,6 +101,12 @@ Write-Output "--- LOGIC GATE ---"
 $l = Run-Python -Script $LOGIC
 if ($l[0] -ne 0) { Write-Output "PY_STDERR=$($l[2])"; Fail "LOGIC_FAIL(exit $($l[0]))" }
 Write-Output "LOGIC=PASS"
+
+Write-Output "--- PY37 COMPAT GATE (static tier; authoritative 3.7 run happens in BUILD) ---"
+$g = Run-Python -Script $PY37G -PyArgs @($BUILDER_PY, $SRC_MOD, $LOGIC)
+if ($g[0] -ne 0) { Write-Output "PY_STDERR=$($g[2])"; Fail "PY37_GATE_FAIL(exit $($g[0]))" }
+Write-Output (($g[1] | Where-Object { $_ -like 'PY37_*=' -or $_ -like 'FILE=*' }) -join "`n")
+Write-Output "PY37_GATE=PASS"
 
 # ---------- 2. build ts4script with a magic-matching local compiler ----------
 Write-Output "--- BUILD (magic-matched compiler) ---"

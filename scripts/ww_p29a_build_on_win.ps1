@@ -46,6 +46,8 @@ $WORKSPACE   = "D:\projects\sims4_trans"
 $SRC_MOD     = Join-Path $WORKSPACE "scripts\ww_p29a_mod.py"
 $BUILDER     = Join-Path $WORKSPACE "scripts\ww_p29a_build_ts4script.py"
 $GAMEPY      = Join-Path $WORKSPACE "scripts\ww_p29a_game_py.py"
+$PY37GATE    = Join-Path $WORKSPACE "scripts\ww_p29a_py37_gate.py"
+$LOGIC       = Join-Path $WORKSPACE "scripts\ww_p29a_logic_test.py"
 $OUT_DIR     = Join-Path $WORKSPACE "dist"
 $OUT_TS4     = Join-Path $OUT_DIR "ww_p29a_debug.ts4script"
 $FIRST_PY    = "python"   # any local python to drive the two read-only probes
@@ -136,11 +138,27 @@ $compAbi = $parts[2]
 Write-Output "COMPILER_PATH=$GATE_PY"
 Write-Output "COMPILER_VERSION=$compVer ($compAbi)"
 
+# ---- 3a. Python-3.7 compatibility gate (run under the matched 3.7 compiler) ----
+Write-Output "--- 3a. py3.7 compat gate ---"
+if (-not (Test-Path -LiteralPath $PY37GATE)) { Fail "py37 gate helper missing: $PY37GATE" }
+$g37 = Run-Py -Interp $GATE_PY -Script $PY37GATE -PyArgs @("-py37", $GATE_PY, $BUILDER, $SRC_MOD, $LOGIC)
+if ($g37[0] -ne 0) {
+    Write-Output "PY37_GATE_DIAG_STDERR=$($g37[2])"
+    Fail "PY37_GATE_FAIL (inputs not CPython-3.7 compatible)"
+}
+Write-Output (($g37[1] | Where-Object { $_ -like 'PY37_*=' -or $_ -like 'FILE=*' }) -join "`n")
+Write-Output "PY37_GATE=PASS ($(($g37[1] | Where-Object { $_ -like 'PY37_GATE=*' }) -join ';'))"
+
 # ---- 3. build with the matched compiler ----
 Write-Output "--- 3. build under matched compiler ---"
+$buildCommand = "& $GATE_PY $BUILDER --src $SRC_MOD --out $OUT_TS4"
 $r = Run-Py -Interp $GATE_PY -Script $BUILDER -PyArgs @("--src", $SRC_MOD, "--out", $OUT_TS4)
 if ($r[0] -ne 0) {
-    Write-Output "PY_STDERR=$($r[2])"
+    Write-Output "BUILD_COMMAND=$buildCommand"
+    Write-Output "BUILD_EXIT_CODE=$($r[0])"
+    $so = (($r[1] | Out-String).Trim())
+    if ($so) { Write-Output "BUILD_STDOUT=$so" } else { Write-Output "BUILD_STDOUT=(empty)" }
+    if ($r[2]) { Write-Output "BUILD_STDERR=$($r[2])" } else { Write-Output "BUILD_STDERR=(empty)" }
     Fail "BUILD_FAIL(exit $($r[0]))"
 }
 Write-Output (($r[1] | Out-String).Trim())

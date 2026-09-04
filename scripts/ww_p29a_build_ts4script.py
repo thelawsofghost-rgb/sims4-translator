@@ -29,6 +29,7 @@ import argparse
 import os
 import sys
 import tempfile
+import traceback as _traceback
 import zipfile
 from pathlib import Path
 
@@ -81,13 +82,27 @@ def build(src_py, out_ts4):
         if not data:
             raise SystemExit("[compile] empty pyc")
     finally:
-        tmp_pyc.unlink(missing_ok=True)
+        # Python-3.7-safe file remove (Path.unlink(missing_ok=...) is 3.8+ only).
+        try:
+            if tmp_pyc.exists():
+                tmp_pyc.unlink()
+        except OSError:
+            pass
 
     out = Path(out_ts4)
     out.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(str(out), "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr(ZIP_MEMBER, data)
     return out
+
+
+def _fail(code_line, exc=None):
+    """Print a truthful P29A_BUILD= line to stdout AND, when an exception is
+    present, the full traceback to STDERR so the wrapper never sees only an
+    empty stderr.  We intentionally do not swallow the cause."""
+    print(code_line, flush=True)
+    if exc is not None:
+        _traceback.print_exc()  # -> stderr
 
 
 def main():
@@ -103,16 +118,16 @@ def main():
     try:
         out = build(src, a.out)
     except SystemExit as e:
-        print("P29A_BUILD=FAIL_COMPILE")
+        _fail("P29A_BUILD=FAIL_COMPILE %r" % (e,))
         return 1
     except Exception as e:
-        print("P29A_BUILD=FAIL_COMPILE %r" % (e,))
+        _fail("P29A_BUILD=FAIL_COMPILE %r" % (e,), exc=e)
         return 1
 
     try:
         verify_pack(out, src)
     except Exception as e:
-        print("P29A_BUILD=FAIL_PACK_VERIFY %r" % (e,))
+        _fail("P29A_BUILD=FAIL_PACK_VERIFY %r" % (e,), exc=e)
         return 2
 
     print("P29A_BUILD=OK")

@@ -121,6 +121,10 @@ def main():
                           [sys.executable, str(SCRIPTS / "ww_p29a_static_check.py")])
     codes["LOGIC"] = run("LOGIC_TEST",
                          [sys.executable, str(SCRIPTS / "ww_p29a_logic_test.py")])
+    codes["PY37"] = run("PY37_GATE",
+                         [sys.executable, str(SCRIPTS / "ww_p29a_py37_gate.py"),
+                          str(SCRIPTS / "ww_p29a_build_ts4script.py"),
+                          str(MOD), str(SCRIPTS / "ww_p29a_logic_test.py")])
     codes["BUILD"] = run("BUILD_ROUNDTRIP",
                          [sys.executable, str(SCRIPTS / "ww_p29a_build_ts4script.py"),
                           "--src", str(MOD), "--out", str(TS4_OUT)])

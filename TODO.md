@@ -315,3 +315,42 @@ wintest 新增 MAGIC gate(离线, 无需 pwsh): 合成一可加载 pyc(magic=宿
   powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29a_deploy.ps1
 若不自动匹配到本机 python 则 fail-closed 列出, 按 REASON/GUIDANCE 装对应
 CPython major.minor 后再带 -GamePython <path>\python.exe 重跑。
+
+---
+
+## P29-A fix3 (2026-09-04 17:42) 仅剩的 BUILD exit 1 根因 + 诊断 + py3.7 gate (74519d3->)
+
+真机三跑: magic/compiler discovery 已通(TARGET_PYC_MAGIC=420d0d0a -> MATCH C:\...\Python37-32
+python.exe 3.7.9), 但 real build exit 1, 且只见空 PY_STDERR=。
+
+ROOT_CAUSE: scripts/ww_p29a_build_ts4script.py:84
+    tmp_pyc.unlink(missing_ok=True)
+Path.unlink(missing_ok=...) 是 Python 3.8+ 关键词; 在 CPython 3.7.9 抛
+    TypeError: unlink() got an unexpected keyword argument 'missing_ok'
+它位于 build() 的 finally:, 即使 py_compile 成功也在清理时抛错 -> 被 main 的
+except Exception 吞掉 -> 返回 1 (FAIL_COMPILE)。sandbox 3.10 不触发, 故只在真机 3.7 暴露。
+(全链仅此一处 3.8+ API; 语法经 ast feature_version=(3,7) 验证全 3.7-清洁。)
+
+PY37_COMPAT_FIXED:
+  * 删除 missing_ok -> 3.7-safe: if tmp_pyc.exists(): tmp_pyc.unlink() (try/except OSError)。
+  * 新增 scripts/ww_p29a_py37_gate.py 双层级 gate:
+      - 静态: 对三个输入 ast.parse(feature_version=(3,7)) 拒 >3.7 语法(walrus/f-string'= /
+        match/...)，再加 3.8+ 运行 API deny-list(missing_ok/removeprefix/removesuffix/
+        is_relative_to/functools.cache/importlib.metadata/ZoneInfo/PEP604 管道注解)。
+      - 真实: 找到 python3.7 / py -3.7 时执行 python3.7 -m py_compile <inputs> (权威)。
+      无 3.7 时静态通过则报 PY37_GATE=STATIC + PY37_REAL_COMPILE=SKIPPED。
+  * build_on_win 在真实 build 前插入 3a.py3.7 compat gate(用匹配到的 3.7 编译器跑权威
+    py_compile); deploy 在 LOGIC 后加静态 PY37_GATE; wintest 加 PY37 项。
+  * 负向已验: 文件含 missing_ok -> PY37_GATE=FAIL(exit 1); walrus -> AST FAIL。
+
+BUILD_DIAGNOSTICS_FIXED:
+  * builder 失败不再吞: 新增 _fail() 在 stdout 打真话 P29A_BUILD=FAIL_* 行, 并把完整
+    traceback print 到 STDERR(不再空 stderr)。已验: 坏源 -> exit1, stdout=FAIL_COMPILE,
+    stderr=SyntaxError file/line。
+  * build_on_win BUILD_FAIL 块改输出四段: BUILD_COMMAND= / BUILD_EXIT_CODE= /
+    BUILD_STDOUT=(首见, 之前被吞) / BUILD_STDERR= ; 不再只给空 PY_STDERR=。
+
+fail-closed 保持: script 层 gate(含新 PY37)全过才进真实 build; BUILD 失败不写 Mods、
+不动 P28C。实验 scope 不变(仅 constructor trace)。
+
+sandbox 已装 CPython 3.7.9(由源码, huawei 镜像), 用于在沙盒权威复现/证 3.7 compat。
