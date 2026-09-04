@@ -53,11 +53,14 @@ if (-not $SrcMod) { $SRC_MOD = Join-Path $WORKSPACE "scripts\ww_p29a_mod.py" } e
 if (-not $OutTs4) { $OUT_TS4 = Join-Path $OUT_DIR "ww_p29a_debug.ts4script" } else { $OUT_TS4 = $OutTs4 }
 $SRC_IS_TUNING = ($SrcMod -like "*ww_p29_tuning_mod.py")
 $SRC_IS_P29B   = ($SrcMod -like "*ww_p29b_display_trace.py")
+$SRC_IS_P29C   = ($SrcMod -like "*ww_p29c_display_caller_trace.py")
 if ($SRC_IS_TUNING) { $MEMBER_TARGET = "ww_p29_tuning_mod.pyc" }
 elseif ($SRC_IS_P29B) { $MEMBER_TARGET = "ww_p29b_display_trace.pyc" }
+elseif ($SRC_IS_P29C) { $MEMBER_TARGET = "ww_p29c_display_caller_trace.pyc" }
 else { $MEMBER_TARGET = "ww_p29a_mod.pyc" }
 if ($SRC_IS_TUNING) { $LOGIC = Join-Path $WORKSPACE "scripts\ww_p29_tuning_logic_test.py" }
 elseif ($SRC_IS_P29B) { $LOGIC = Join-Path $WORKSPACE "scripts\ww_p29b_logic_test.py" }
+elseif ($SRC_IS_P29C) { $LOGIC = Join-Path $WORKSPACE "scripts\ww_p29c_logic_test.py" }
 else { $LOGIC = Join-Path $WORKSPACE "scripts\ww_p29a_logic_test.py" }
 $FIRST_PY    = "python"   # any local python to drive the two read-only probes
 $GATE_PY     = $null       # the local python whose magic == target
@@ -161,7 +164,7 @@ Write-Output "PY37_GATE=PASS ($(($g37[1] | Where-Object { $_ -like 'PY37_GATE=*'
 # ---- 3. build with the matched compiler ----
 # probe attribute/module by target family
 $PROBE_ATTR = "main"  # all P29 mods expose module-level main(); safe import-assert
-$PROBE_MOD  = if ($SRC_IS_TUNING) { "ww_p29_tuning_mod_probe" } elseif ($SRC_IS_P29B) { "ww_p29b_mod_probe" } else { "ww_p29_mod_probe" }
+$PROBE_MOD  = if ($SRC_IS_TUNING) { "ww_p29_tuning_mod_probe" } elseif ($SRC_IS_P29B) { "ww_p29b_mod_probe" } elseif ($SRC_IS_P29C) { "ww_p29c_mod_probe" } else { "ww_p29_mod_probe" }
 
 Write-Output "--- 3. build under matched compiler ---"
 $buildCommand = "& $GATE_PY $BUILDER --src $SRC_MOD --out $OUT_TS4 --member $MEMBER_TARGET --probe-attr $PROBE_ATTR --probe-mod $PROBE_MOD"

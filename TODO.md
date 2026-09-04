@@ -895,3 +895,45 @@ GATES (host + real CPython 3.7.9): ww_p29b_{static,logic} PASS both interpreters
 py_compile 3.7 of p29b module/report/inspect + wintest PASS; P29-A wintest 16 gate
 rows all PASS (BLOGIC/BSTATIC/BREPORT/BBUILD); ps1 static 13 PASS.  Boot-marker emit
 only-on-real-import (disabled probe writes nothing) verified offline.
+
+## P29-C: target-only caller trace for TEST300 (2026-09-04 22:0x)
+
+PURPOSE: the last open question on row 300.  P28C/P29-TUNING/P29-B have all proven
+the runtime instance value IS 'TEST300' at multiple layers (tuning raw/instance
+display_name/get_display_name RETURN) yet the visible UI still says 'Caught Cheating
+2'.  XML/STBL/tuning/constructor/original_instance are excluded by prior evidence.
+P29-C therefore stops guessing those layers and records WHO ACTUALLY CALLS
+SexAnimationInstance.get_display_name() on a self.display_name=='TEST300' instance,
+and where that returned 'TEST300' object goes next -- a real runtime caller chain.
+
+NEW (scripts/ww_p29c_*), build_on_win.ps1 gained a P29-C family branch:
+  - ww_p29c_display_caller_trace.py : hooks ONLY SexAnimationInstance.get_display_name
+    transparently (orig(self,*args,**kwargs), return untouched, never authors).  When
+    the PRE-original self.display_name is exactly 'TEST300' it emits, per call
+    (cap 30 -> TARGET_TRACE_LIMIT_REACHED=YES):
+      P29C_TARGET_CALL_BEGIN / TARGET_CALL_INDEX=n / SELF_DISPLAY_NAME /
+      SELF_AUTHOR / ORIGINAL_INSTANCE_PRESENT / DISPLAY_NAME_OVERRIDE /
+      ARG_STRING_HASH / ARG_ORIGINAL / RETURN_IS_STR / RETURN_CLASS / RETURN_MODULE /
+      RETURN_REPR / RETURN_VALUE (or guarded RETURN_<ATTR>) /
+      CALLER_1..5_{MODULE,FUNCTION,FILENAME,LINE} (module's own internal frames are
+      SKIPPED so CALLER_1 is the true external caller) /
+      CALLER_<1..3>_LOCAL_<name> for display-keyword locals only (repr bounded 500) /
+      P29C_TARGET_CALL_END.  Non-target instances log nothing detailed.  Boot/boot
+      marker + bootstrap == the P29-B-proven pattern.
+  - ww_p29c_logic_test.py : offline functional gate (real f_back frames, per-item
+    asserts on target-only gating / passthrough / chain depth / filtered locals /
+    return precision / 30-cap).  PASS host + real 3.7.
+  - ww_p29c_static_check.py : source contract gate (only get_display_name rebound,
+    transparent passthrough, no set_display_name / no mutation, detail gated by exact
+    _TARGET_DISPLAY value, guarded safe reads, no walrus, cap<=30).  PASS.
+  - ww_p29c_deploy.ps1 / read_log.ps1 / rollback.ps1 : ONE-KEY win flow; deploy runs
+    ps1/static/logic gates + build + layout-inspect + auto-deploy P28C TEST300; read_log
+    prints a SHORT summary and exports the FULL trace to <repo-root>\p29c_target_trace.txt;
+    rollback removes P29-C ts4script/log + P28C if it was auto-deployed.
+P28C left untouched (auto-deploy reuses existing deploy, target 300 unchanged).
+
+Derived P29C_RESULT in read_log (strict scan of the log text):
+  no log / no P29C_MODULE_IMPORTED=YES -> MODULE_NOT_IMPORTED
+  imported but no HOOK_INSTALLED=YES   -> HOOK_NOT_INSTALLED
+  installed, 0 P29C_TARGET_CALL_BEGIN   -> TARGET_GET_DISPLAY_NAME_NOT_CALLED
+  installed, >=1 target block          -> TARGET_CALLER_TRACE_CAPTURED
