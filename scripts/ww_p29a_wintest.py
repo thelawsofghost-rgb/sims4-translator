@@ -38,6 +38,68 @@ def run(label, cmd):
 REGEX_SINGLE_DASH = re.compile(r'"-py37"|\s-py37(\s|\))')
 
 
+def livecls_mechanism():
+    """Mechanism check for ww_p29a_live_class_probe.py (task #1 re-verification).
+
+    We cannot ship Dorothy's real WW ts4script here, so we prove the PROBE logic
+    on a synthesized fixture: a member animation_instance.pyc whose SexAnimation…
+    Instance.__init__ carries exactly (animation_id, animation_raw_display_name,
+    animation_type) must be reported LIVE_CLASS_MODULE + CONFIRMED=YES, while a
+    distractor-only ts4script must come back CONFIRMED=NO -- so on the real machine
+    a CONFIRMED=NO genuinely means "the live WW does not expose that path yet".
+    Returns 0 on PASS."""
+    import py_compile
+    import tempfile
+    import zipfile
+    import textwrap
+    probe = SCRIPTS / "ww_p29a_live_class_probe.py"
+    d = tempfile.mkdtemp(prefix="wwlivecls_")
+    try:
+        def _member(val_name, body, dfile, z, prefix):
+            src = "class %s:\n    def __init__(self, animation_id, animation_raw_display_name, animation_type):\n        self.animation_id = animation_id\n        self.display_name = animation_raw_display_name\n" % val_name
+            if body:
+                src = body
+            m = os.path.join(d, prefix + ".py")
+            with open(m, "w") as fh:
+                fh.write(src)
+            c = os.path.join(d, prefix + ".pyc")
+            py_compile.compile(m, cfile=c, dfile=dfile)
+            z.write(c, dfile)
+        # positive fixture
+        zp = os.path.join(d, "pos.ts4script")
+        with zipfile.ZipFile(zp, "w") as z:
+            _member("SexAnimationInstance", None,
+                    "wickedwhims/sex/animations/animation_instance.pyc", z, "a")
+        rp = subprocess.run([sys.executable, str(probe), zp],
+                            cwd=str(REPO), capture_output=True, text=True)
+        op = rp.stdout or ""
+        print((op or "").strip())
+        if rp.returncode != 0 or "LIVE_CLASS_CONFIRMED=YES" not in op:
+            print("LIVECLS_POSITIVE=FAIL (probe missed a target-shaped member)")
+            return 1
+        if "animation_instance.pyc" not in op:
+            print("LIVECLS_POSITIVE=FAIL (wrong module reported)")
+            return 1
+        print("LIVECLS_POSITIVE=PASS")
+        # negative fixture: only a non-matching member
+        zn = os.path.join(d, "neg.ts4script")
+        with zipfile.ZipFile(zn, "w") as z:
+            _member("Z", "class Z:\n    def __init__(self, x): self.x = x\n",
+                    "wickedwhims/sex/animations/animations_loader.pyc", z, "l")
+        rn = subprocess.run([sys.executable, str(probe), zn],
+                            cwd=str(REPO), capture_output=True, text=True)
+        on = rn.stdout or ""
+        if rn.returncode == 0 or "LIVE_CLASS_CONFIRMED=NO" not in on:
+            print("LIVECLS_NEGATIVE=FAIL (probe false-confirmed a non-target)")
+            return 1
+        print("LIVECLS_NEGATIVE=PASS")
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+    print("LIVECLS=PASS (probe mechanism OK; real answer requires Dorothy's live WW)")
+    return 0
+
+
 def py37_argv():
     """Assert the PowerShell wrapper assembles the DOUBLE-dash '--py37' flag and
     that the exact argv shape `--py37 <py37.exe> <files...>` parses cleanly.
@@ -168,6 +230,7 @@ def main():
                           str(SCRIPTS / "ww_p29a_build_ts4script.py"),
                           str(MOD), str(SCRIPTS / "ww_p29a_logic_test.py")])
     codes["PY37ARGV"] = py37_argv()
+    codes["LIVECLS"] = livecls_mechanism()
     codes["BUILD"] = run("BUILD_ROUNDTRIP",
                          [sys.executable, str(SCRIPTS / "ww_p29a_build_ts4script.py"),
                           "--src", str(MOD), "--out", str(TS4_OUT)])

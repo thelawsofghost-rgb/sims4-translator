@@ -173,6 +173,84 @@ def main():
     check(ret is False and Boom.__init__ is boom_snapshot,
           "sig-mismatch class NOT wrapped (fail-closed)")
 
+    # ------------------------------------------------------------------
+    # PHASE 2: discovery / timing (round-2 fix).  Validate that, given a fake
+    # sims4+services+Zone provided late (WW modules NOT yet in sys.modules at
+    # boot), the scheduler ARMS and a later retry once WW loads DOES install and
+    # traces a full HOOK_INSTALLED block -- proving the no-fire bug is fixed.
+    # ------------------------------------------------------------------
+    print("\n=== P29-A DISCOVERY/SCHEDULER TEST (offline, fake sims4) ===")
+    hook._reset_state_for_test()
+    hook._STATE["_log_path"] = ""
+
+    import io as _io
+    class _FakeZone(object):
+        def __init__(self):
+            self.fired = 0
+        def on_loading_screen_ended(self, cb):
+            # TS4 zone host we expect; store cb so a test can fire it later.
+            self.cb = cb
+    fz = _FakeZone()
+    fake_services = type("services", (object,), {})
+    fake_services.current_zone = lambda: fz
+    fake_sims4 = type("sims4", (object,), {})
+    sys.modules["services"] = fake_services
+    sys.modules["sims4"] = fake_sims4
+
+    # Remove any WW-looking module so discovery is genuinely absent at boot.
+    _saved = {}
+    try:
+        armed = hook._register_scheduler()
+        check(armed is True, "scheduler arms when a zone host is present")
+        check(hook._STATE["scheduler_armed"] is True, "scheduler_armed state True")
+
+        # At this point class still absent (WW not loaded) -> arming only.
+        # Now simulate WW loading its module + class into sys.modules, then fire
+        # the zone-host callback -> discovery must install + emit full hook block.
+        buf2 = _io.StringIO()
+        _old2 = sys.stdout
+        sys.stdout = buf2
+        try:
+            WWmod = type("animation_instance", (object,), {})
+            WWmod.SexAnimationInstance = _make_targeted("LIVE_SexAnimationInstance")
+            sys.modules["wickedwhims.sex.animations.animation_instance"] = WWmod
+            fz.cb()   # the armed zone-load callback -> _retry_once
+        finally:
+            sys.stdout = _old2
+        t2 = buf2.getvalue()
+        check("RETRY_INDEX=1" in t2, "retry trace emits RETRY_INDEX=1")
+        check("MODULE_PRESENT=YES" in t2, "MODULE_PRESENT=YES on retry")
+        check("CLASS_PRESENT=YES" in t2, "CLASS_PRESENT=YES on retry")
+        check("HOOK_INSTALLED=YES" in t2, "HOOK_INSTALLED=YES after late load")
+        check("HOOK_CLASS=SexAnimationInstance" in t2
+              or "HOOK_CLASS=LIVE_SexAnimationInstance" in t2,
+              "HOOK_CLASS recorded")
+    finally:
+        for k in ("services", "sims4"):
+            sys.modules.pop(k, None)
+        for k in list(sys.modules):
+            if k.startswith("wickedwhims"):
+                sys.modules.pop(k, None)
+
+    # Retry bound: many no-class retries cap at max_retries and stay honest
+    # (RETRY_CALLBACK_EXECUTED already True once armed; class never arrives ->
+    #  no HOOK_INSTALLED, bounded count).
+    hook._reset_state_for_test()
+    hook._STATE["max_retries"] = 2
+    buf3 = _io.StringIO()
+    _old3 = sys.stdout
+    sys.stdout = buf3
+    try:
+        for _ in range(5):
+            hook._retry_once()
+    finally:
+        sys.stdout = _old3
+    t3 = buf3.getvalue()
+    check(hook._STATE["retry_count"] == 2, "retry bounded at max_retries")
+    check("RUNTIME_MODULE_CANDIDATES=" in t3, "runtime candidate snapshot emitted")
+    check("RETRY_INDEX=" in t3, "per-retry RETRY_INDEX present")
+    hook._STATE["max_retries"] = 20
+
     print("")
     if failures:
         print("P29A_LOGIC_TEST=FAIL")

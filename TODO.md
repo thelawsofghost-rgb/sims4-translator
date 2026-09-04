@@ -382,3 +382,58 @@ REGRESSION_TEST_ADDED:
 FAIL_OCCURRED_BEFORE_MODS_WRITE=YES : 3a 在 build_on_win 内(先于 PLACE DEBUG TS4 与
   P28C redep 块); 失败即 exit 非0 -> BUILD_ON_WIN_FAIL, 未到 Copy-Item 亦未调 P28C。
 P28C_TOUCHED=NO
+
+## P29-A fix5 (2026-09-04 18:0x) discovery/timing -- make retry real + fully traced (round 1 runtime)
+
+首轮真实 runtime: DEBUG ts4script imported OK + logger works (trace exists at %TEMP%),
+但 class unavailable at hook import time and NOTHING retried (old main() did ONE
+immediate attempt then a FABRICATED "(retrying, deferred schedule active)" -- no
+schedule ever registered).  So HOOK_INSTALLED stayed NO and no RAW_ARG/OLD/TEST299.
+
+OLD_DISCOVERY_FAILURE_ROOT_CAUSE: _register_scheduler() was effectively a no-op.  If
+sims4 importable it ran _retry_on_zone() exactly once and returned -- no repeating
+callback, no zone hook, no RETRY loop.  If sims4 absent it ran _retry_on_zone() once.
+Either way only one attempt at boot; WW's SexAnimationInstance module is not yet in
+sys.modules at our boot (ts4script import order not guaranteed / WW lazy), so class
+never installed and no later attempt ever fired.
+
+DEFERRED_RETRY_FIXED (ww_p29a_mod.py):
+  * real bounded retry loop in discovery: _retry_once() (3 immediate attempts in
+    main, then arm a repeating in-world scheduler), each attempt traced.
+  * scheduler: _arm_via_zone() probes the LIVE zone/current_zone object and registers
+    a repeating callback via whichever of (loading_screen_ended/alarm/zone_load/
+    register_callback/loading_screen_started) is callable; SCHEDULER_ARMED=YES/NO
+    emitted with WHICH zone symbols were actually present.  If nothing arms it says
+    so (RETRY_CALLBACK_EXECUTED=NO) instead of a fake "retrying".  Main-thread only,
+    never touches sims objects off-thread, no sleep.
+  * discovery self-verifies via import + sys.modules scan; on success logs
+    HOOK_INSTALLED=YES + HOOK_MODULE=<real module> + HOOK_CLASS +
+    HOOK_RETRY_INDEX=<n>, AFTER which RAW_ARG/INSTANCE_*/LOCALIZED_HASH are recorded.
+  * honest terminal failure block: HOOK_INSTALLED=NO / RETRY_COUNT / LAST_MODULE_PRESENT
+    / LAST_CLASS_PRESENT / IMPORT_EXCEPTION / RETRY_CALLBACK_EXECUTED /
+    RUNTIME_MODULE_CANDIDATES / VERDICT=FAIL_DISCOVERY.
+
+RETRY_TRACE_ADDED (task #3/#5): each attempt logs RETRY_INDEX/RETRY_AT/MODULE_PRESENT
+  /CLASS_PRESENT/IMPORT_EXCEPTION/(read-only)[name for sys.modules if wickedwhims &
+  animation|sex] -> RUNTIME_MODULE_CANDIDATES.  Offline tested (fake sims4+Zone):
+  late-load -> RETRY_INDEX=1 MODULE_PRESENT=YES CLASS_PRESENT=YES HOOK_INSTALLED=YES.
+
+LIVE CLASS MODULE RE-VERIFY (task #1): scripts/ww_p29a_live_class_probe.py re-scans
+  the CURRENT TURBODRIVER_WickedWhims_Scripts.ts4script with xdis for any member whose
+  __init__ carries exactly (animation_id, animation_raw_display_name, animation_type)
+  and reports LIVE_CLASS_MODULE / LIVE_CLASS_CONFIRMED.  ww_p29a_liveprobe.ps1 locates
+  the WW ts4script under -Mods and runs it (read-only).  Prior confirmed path
+  wickedwhims/sex/animations/animation_instance.pyc is the WORKING hypothesis; the
+  probe + the mod's in-game RUNTIME_MODULE_CANDIDATES are the authoritative live truth
+  for the CURRENT WW version.  (Offline: probe mechanism validated pos+neg on a
+  synthesized fixture; real answer requires Dorothy's live WW file.)
+
+TASK #1 note: cannot re-decompile Dorothy's live WW from the Linux sandbox (the real
+  ts4script only exists on the real machine).  Provide the ps1 so Dorothy gets
+  LIVE_CLASS_MODULE/CONFIRMED in one command against whatever WW is installed now.
+
+Tests: added LIVECLS + EXPANDED LOGIC (phase-2 fake-sims4 scheduler/discovery asserts)
+  + PY37GATE/PY37ARGV kept.  All offline PASS.  py_compile clean.  ps1 PARAM_PLACEMENT
+  PASS incl. new liveprobe.  Real 3.7.9 gate on mod+probe = REAL PASS (mod remains
+  3.7-safe: no 3.8-only APIs).  Scope unchanged: constructor trace only, no WW
+  ts4script / Nevely / P28C / P24 / zh / P29-B.
