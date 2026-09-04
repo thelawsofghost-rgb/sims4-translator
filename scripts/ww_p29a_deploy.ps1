@@ -21,18 +21,22 @@
 # file).  Never touches any other mod / source WW package / P27/P28A/P28B artifacts.
 #
 # ASCII-only logic; Run-Python wrapper named params ($PyArgs, never $Args); no 2>&1.
+[CmdletBinding()]
 param(
     [string]$GamePython = "",
     [switch]$SkipP28C
 )
+
+Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
-$MODS           = "C:\Users\thela\Documents\Electronic Arts\The Sims 4\Mods"
 $WORKSPACE      = "D:\projects\sims4_trans"
+$MODS           = "C:\Users\thela\Documents\Electronic Arts\The Sims 4\Mods"
 $SRC_MOD        = Join-Path $WORKSPACE "scripts\ww_p29a_mod.py"
 $STATIC         = Join-Path $WORKSPACE "scripts\ww_p29a_static_check.py"
+$PSCHK          = Join-Path $WORKSPACE "scripts\ww_p29a_ps1_static_check.py"
 $LOGIC          = Join-Path $WORKSPACE "scripts\ww_p29a_logic_test.py"
 $BUILD_WIN      = Join-Path $WORKSPACE "scripts\ww_p29a_build_on_win.ps1"
 $DEBUG_TS4      = Join-Path $MODS "ww_p29a_debug.ts4script"
@@ -66,6 +70,7 @@ Write-Output "=== P29A DEPLOY ==="
 if (-not (Test-Path -LiteralPath $MODS))       { Fail "Mods missing: $MODS" }
 if (-not (Test-Path -LiteralPath $SRC_MOD))    { Fail "hook source missing: $SRC_MOD" }
 if (-not (Test-Path -LiteralPath $STATIC))     { Fail "static_check missing" }
+if (-not (Test-Path -LiteralPath $PSCHK))      { Fail "ps1_static_check missing" }
 if (-not (Test-Path -LiteralPath $LOGIC))      { Fail "logic_test missing" }
 if (-not (Test-Path -LiteralPath $BUILD_WIN))  { Fail "build_on_win missing" }
 if ($SkipP28C) {
@@ -74,7 +79,16 @@ if ($SkipP28C) {
     if (-not (Test-Path -LiteralPath $P28C_DEPLOY)) { Fail "P28C deploy missing (only needed unless -SkipP28C)" }
 }
 
-# ---------- 1. static + logic gates (offline) ----------
+# ---------- 1. ps1 structural + static + logic gates (offline) ----------
+# PS1 gate first: this is the check that would have caught the real-machine
+# "param is not a cmdlet" failure (script-level param not being the first
+# executable statement).  It must pass before ANY build, copy, or P28C step.
+Write-Output "--- PS1 STRUCTURE GATE ---"
+$ps = Run-Python -Script $PSCHK
+if ($ps[0] -ne 0) { Write-Output "PY_STDERR=$($ps[2])"; Fail "PS1_STRUCTURE_FAIL(exit $($ps[0]))" }
+Write-Output (($ps[1] | Where-Object { $_ -like 'VERDICT=*' }) -join '')
+Write-Output "PS1_STRUCTURE=PASS"
+
 Write-Output "--- STATIC GATE ---"
 $s = Run-Python -Script $STATIC
 if ($s[0] -ne 0) { Write-Output "PY_STDERR=$($s[2])"; Fail "STATIC_FAIL(exit $($s[0]))" }

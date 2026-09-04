@@ -10,6 +10,10 @@
 # It NEVER touches any other mod / source WW package / P27/P28A/P28B artifacts.
 #
 # ASCII-only logic.  $PyArgs never $Args.  no 2>&1.
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 $OutputEncoding = [System.Text.Encoding]::UTF8

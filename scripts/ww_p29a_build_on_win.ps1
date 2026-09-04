@@ -20,13 +20,15 @@
 #
 # Outputs: VERDICT=OK|FAIL, OUT=<path>, PY_VER=<x.y>, REASON.
 # ASCII-only logic.  $PyArgs not $Args (PS5.1).  Run-Python wrapper (no 2>&1).
-$ErrorActionPreference = "Stop"
-try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
-$OutputEncoding = [System.Text.Encoding]::UTF8
-
+[CmdletBinding()]
 param(
     [string]$GamePython = ""
 )
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 $WORKSPACE = "D:\projects\sims4_trans"
 $SRC_MOD   = Join-Path $WORKSPACE "scripts\ww_p29a_mod.py"

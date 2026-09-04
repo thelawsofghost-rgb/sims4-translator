@@ -236,3 +236,35 @@ Hook 点 (committed decompiled transcription, 真机需再确认签名——若�
 安全/未决:
   - hook 的 in-game HOOK_INSTALLED=YES 只能在真机验证(sandbox 只证 logic/static/build)。若类名/模块路径/signature 与真机不符 -> hook 诚实报 HOOK_INSTALLED=NO 而非假 OLD。
   - pyc magic 必须由 game python 产出 -> build_on_win 找 game python, 找不到则 fail-closed(不猜版本)。
+
+---
+
+## P29-A hotfix (2026-09-04 17:12) ps1 param-placement bug + parse gate (bea8936->655c74b)
+
+真机首执失败(未达 runtime hook): `ww_p29a_build_on_win.ps1` 脚本级 param(...) 前有可执行语句
+($ErrorActionPreference/encoding lines), PS 把 param 当普通命令 -> "无法将param项识别为..."。
+
+FAIL_OCCURRED_BEFORE_MODS_WRITE=YES: 真机输出停在 `--- BUILD (game python) ---` 的
+`& $BUILD_WIN` 调用(该子脚本 parse 即抛错), deploy 在 $ErrorActionPreference=Stop 下终止,
+从未到 Copy-Item(PLACE DEBUG TS4)与 P28C redep。未写 Mods\ww_p29a_debug.ts4script, 未动 P28C。
+
+修复(全部 P29 ps1): 脚本级 param/CmdletBinding 移为第一个可执行构造; 其余(EAP/encoding/变量)
+一律后置。统一 `[CmdletBinding()] param(...)` 模式。
+  ww_p29a_build_on_win.ps1  (bug 源: EAP/encoding 在 param 前)
+  ww_p29a_deploy.ps1        (本已 param 前置, 补 CmdletBinding/Set-StrictMode)
+  ww_p29a_rollback.ps1      (无参脚本, 补空 param() 保持头规范)
+
+新增 gate: scripts/ww_p29a_ps1_static_check.py
+  A) PARAM_PLACEMENT(纯文本/跨平台, 无 PS 也可靠): 首个脚本级 header([CmdletBinding()]/param()
+     最顶行)之前只允许注释/#requires/空行; 出现任何可执行语句 -> FAIL。
+     回归实证: 对 bug 原形($ErrorActionPreference 在 param 前)返回 FAIL(exit 1); 修复后 PASS。
+  B) REAL_PARSER(有 pwsh/powershell 时): Parser::ParseFile 要求 errors.Count=0; 无 host 显式
+     SKIPPED(不静默当 clean)。Windows deploy 会真实执行。
+
+deploy 顺序(fail-closed 保持): PS1_STRUCTURE -> STATIC -> LOGIC -> BUILD(game python build)
+  -> build artifact verify -> 才 copy debug ts4script -> 才 P28C redep。任一 gate 失败不写 Mods/不动 P28C。
+
+实验目标不变: P29-A 只测 constructor(RAW_ARG/INSTANCE_DISPLAY_NAME/NAME/LOCALIZED_HASH);
+不 P29-B UI hook; 不改 WW ts4script / Nevely 源 package / P28C / P24。
+真机勿跑旧 bea8936; pull 到新 commit 后再跑:
+  powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29a_deploy.ps1

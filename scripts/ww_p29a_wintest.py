@@ -36,6 +36,8 @@ def run(label, cmd):
 
 def main():
     codes = {}
+    codes["PS1"] = run("PS1_STATIC_CHECK",
+                       [sys.executable, str(SCRIPTS / "ww_p29a_ps1_static_check.py")])
     codes["STATIC"] = run("STATIC_CHECK",
                           [sys.executable, str(SCRIPTS / "ww_p29a_static_check.py")])
     codes["LOGIC"] = run("LOGIC_TEST",
