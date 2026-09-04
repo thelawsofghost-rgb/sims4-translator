@@ -725,3 +725,65 @@ Dorothy: git pull; redeploy ONLY the debug ts4 (ww_p29_tuning_deploy.ps1) then r
 the trigger + ww_p29_tuning_read_log.ps1 -> expect ORIG_DEFAULTS/ORIG_KWDEFAULTS printed
 at install and a clean (HOOK_ERROR-free) session; if an ORIG_* shows isNone=n on
 animation_override, that CONFIRMS the sentinel-default hypothesis.
+
+## P29-B FINAL DISPLAY / PICKER TRACE (2026-09-04 21:04) -- UI-downstream observation only
+
+DECISIVE precedent established by the real 21:04 tuning run (P28C ordinal299 live):
+    TUNING_#2055 RAW_ATTR='TEST299' DISPLAY_ATTR=None TUNING_TYPE=TunableFactoryWrapper
+    ANIMATION_OVERRIDE_PRESENT=OMITTED
+    RETURN_INSTANCE_DISPLAY_NAME='TEST299' _OVERRIDE=None AUTHOR='Nevely42' ID=0 MATCH=TARGET
+  => P28C_REACHES_RUNTIME_TUNING=YES RAW_ATTR_TEST299=YES
+     INSTANCE_DISPLAY_NAME_TEST299=YES INSTANCE_DISPLAY_NAME_OVERRIDE_NONE=YES
+So the OLD question is resolved (TEST299 DOES reach WW runtime + instance.display_name).
+The NEW open question is pure UI-downstream: instance.display_name is already TEST299 yet
+the final picker/UI still shows the old English.  P29-B observes ONLY the real UI-facing
+instance methods; it does NOT touch XML / package / tuning / parser / display_name / P24.
+
+NEW module  ww_p29b_display_trace.py  hooks the REAL class methods
+    SexAnimationInstance.get_display_name(self, string_hash, original)
+    SexAnimationInstance.get_picker_row(self, ...)
+by transparent class-method passthrough:  ret = orig(self, *args, **kwargs)
+(self + args unchanged, never authored).  Discovery/retry reuses the proven real zone
+scheduler; the class is found by _find_class() (exact module first, then sys.modules scan),
+methods rebinding via setattr(cls,name,wrapped).  Records, for TARGET instances only
+(match is by VALUE: display_name in {'TEST299','Caught Cheating 1'} OR author=='Nevely42';
+animation_id is NOT trusted -- it is 0 for this target):
+   get_display_name frame: BASE_DISPLAY_NAME / DISPLAY_NAME_OVERRIDE /
+     ORIGINAL_INSTANCE_PRESENT / ORIGINAL_INSTANCE_DISPLAY_NAME / ARG_STRING_HASH /
+     ARG_ORIGINAL / AUTHOR / ANIMATION_IDENTIFIER / GET_DISPLAY_NAME_RETURN
+   get_picker_row frame:  PICKER_INSTANCE_DISPLAY_NAME / PICKER_DISPLAY_NAME_OVERRIDE /
+     PICKER_ROW_TEXT / PICKER_ROW_NAME / PICKER_ROW_DESCRIPTION
+     (row fields probed from a FIXED allow-list only; absent/non-str -> UNAVAILABLE;
+      never guesses fields, never calls .text/gettext on a local object)
+Named root causes emitted inline in get_display_name frames:
+   original present + ARG_ORIGINAL True + original display 'Caught Cheating 1' + return old
+        -> P29B_RESULT=UI_USING_ORIGINAL_INSTANCE            (highest priority suspect)
+   override=='Caught Cheating 1' and return old             -> DISPLAY_NAME_OVERRIDE_WINS
+   base TEST299 but get_display_name returns old            -> GET_DISPLAY_NAME_IS_SWITCH
+Picker-stage: base TEST299 + row text old English          -> PICKER_ROW_USES_OTHER_SOURCE
+Run-level A/B/C/PICKER_POSTPROCESSING derived POST-SESSION by ww_p29b_report_check.py
+(never guessed mid-run):
+   1 HOOK_ERROR present              -> P29B_RESULT=INVALID_HOOK_ERROR   (wins everything)
+   2 no HOOK_INSTALLED=YES          -> HOOK_NOT_INSTALLED
+   3 strong-to-weak in-gdn root cause: UI_USING_ORIGINAL_INSTANCE >
+      DISPLAY_NAME_OVERRIDE_WINS > GET_DISPLAY_NAME_IS_SWITCH
+   4 else gdn returns TEST299 but PICKER_ROW_TEXT=='Caught Cheating 1' -> PICKER_ROW_USES_OTHER_SOURCE
+     else (clean gdn TEST299, rows clean) -> PICKER_POSTPROCESSING_OR_OTHER_UI_SOURCE
+   5 installed + zero target frames -> TARGET_TUNING_NOT_OBSERVED
+
+REUSE: ww_p29a_build_on_win.ps1 gained a P29-B family (SrcMod ww_p29b_display_trace.py ->
+member ww_p29b_display_trace.pyc, probe attr main) so the SAME magic-matched compiler +
+real py37 gate drive it.  ps1_static registers p29b_deploy/read_log/rollback (13 ps1).
+wintest: +BLOGIC/BSTATIC/BREPORT/BBUILD -> 18 gates? (MAGIC PS1 STATIC LOGIC PY37 PY37ARGV
+LIVECLS DISP ORIGIN TSTATIC TLOGIC TBUILD BLOGIC BSTATIC BREPORT BBUILD BUILD).
+New ps1 set reuses the P28C TEST299 auto-deploy + flag-based restore rollback, one-key.
+
+Gates green under host AND real CPython 3.7.9 (magic 420d0d0a): p29b static PASS, logic
+PASS (hook+transparent gdn, UI_USING_ORIGINAL_INSTANCE, DISPLAY_NAME_OVERRIDE_WINS,
+SENTINEL omitted-default preserved, PICKER_ROW_USES_OTHER_SOURCE, row UNAVAILABLE when
+unknown, non-target not framed, restore), py37 gate REAL PASS, report precedence verified
+(err>install>orig>ovr>switch>pickerC>pickerA>none), builder round-trip + probe PASS.
+wintest 14/14? (all listed PASS; P29A_WINTEST=PASS).  Scope unchanged: no source-WW /
+Nevely / P28C payload / XML / P24 / Chinese / new canary.  Deploy NOT run (observation-only).
+Dorothy: git pull; ww_p29b_deploy.ps1 -> launch, open Nevely picker -> ww_p29b_read_log.ps1
+-> ww_p29b_rollback.ps1.  Expect ORIGINAL_INSTANCE_PRESENT / _DISPLAY_NAME + P29B_RESULT.

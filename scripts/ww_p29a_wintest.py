@@ -19,14 +19,17 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 REPO = SCRIPTS.parent
 MOD = SCRIPTS / "ww_p29a_mod.py"
 TUNING_MOD = SCRIPTS / "ww_p29_tuning_mod.py"
+P29B_MOD = SCRIPTS / "ww_p29b_display_trace.py"
 TS4_OUT = Path(os.environ.get("TMPDIR", "/tmp")) / "ww_p29a_debug.ts4script"
 TUNING_TS4_OUT = Path(os.environ.get("TMPDIR", "/tmp")) / "ww_p29_tuning_debug.ts4script"
+P29B_TS4_OUT = Path(os.environ.get("TMPDIR", "/tmp")) / "ww_p29b_display_trace.ts4script"
 
 
 def run(label, cmd):
@@ -501,6 +504,61 @@ def magic_chain():
     return 0
 
 
+def p29b_report_mechanism():
+    """Mechanism check for ww_p29b_report_check.py precedence: error always wins;
+    then strong-to-weak in-gdn root cause; then picker-stage branch C/final; then
+    residual GDN-only; final TARGET_TUNING_NOT_OBSERVED.  Builds temp logs in-memory."""
+    import collections
+    rc = SCRIPTS / "ww_p29b_report_check.py"
+    cases = {
+        "err": ['HOOK_INSTALLED=YES', 'BASE_DISPLAY_NAME=\'TEST299\'',
+                'HOOK_ERROR=Traceback...'],
+        "orig": ['HOOK_INSTALLED=YES', 'P29B_RESULT=UI_USING_ORIGINAL_INSTANCE'],
+        "ovr": ['HOOK_INSTALLED=YES', 'P29B_RESULT=DISPLAY_NAME_OVERRIDE_WINS'],
+        "switch": ['HOOK_INSTALLED=YES',
+                   'P29B_RESULT=GET_DISPLAY_NAME_IS_SWITCH'],
+        "pickerC": ['HOOK_INSTALLED=YES', "PICKER_#1",
+                    "BASE_DISPLAY_NAME='TEST299'",
+                    "GET_DISPLAY_NAME_RETURN='TEST299'",
+                    "PICKER_ROW_TEXT='Caught Cheating 1'"],
+        "pickerA": ['HOOK_INSTALLED=YES', "PICKER_#1",
+                    "BASE_DISPLAY_NAME='TEST299'",
+                    "GET_DISPLAY_NAME_RETURN='TEST299'",
+                    "PICKER_ROW_TEXT='TEST299'"],
+        "none": ['HOOK_INSTALLED=YES'],
+    }
+    expect = {
+        "err": "INVALID_HOOK_ERROR",
+        "orig": "UI_USING_ORIGINAL_INSTANCE",
+        "ovr": "DISPLAY_NAME_OVERRIDE_WINS",
+        "switch": "GET_DISPLAY_NAME_IS_SWITCH",
+        "pickerC": "PICKER_ROW_USES_OTHER_SOURCE",
+        "pickerA": "PICKER_POSTPROCESSING_OR_OTHER_UI_SOURCE",
+        "none": "TARGET_TUNING_NOT_OBSERVED",
+    }
+    require = {"none", "pickerC", "pickerA", "err", "orig"}
+    ok = True
+    with tempfile.TemporaryDirectory() as td:
+        for key, lines in cases.items():
+            if key not in require:
+                continue
+            p = Path(td) / ("%s.log" % key)
+            p.write_text(("\n".join(lines)) + "\n", encoding="utf-8")
+            r = subprocess.run([sys.executable, str(rc), str(p)],
+                               capture_output=True, text=True)
+            got = ""
+            for x in r.stdout.splitlines():
+                if x.startswith("P29B_RESULT="):
+                    got = x.split("=", 1)[1].strip()
+            tag = "PASS" if (r.returncode == 0 and got == expect[key]) else "FAIL"
+            if tag != "PASS":
+                ok = False
+            print("P29B_REPORT[%s]=%s (want=%s got=%s)" % (
+                key, tag, expect[key], got or "(none)"))
+    print("P29B_REPORT=PASS (mechanism OK)" if ok else "P29B_REPORT=FAIL")
+    return 0 if ok else 1
+
+
 def main():
     codes = {}
     codes["MAGIC"] = magic_chain()
@@ -524,6 +582,20 @@ def main():
     codes["TLOGIC"] = run("TUNING_LOGIC_TEST",
                            [sys.executable,
                             str(SCRIPTS / "ww_p29_tuning_logic_test.py")])
+    codes["BLOGIC"] = run("P29B_LOGIC_TEST",
+                           [sys.executable,
+                            str(SCRIPTS / "ww_p29b_logic_test.py")])
+    codes["BSTATIC"] = run("P29B_STATIC_CHECK",
+                            [sys.executable,
+                             str(SCRIPTS / "ww_p29b_static_check.py")])
+    codes["BREPORT"] = p29b_report_mechanism()
+    codes["BBUILD"] = run("P29B_BUILD_ROUNDTRIP",
+                           [sys.executable,
+                            str(SCRIPTS / "ww_p29a_build_ts4script.py"),
+                            "--src", str(P29B_MOD), "--out", str(P29B_TS4_OUT),
+                            "--member", "ww_p29b_display_trace.pyc",
+                            "--probe-attr", "main",
+                            "--probe-mod", "ww_p29b_mod_probe"])
     codes["TBUILD"] = run("TUNING_BUILD_ROUNDTRIP",
                            [sys.executable,
                             str(SCRIPTS / "ww_p29a_build_ts4script.py"),
