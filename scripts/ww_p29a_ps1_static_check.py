@@ -111,11 +111,90 @@ def _check_param_placement(text_lines, name):
     return fails
 
 
+def _token_balance(text):
+    """Deterministic structural gate for the EXACT bug class found on 2026-09-04:
+    a brace/paren imbalance hidden inside a multiline "..." + "..." string
+    concatenation made the .ps1 die at the PowerShell PARSER stage (before any line
+    executed), invisible to the pure-text PARAM_PLACEMENT check (which only looks at
+    lines above the first header).
+
+    This is a small state machine, NOT a per-line regex: it walks the raw text and,
+    with correct state carried ACROSS lines, skips comments, single- and
+    double-quoted strings (backtick / doubled-quote aware), and here-strings
+    (@'...'@ and @"..."@ whose terminator starts a line), while tracking the running
+    depth of () [] {}.  Returns a list of imbalance messages (empty == balanced).
+    """
+    pairs = {')': '(', ']': '[', '}': '{'}
+    depth = []          # (open_char, line_no) currently open
+    issues = []
+    lines = text.split('\n')
+    n = len(lines)
+    i = 0
+    while i < n:
+        ln = lines[i]
+        j, L = 0, len(ln)
+        while j < L:
+            ch = ln[j]
+            nxt = ln[j + 1] if j + 1 < L else ''
+            if ch == '#':
+                break                     # comment to end of line
+            if ch == "'":
+                j += 1
+                while j < L:
+                    if ln[j] == "'":
+                        if j + 1 < L and ln[j + 1] == "'":   # '' escape
+                            j += 2
+                            continue
+                        break
+                    j += 1
+                j += 1
+                continue
+            if ch == '"':
+                j += 1
+                while j < L:
+                    if ln[j] == '`' and j + 1 < L:             # backtick escape
+                        j += 2
+                        continue
+                    if ln[j] == '"':
+                        break
+                    j += 1
+                j += 1
+                continue
+            if ch == '@' and nxt in ("'", '"'):
+                closer = "'@" if nxt == "'" else '"@'
+                k = i + 1
+                while k < n and not lines[k].lstrip().startswith(closer):
+                    k += 1
+                if k >= n:
+                    issues.append("here-string never closed (opened L%d)" % (i + 1))
+                    return issues
+                i = k                      # resume after the terminator line
+                break                      # line consumed by the here-string
+            if ch in '([{':
+                depth.append((ch, i + 1))
+                j += 1
+                continue
+            if ch in pairs:
+                want = pairs[ch]
+                if not depth or depth[-1][0] != want:
+                    issues.append("L%d: unmatched '%s' (expected '%s')" % (i + 1, ch, want))
+                    return issues
+                depth.pop()
+                j += 1
+                continue
+            j += 1
+        i += 1
+    for ch, lno in depth:
+        issues.append("unclosed '%s' opened at L%d" % (ch, lno))
+    return issues
+
+
 def _check_ps1(path):
-    """Return (fail_reasons, has_ps_host, parser_fails, parser_err)."""
+    """Return (placement_fails, has_ps_host, parser_fails, parser_err, imbalance)."""
     text = path.read_text(encoding="utf-8", errors="replace")
     lines = text.splitlines()
     placement = _check_param_placement(lines, path.name)
+    imbalance = _token_balance(text)
 
     # ---- B) real parser best-effort ----
     host = shutil.which("pwsh") or shutil.which("powershell")
@@ -163,7 +242,44 @@ def _check_ps1(path):
                     os.unlink(tmp_ps.name)
                 except OSError:
                     pass
-    return placement, (not host_missing), parser_fails, parser_err
+    return placement, (not host_missing), parser_fails, parser_err, imbalance
+
+
+def _self_balance_tests():
+    """Validate the STRUCT_BALANCE detector itself can BOTH flag the bug class that
+    bit us (2026-09-04) and NOT false-positive on legitimately tricky PowerShell
+    (braces inside strings, ${scope} vars, here-strings).  Returns list of failures."""
+    fails = []
+    # 1) the real-machine bug class: an EXTRA unbalanced brace/paren that makes a
+    #    .ps1 die at the PowerShell PARSER stage (structurally must be caught even
+    #    though PARAM_PLACEMENT/PY37_ARGV_SHAPE only look at text above the header).
+    broken = (
+        "if (-not (Test-Path -LiteralPath $Py37)) {\n"
+        "    throw \"PY37_MISSING=$Py37; pass -Py37 if installed elsewhere\"\n"
+        "}\n"
+        "}\n"          # stray extra closing brace -> must be flagged
+    )
+    if not _token_balance(broken):
+        fails.append("detector MISSED extra unbalanced brace")
+
+    # 2) an extra/earlier closing brace that PowerShell would reject
+    if not _token_balance("if ($a) { Write-Output 'x' } } }\n"):
+        fails.append("detector MISSED stray trailing braces")
+
+    # 3) legitimately tricky but VALID PowerShell must not be flagged
+    ok_samples = [
+        # braces + parens nested inside double-quoted strings
+        "${scope}x = 'lit'\nWrite-Output \"result={0} and }}\"\n",
+        # single-line block heavily used by Fail-style helpers
+        "function F($r) { Write-Output \"R=$r\"; Write-Output \"V=FAIL\"; exit 1 }\n",
+        # here-string with braces and parens inside content (terminator at line start)
+        "$doc = @'\nraw { paren ( content\n'@\nWrite-Output $doc\n",
+    ]
+    for s in ok_samples:
+        bad = _token_balance(s)
+        if bad:
+            fails.append("false positive on valid PS: %r -> %r" % (s[:40], bad))
+    return fails
 
 
 def main():
@@ -176,6 +292,8 @@ def main():
                              "scripts/ww_p29a_static_trace.ps1",
                              "scripts/ww_p29a_display_source_trace.ps1"],
                     help=".ps1 files to check")
+    ap.add_argument("--selftest", action="store_true", default=True,
+                    help="run the balance-detector self tests (guards the guard)")
     a = ap.parse_args()
 
     any_fail = False
@@ -185,10 +303,15 @@ def main():
             print("PS1_STATIC_FAIL %s (missing)" % name)
             any_fail = True
             continue
-        placement, host_bool, parser_fails, parser_err = _check_ps1(path)
+        placement, host_bool, parser_fails, parser_err, imbalance = _check_ps1(path)
         argv_shape = _check_py37_argv_shape(path.read_text(encoding="utf-8", errors="replace"),
                                             path.name)
         print("PS1_STATIC %s" % path.name)
+        print("  STRUCT_BALANCE=%s" % ("PASS" if not imbalance else "FAIL"))
+        if imbalance:
+            any_fail = True
+            for f in imbalance:
+                print("    " + f)
         print("  PARAM_PLACEMENT=%s" % ("PASS" if not placement else "FAIL"))
         if placement:
             any_fail = True
@@ -210,6 +333,15 @@ def main():
                         print("    [ps] " + ln)
         else:
             print("  REAL_PARSER=SKIPPED (no pwsh/powershell host on THIS host)")
+
+    if a.selftest:
+        print("SELF_BALANCE_TESTS ...")
+        sf = _self_balance_tests()
+        print("  SELF_BALANCE=%s" % ("PASS" if not sf else "FAIL"))
+        if sf:
+            any_fail = True
+            for f in sf:
+                print("    " + f)
 
     if any_fail:
         print("VERDICT=PS1_STATIC_FAIL")

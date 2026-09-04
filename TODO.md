@@ -531,3 +531,39 @@ Nevely ts4script edit, no P28C/P24 change, no Chinese.  Pure read-only native tr
 ps1 static gate now checks 7 ps1 scripts (build_on_win/deploy/rollback/liveprobe/
 static_trace/display_source_trace + debug runner).  wintest gained DISP mechanism
 (offline fixtures, both branches PASS).  wintest all PASS.
+
+## P29-A PS1 PARSER-BUG FIX (2026-09-04) -- real-machine parser failure, not WW/python
+
+Real-machine symptom: `ww_p29a_display_source_trace.ps1` died at the PowerShell PARSER
+stage ("expression missing ')'", "statement/block missing '}'") BEFORE any native
+trace ran.  Root cause: lines 31-33 used a fragile multiline `Fail ("..." + "...")`
+concatenation whose )/} landed wrong; param-placement/py37-argv pure-text gates could
+NOT see it (they only inspect text above the first header).
+
+Fixes (commit):
+  * ww_p29a_display_source_trace.ps1: replaced the multiline-`+` throw with a single
+    plain `throw "PY37_MISSING=$Py37; ..."` string.  No cross-line concat.  (The rest
+    is unchanged: param first, 2> to %TEMP% stderr file, no &&, no $Args misuse.)
+  * ww_p29a_ps1_static_check.py: added STRUCT_BALANCE -- a deterministic tokenizer
+    state-machine (NOT a per-line regex) that skips comments / '...' / "..." (backtick
+    + doubled-quote aware) / here-strings and tracks () [] {} depth across lines.
+    Catches the parser-stage bug class regardless of whether a PowerShell host exists.
+    Printed per-ps1 as STRUCT_BALANCE=PASS/FAIL + the offending line.  Includes
+    SELF_BALANCE_TESTS proving the detector flags an extra unbalanced brace AND does
+    not false-positive on valid tricky PS (braces in strings, ${scope}, here-strings,
+    single-line { ... } Fail blocks).  ww_p29a_display_source_trace.ps1 is registered
+    in the default ps1 list (6 ps1s, all STRUCT_BALANCE=PASS).
+  * REAL_PARSER (true [System.Management.Automation.Language.Parser]::ParseFile) still
+    runs when pwsh/powershell is on PATH (best effort, FAILs the gate on >0 errors);
+    on Linux sandbox it is SKIPPED (no engine).  STRUCT_BALANCE is the enforced,
+    engine-free gate that always runs; on Dorothy's Windows machine REAL_PARSER also
+    runs over every P29 ps1.
+
+Re-verified offline: all 6 ps1 STRUCT_BALANCE/PARAM_PLACEMENT/PY37_ARGV_SHAPE PASS,
+SELF_BALANCE=PASS, and the full wintest is green
+(MAGIC/PS1/STATIC/LOGIC/PY37/PY37ARGV/LIVECLS/DISP/BUILD = P29A_WINTEST=PASS).
+
+Scope unchanged: read-only display-source pin only (animation_raw_display_name ->
+display_name -> SexAnimationInstance).  No P29-A deploy, no P29-B, no WW/Nevely/
+P28C/P24, no Chinese.  Dorothy: `git pull`, then re-run the ps1 (parser stage now
+passes; the static trace runs under the real 3.7.9).

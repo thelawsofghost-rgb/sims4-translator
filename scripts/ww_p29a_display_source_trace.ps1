@@ -29,8 +29,8 @@ function Fail($reason) { Write-Output "VERDICT=FAIL"; Write-Output "REASON=$reas
 
 if (-not (Test-Path -LiteralPath $Mods)) { Fail "Mods_MISSING=$Mods" }
 if (-not (Test-Path -LiteralPath $Py37)) {
-    Fail ("PY37_MISSING=$Py37  (need local CPython 3.7.9, magic 420d0d0a; install and "
-          + "pass -Py37 if not at the default path)") }
+    throw "PY37_MISSING=$Py37; need local CPython 3.7.9 magic 420d0d0a; pass -Py37 if installed elsewhere"
+}
 
 $WW = Get-ChildItem -LiteralPath $Mods -Recurse -Filter "TURBODRIVER_WickedWhims_Scripts.ts4script" -File -ErrorAction SilentlyContinue
 if (-not $WW) { Fail "WW_TS4SCRIPT_NOT_FOUND under $Mods" }
