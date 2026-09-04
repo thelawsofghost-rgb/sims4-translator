@@ -137,16 +137,42 @@ def label_exprs(fn, want_stores=(DISP,), calls_ctor_of=(INSTANCE,)):
                     stack.append(stack[-1])
             elif op.startswith("CALL_FUNCTION"):
                 npos = int(i.arg) & 0xFF
-                isn_kw = bool((int(i.arg) >> 8) & 0xFF) if not op.endswith("KW") else True
-                args = stack[-npos:] if npos else []
-                stack = stack[:-npos] if npos else stack
-                callee = stack.pop() if stack else "?fn"
-                # callee may be ATTR(...)/L:METH -> method
-                built = _mk_call(callee, args, op)
-                stack.append(built)
-                if _is_ctor_callee(callee):
-                    ctor_calls.append({"call_ndx": ndx, "offset": i.offset,
-                                       "callee": callee, "args": list(args), "op": op})
+                if op == "CALL_FUNCTION_KW":
+                    # CPython 3.7 CALL_FUNCTION_KW stack (deepest->top):
+                    #   [callable, *arg_values, kw_names_tuple]
+                    # unlike plain CALL_FUNCTION the tuple of keyword NAMES sits on
+                    # the very top and is NOT part of argc (argc counts all arg
+                    # VALUES, positional + keyword).  Pop it first so the remaining
+                    # npos values are the args and the callable sits directly below.
+                    names_label = stack.pop() if stack else "?names"
+                    args = stack[-npos:] if npos else []
+                    stack = stack[:-npos] if npos else stack
+                    callee = stack.pop() if stack else "?fn"
+                    kw_names = ""
+                    if names_label.startswith("S:"):
+                        try:
+                            kw_names = ",".join(map(str, eval(names_label[2:])))
+                        except Exception:
+                            kw_names = "?"
+                    if kw_names:
+                        names_label = "KW(" + kw_names + ")"
+                    built = _mk_call(callee, args, op, names_label)
+                    stack.append(built)
+                    if _is_ctor_callee(callee):
+                        rec = {"call_ndx": ndx, "offset": i.offset,
+                               "callee": callee, "args": list(args), "op": op,
+                               "kw": kw_names or "?"}
+                        ctor_calls.append(rec)
+                else:
+                    args = stack[-npos:] if npos else []
+                    stack = stack[:-npos] if npos else stack
+                    callee = stack.pop() if stack else "?fn"
+                    built = _mk_call(callee, args, op)
+                    stack.append(built)
+                    if _is_ctor_callee(callee):
+                        ctor_calls.append({"call_ndx": ndx, "offset": i.offset,
+                                           "callee": callee, "args": list(args),
+                                           "op": op, "kw": "?"})
             elif op.startswith("CALL_METHOD"):
                 npos = int(i.arg) & 0xFF
                 # In 3.7, LOAD_METHOD pushes (receiver, method) then CALL_METHOD n
@@ -169,7 +195,8 @@ def label_exprs(fn, want_stores=(DISP,), calls_ctor_of=(INSTANCE,)):
                 stack.append(built)
                 if _is_ctor_callee(m):
                     ctor_calls.append({"call_ndx": ndx, "offset": i.offset,
-                                       "callee": m, "args": list(args), "op": op})
+                                       "callee": m, "args": list(args), "op": op,
+                                       "kw": "?"})
             elif op in STORE:
                 if stack:
                     val = stack.pop()
@@ -242,8 +269,11 @@ def label_exprs(fn, want_stores=(DISP,), calls_ctor_of=(INSTANCE,)):
     return producers, ctor_calls
 
 
-def _mk_call(callee, args, op):
-    return "CALL(" + callee + ", [" + ", ".join(args) + "])"
+def _mk_call(callee, args, op, kw_names=None):
+    base = "CALL(" + callee + ", [" + ", ".join(args) + "])"
+    if kw_names:
+        base = base[:-1] + ", kw={" + kw_names + "})" if base.endswith(")") else base
+    return base
 
 
 def _is_ctor_callee(callee):

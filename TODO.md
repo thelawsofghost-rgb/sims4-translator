@@ -567,3 +567,57 @@ Scope unchanged: read-only display-source pin only (animation_raw_display_name -
 display_name -> SexAnimationInstance).  No P29-A deploy, no P29-B, no WW/Nevely/
 P28C/P24, no Chinese.  Dorothy: `git pull`, then re-run the ps1 (parser stage now
 passes; the static trace runs under the real 3.7.9).
+
+## P29-A DISPLAY-ORIGIN AUDIT + CALLSITE FIX (2026-09-04) -- read-only, current WW
+
+Real-machine DISPLAY trace (from the ps1, run on Dorothy's box) RETIRED the old
+"animation_raw_display_name -> SexAnimationInstance" assumption for good.  The live
+_create_sex_animation_instance does:
+
+    display_name = animation_tuning.animation_display_name     # store#8
+        ... SexAnimationInstance(animation_id=.., display_name=display_name, ..)
+
+and the display tuple is READ-ONLY on a tuning object (no const literal in the fn),
+with the raw field read elsewhere as a sibling.  (P28C sets animation_raw_display_name,
+which is a SEPARATE sibling -> explains "raw='TEST299' but UI still English".)
+
+NEW (commit):
+  * scripts/ww_p29a_display_origin_trace.py -- whole-ts4script READ-ONLY native-marshal
+    audit (magic-verify every .pyc == 420d0d0a, native marshal, NO xdis):
+      - who STOREs animation_display_name / animation_raw_display_name across ALL
+        members: ANIMATION_DISPLAY_NAME_WRITERS= / ANIMATION_RAW_DISPLAY_NAME_WRITERS=
+        with MODULE= FUNCTION= BYTECODE_CONTEXT= per writer
+      - _create_sex_animation_instance param list + ANIMATION_TUNING_SOURCE
+        (ctor-parameter vs local) + ANIMATION_TUNING_TYPE_HINT / CREATED_BY (the
+        member::fn that STORE-writes the tuning fields is the creator signal; py3.7
+        marshal has no co_qualname so exact class name is honestly noted as not named)
+      - RAW_TO_ANIMATION_DISPLAY_RELATION = DIRECT|TRANSFORMED|INDEPENDENT|UNRESOLVED,
+        decided from real per-function mini-VM producer maps (NOT fragile +/-N op
+        windows that conflated adjacent statements), with REL_REASON bytecode evidence
+      - XML/tuning keys: XML_KEY_FOR_ANIMATION_DISPLAY_NAME / _RAW_DISPLAY_NAME
+        (literal const vs NOT_LITERAL / ATTRIBUTE_DERIVED) + XML_KEY_LITERAL per key
+  * scripts/ww_p29a_display_origin_trace.ps1 (NEW) -- one-key runner on the REAL box:
+        powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29a_display_origin_trace.ps1
+    param/[CmdletBinding()] first, 2> to %TEMP% stderr, no &&, no $Args.
+  * ww_p29a_display_source_trace.py: FIXED the callsite false negative (Task 5).
+    The mini-VM now reconstructs CALL_FUNCTION_KW (3.7: the kw-NAMES tuple sits on top
+    and is NOT part of argc -- pop it first, remaining n are the arg VALUES, callable
+    below).  Real WW uses CALL_FUNCTION_KW, previously the display arg was reported
+    UNRESOLVED(no SexAnimationInstance CALL in fn); now emits CTOR_CALL_OFFSET/CTOR_ARG[i]
+    and DISPLAY_NAME_ARGUMENT_TO_CTOR=L:display_name for CALL_FUNCTION/CALL_FUNCTION_KW/
+    CALL_METHOD alike.
+  * ww_p29a_ps1_static_check.py: registered ww_p29a_display_origin_trace.ps1 (7 ps1).
+  * ww_p29a_wintest.py: new ORIGIN mechanism gate (codes["ORIGIN"]) building DIRECT/
+    TRANSFORMED/INDEPENDENT loader fixtures + a CALL_FUNCTION_KW loader, asserting
+    RAW_TO_ANIMATION_DISPLAY_RELATION=DIRECT/TRANSFORMED/INDEPENDENT and that the KW
+    call yields DISPLAY_NAME_ARGUMENT_TO_CTOR=L:display_name (never UNRESOLVED).
+
+Verified offline: origin tracer compiles + runs under the REAL 3.7.9; DIRECT/
+TRANSFORMED/INDEPENDENT each reproduce on fixtures; cross-member writer attribution
+works; CALL_FUNCTION_KW callsite fixed (CTOR_ARG[1]=L:display_name on a kw-only ctor).
+All wintest gates green (MAGIC/PS1/STATIC/LOGIC/PY37/PY37ARGV/LIVECLS/DISP/ORIGIN/
+BUILD -> P29A_WINTEST=PASS).  ps1 static: 7/7 STRUCT_BALANCE=PASS.
+
+Deploy NOT run (read-only per user).  No P29-B, no new canary, no WW/Nevely/P28C/P24,
+no Chinese.  Dorothy: git pull, run the origin ps1, paste back
+ANIMATION_*_WRITERS / ANIMATION_TUNING_SOURCE / XML_KEY_* / RAW_TO_ANIMATION_DISPLAY_RELATION.

@@ -224,6 +224,165 @@ def display_source_mechanism():
     return 0
 
 
+def display_origin_mechanism():
+    """Mechanism check for ww_p29a_display_origin_trace.py (the whole-ts4script audit
+    of WHERE the display name really comes from).
+
+    Builds loader fixtures under THIS interpreter (magic == tracer's own):
+      DIRECT fixture  : tuning.animation_display_name = tuning.animation_raw_display_name
+                        (bare copy, no call)  -> RAW_TO_ANIMATION_DISPLAY_RELATION=DIRECT
+      TRANSFORM fixture: display = _localize(raw)
+                        -> RAW_TO_ANIMATION_DISPLAY_RELATION=TRANSFORMED
+      INDEP fixture    : display and raw set from two DISTINCT .get() XML keys
+                        -> RAW_TO_ANIMATION_DISPLAY_RELATION=INDEPENDENT
+    Also re-runs the display_source tracer on a CALL_FUNCTION_KW loader (the real WW
+    style) asserting DISPLAY_NAME_ARGUMENT_TO_CTOR=L:display_name (not UNRESOLVED) --
+    the Task-5 callsite false-negative fix (CALL_FUNCTION/CALL_FUNCTION_KW/CALL_METHOD).
+    Returns 0 on PASS."""
+    import py_compile
+    import shutil
+    import tempfile
+    import zipfile
+    tracer = SCRIPTS / "ww_p29a_display_origin_trace.py"
+    src_tracer = SCRIPTS / "ww_p29a_display_source_trace.py"
+    d = tempfile.mkdtemp(prefix="wworg_")
+    try:
+        def _zip_one(py_src, outname, dfile="wickedwhims/sex/animations/animations_loader.pyc"):
+            py = os.path.join(d, outname + ".py")
+            with open(py, "w") as fh:
+                fh.write(py_src)
+            pyc = os.path.join(d, outname + ".pyc")
+            py_compile.compile(py, cfile=pyc, dfile=dfile)
+            out = os.path.join(d, outname + ".ts4script")
+            with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+                z.write(pyc, dfile)
+            return out
+
+        direct_src = (
+            "def _create_sex_animation_instance(xml_node):\n"
+            "    t = _Tuning()\n"
+            "    t.animation_raw_display_name = xml_node.get('animation_raw_display_"
+            "name', '')\n"
+            "    t.animation_display_name = t.animation_raw_display_name\n"
+            "    return t\n"
+            "class _Tuning(object):\n"
+            "    def __init__(self):\n"
+            "        self.animation_display_name = ''\n"
+            "        self.animation_raw_display_name = ''\n"
+        )
+        trans_src = (
+            "def _localize(o):\n"
+            "    return o\n"
+            "def _create_sex_animation_instance(xml_node):\n"
+            "    t = _Tuning()\n"
+            "    t.animation_raw_display_name = xml_node.get('animation_raw_display_"
+            "name', '')\n"
+            "    t.animation_display_name = _localize(t.animation_raw_display_name)\n"
+            "    return t\n"
+            "class _Tuning(object):\n"
+            "    def __init__(self):\n"
+            "        self.animation_display_name = ''\n"
+            "        self.animation_raw_display_name = ''\n"
+        )
+        indep_src = (
+            "def _create_sex_animation_instance(xml_node):\n"
+            "    t = _Tuning()\n"
+            "    t.animation_display_name = xml_node.get('animation_display_name', '')\n"
+            "    t.animation_raw_display_name = xml_node.get('animation_raw_display_"
+            "name', '')\n"
+            "    return t\n"
+            "class _Tuning(object):\n"
+            "    def __init__(self):\n"
+            "        self.animation_display_name = ''\n"
+            "        self.animation_raw_display_name = ''\n"
+        )
+        kw_src = (
+            "from wickedwhims.sex.animations.animation_instance import SexAnimation"
+            "Instance\n"
+            "def _create_sex_animation_instance(animation_tuning):\n"
+            "    display_name = animation_tuning.animation_display_name\n"
+            "    return SexAnimationInstance(animation_id=0, display_name=display_name, "
+            "author='WW', display_icon=None)\n"
+        )
+        inst_src = (
+            "class SexAnimationInstance(object):\n"
+            "    def __init__(self, animation_id=0, display_name='', author='', "
+            "display_icon=None):\n"
+            "        self.display_name = display_name\n"
+            "        self.display_name_override = None\n"
+            "        self.original_instance = None\n"
+            "    def get_display_name(self):\n"
+            "        return self.display_name_override if self.display_name_override is "
+            "not None else self.display_name\n"
+            "    def set_display_name(self, name):\n"
+            "        self.display_name_override = name\n"
+        )
+        I_MEM = "wickedwhims/sex/animations/animation_instance.pyc"
+
+        def run_origin(fixture):
+            r = subprocess.run([sys.executable, str(tracer), fixture], cwd=str(REPO),
+                               capture_output=True, text=True)
+            return r.returncode, (r.stdout or "") + (("[stderr] " + r.stderr)
+                                                      if r.stderr else "")
+
+        ok = True
+        fd = _zip_one(direct_src, "direct")
+        rc, op = run_origin(fd)
+        print("ORIGIN_DIRECT_REL=%s" % (
+            "PASS" if (rc == 0 and "RAW_TO_ANIMATION_DISPLAY_RELATION=DIRECT" in op)
+            else "FAIL"))
+        ok = ok and rc == 0 and "RAW_TO_ANIMATION_DISPLAY_RELATION=DIRECT" in op
+
+        ft = _zip_one(trans_src, "trans")
+        rc, op = run_origin(ft)
+        print("ORIGIN_TRANSFORMED_REL=%s" % (
+            "PASS" if (rc == 0 and "RAW_TO_ANIMATION_DISPLAY_RELATION=TRANSFORMED" in op)
+            else "FAIL"))
+        ok = ok and rc == 0 and "RAW_TO_ANIMATION_DISPLAY_RELATION=TRANSFORMED" in op
+
+        fi = _zip_one(indep_src, "indep")
+        rc, op = run_origin(fi)
+        print("ORIGIN_INDEPENDENT_REL=%s" % (
+            "PASS" if (rc == 0 and "RAW_TO_ANIMATION_DISPLAY_RELATION=INDEPENDENT" in op)
+            else "FAIL"))
+        ok = ok and rc == 0 and "RAW_TO_ANIMATION_DISPLAY_RELATION=INDEPENDENT" in op
+
+        # Task-5 callsite false-negative fix: CALL_FUNCTION_KW must surface the display
+        # ctor arg instead of UNRESOLVED.
+        fk = os.path.join(d, "kw.ts4script")
+        py = os.path.join(d, "kw_loader.py")
+        with open(py, "w") as fh:
+            fh.write(kw_src)
+        pyc = os.path.join(d, "kw_loader.pyc")
+        py_compile.compile(py, cfile=pyc,
+                           dfile="wickedwhims/sex/animations/animations_loader.pyc")
+        with zipfile.ZipFile(fk, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(pyc, "wickedwhims/sex/animations/animations_loader.pyc")
+            pi = os.path.join(d, "kw_inst.py")
+            with open(pi, "w") as fh:
+                fh.write(inst_src)
+            pcy = os.path.join(d, "kw_inst.pyc")
+            py_compile.compile(pi, cfile=pcy, dfile=I_MEM)
+            z.write(pcy, I_MEM)
+        r = subprocess.run([sys.executable, str(src_tracer), fk], cwd=str(REPO),
+                           capture_output=True, text=True)
+        op = (r.stdout or "") + (("[stderr] " + r.stderr) if r.stderr else "")
+        good_kw = (r.returncode == 0
+                   and "DISPLAY_NAME_ARGUMENT_TO_CTOR=L:display_name" in op
+                   and "CTOR_CALL_OFFSET=" in op
+                   and "DISPLAY_NAME_ARGUMENT_TO_CTOR=UNRESOLVED" not in op)
+        print("CALLFUNCTION_KW_CTOR_CTOR=%s" % ("PASS" if good_kw else "FAIL"))
+        print("CALLFUNCTION_KW_SNIPPET=%s" % "".join(
+            [ln for ln in op.splitlines()
+             if ln.startswith(("CTOR_CALL_OFFSET", "CTOR_CALL_FN", "CTOR_ARG[",
+                              "DISPLAY_NAME_ARGUMENT_TO_CTOR"))]))
+        ok = ok and good_kw
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    print("ORIGIN=PASS (mechanism OK; real answer needs Dorothy's live WW ts4script)")
+    return 0 if ok else 1
+
+
 def py37_argv():
     """Assert the PowerShell wrapper assembles the DOUBLE-dash '--py37' flag and
     that the exact argv shape `--py37 <py37.exe> <files...>` parses cleanly.
@@ -356,6 +515,7 @@ def main():
     codes["PY37ARGV"] = py37_argv()
     codes["LIVECLS"] = livecls_mechanism()
     codes["DISP"] = display_source_mechanism()
+    codes["ORIGIN"] = display_origin_mechanism()
     codes["BUILD"] = run("BUILD_ROUNDTRIP",
                          [sys.executable, str(SCRIPTS / "ww_p29a_build_ts4script.py"),
                           "--src", str(MOD), "--out", str(TS4_OUT)])
