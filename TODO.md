@@ -1011,3 +1011,55 @@ functions print exactly which attr feeds row.title/text (animation_stage_name in
 fixture), and collection lambdas are separate.  ASCII-only, 3.7-syntax-clean.
 NO P29-D HOOK IS DESIGNED YET - rule: single hook ONLY after the static evidence names
 the one real row/title-builder function.  This step only LOCATES.
+
+## P29-D STEP-2 (2026-09-05): whole-package row-builder scan -- evidence + correction
+
+REAL static evidence #1 (animations_handler L288) -- CONFIRMED SORT ONLY, NOT a builder:
+    sorted(all_sex_animations, key=lambda x: str(x.get_display_name(string_hash=True)))
+    then only assigns animation_order_id to each instance.
+    => LINE288_ROLE=SORT_ONLY.  get_display_name(string_hash=True) here is ONLY a sort
+       key (hashed), never a row-title source at render.
+
+REAL static evidence #2 (stage_name) -- DOWNGGRADE per Dorothy:
+    get_stage_name / stage_name currently appear ONLY in
+        animations_handler._cache_animations_stages_lookup
+    building  stage_name -> SexAnimationInstance  and the next_stage progression.
+    NO static evidence that stage_name is the picker row title.
+    => ROW_TITLE_SOURCE 强指向 stage_name 被推翻。 CORRECTED TO:
+       STAGE_NAME_UI_SOURCE=UNPROVEN
+    My earlier TODO line "visible row text almost certainly comes from stage_name"
+    was an OVER-CLAIM: retract it.  (stage_name remains deliberately unedited.)
+
+REAL static evidence #3 (universal category picker) -- EXCLUDE from instance-row search:
+    every create_picker_row hit is inside
+        wickedwhims.sex.integral.dialogs.universal_sex_animations
+        display_universal_sex_animations_picker
+    building PLAYLIST / RANDOM / SEX_CATEGORY / SEX_CONTEXT  (category picker, NOT
+    concrete SexAnimationInstance rows).  => excluded from ROW_BUILDER_CANDIDATES.
+
+REAL static evidence #4:
+    wickedwhims.sex.integral.dialogs.sex_animation parses (13 nested funcs) but its
+    keyword census showed no concrete-instance row builder -> the true builder likely
+    lives in a helper / base dialog / turbolib2, OUTSIDE the 3 first-pass modules.
+
+NEXT (this branch):
+  Extend the static trace across the WHOLE TURBODRIVER_WickedWhims_Scripts.ts4script
+  (not only sex.integral.dialogs).  Search entire package: create_picker_row /
+  add_picker_row / ObjectPickerRow / TurboObjectPickerDialog / picker_rows / row /
+  get_display_name / get_stage_name / get_identifier / get_animation /
+  animation_instance / animation_order_id / LocalizedString.  Trace
+  SexAnimationInstance/animation_instance -> dialog/helper -> create/add row ->
+  first/title/name/text arg.  Follow helpers / base dialogs / turbolib2, NOT limited
+  to ww.sex.integral.dialogs.  EXCLUDE universal category picker.  Keep ONLY rows that
+  correspond to a concrete animation instance.
+  Deliverable: COMPACT output (not thousands of lines):
+    ROW_BUILDER_CANDIDATES= ... each { MODULE, FUNCTION, LINE, INSTANCE_SOURCE,
+    ROW_TITLE_SOURCE, CALL_SEQUENCE }
+    GET_DISPLAY_NAME_ROW_CALLS= / GET_STAGE_NAME_ROW_CALLS= /
+    ANIMATION_INSTANCE_ROW_CALLS=
+  Target keys when a real builder is found: ROW_BUILDER_MODULE= / ROW_BUILDER_FUNCTION= /
+  ROW_TITLE_SOURCE= / STATIC_CONFIDENCE=.
+  CSV is NOT a blocker (per Dorothy) -- skip CSV fix; primary deliverable is the txt.
+
+NO RUNTIME HOOK / NO TEST300 / NO stage_name / NO XML / NO WW edits.  Hold any P29-D
+  hook design until a real concrete-instance row builder is located by this scan.
