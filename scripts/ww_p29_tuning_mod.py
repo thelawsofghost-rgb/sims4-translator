@@ -39,8 +39,11 @@ PURPOSE (single): decide, per target animation, WHICH of A/B/C/D is true:
   C  RAW_ATTR=="TEST299" and DISPLAY_ATTR=="TEST299" and
      RETURN_INSTANCE_DISPLAY_NAME=="TEST299"
         -> P29_RESULT=TUNING_AND_INSTANCE_CORRECT
-  D  no target-keeping call observed across the whole run
-        -> P29_RESULT=TARGET_TUNING_NOT_OBSERVED   (never guessed)
+  D  installed + loader ok + no error + no target-keeping call across the whole run
+        -> P29_RESULT=TARGET_TUNING_NOT_OBSERVED
+     (Derived POST-SESSION by ww_p29_tuning_report_check.py only -- this module never
+     guesses D mid-run.  If a HOOK_ERROR was captured the session is INVALID:
+        -> P29_RESULT=INVALID_HOOK_ERROR, which takes precedence over D.
   Buckets are LABELED only when an actually-carried value equals a known marker;
   otherwise we record the real value truthfully.  No forced binary verdict.
 
@@ -48,8 +51,11 @@ SAFETY CONTRACT (fail-closed, temporary, read-only on the tuning object):
   1. We NEVER modify TURBODRIVER_WickedWhims_Scripts.ts4script.
   2. We NEVER modify any Nevely source package or P28C override on disk.
   3. We WRAP (do not replace the original function semantics): we call the ORIGINAL
-     _create_sex_animation_instance with the SAME (animation_tuning, animation_override)
-     args untouched and return its value untouched.  We READ tuning/instance attrs
+     strictly transparently by forwarding the EXACT received *args/**kwargs verbatim
+     (never re-authoring a positional override -- authoring a None default for an arg
+     whose real default is a WW sentinel was the 18:55 INVALID-run root cause).  Real
+     defaults are recorded at install (ORIG_SIGNATURE/ORIG_DEFAULTS/ORIG_KWDEFAULTS),
+     and we return the original's value untouched.  We READ tuning/instance attrs
      only (no attribute assignment to animation_display_name / animation_raw_display_name
      / display_name / display_name_override / name / etc.).
   4. If any of our observation code raises, we restore the original binding, log the
@@ -77,6 +83,10 @@ _MATCH_NEW_RAW = "TEST299"              # P28C override raw for ordinal 299
 _TUNING_MODULE = "wickedwhims.sex.animations.animations_loader"
 _TUNING_FUNC = "_create_sex_animation_instance"
 
+# Internal marker meaning "argument was NOT provided by the caller".  Distinct
+# object(); it is NEVER forwarded to orig (we only test identity against it).
+_UNSET_SENTINEL = object()
+
 _LOG_ROOTS = (
     os.environ.get("TMP", ""),
     os.environ.get("TEMP", ""),
@@ -93,7 +103,7 @@ _STATE = {
                        "C_correct": 0},
     "seen_markers_on": {"raw": set(), "display": set()},
     "target_record_emitted": False,
-    "final_verdict": "TARGET_TUNING_NOT_OBSERVED",
+    "final_verdict": None,  # D verdict is derived post-session ONLY by report_check
     "error": None,
     "_log_path": "",
     # discovery / timing
@@ -180,16 +190,139 @@ def _judge(raw, disp, ret_disp, override=None, ret=None):
     return (None, None, "NON_TARGET")
 
 
+def _signature_digest(orig):
+    """Emit the REAL default semantics of orig, recorded once at install time so
+    the next real run authoritatively shows what the loader's omitted args are.
+
+    Returns a list of ASCII lines to _emit().  We never repr() an arbitrary object
+    by calling str/repr on it (a hostile __repr__ could run code); we record only
+    shape and guarded identity facts:
+      ORIG_SIGNATURE=pos:<names> kw:<names> varargs:<y|n> varkw:<y|n>
+      ORIG_DEFAULTS=<n> <field> | ...   (positional-or-keyword, in order)
+      ORIG_KWDEFAULTS=<n> <field> | ... (keyword-only, in order)
+    where each <field> is:
+      UNSET                                  (no default at all)
+      type=<type-name>; isNone=<y|n>; <known-sentinel matches>
+    A '<known-sentinel>' match is only reported when we can resolve the real WW
+    symbol (e.g. EMPTY_ANIMATION_STRUCTURE_CONTAINER) from the loader module's own
+    namespace by identity -- never a guessed constant.
+    """
+    import os as _os
+    import inspect as _ins
+    out = []
+    try:
+        sig = _ins.signature(orig)
+    except Exception as e:
+        out.append("ORIG_SIGNATURE=<unreadable> %r %s" % (type(e).__name__, e))
+        return out
+    params = list(sig.parameters.values())
+    pos_params = [p for p in params
+                  if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    kw_params = [p for p in params if p.kind == p.KEYWORD_ONLY]
+    pos = [p.name for p in pos_params]
+    kw = [p.name for p in kw_params]
+    varargs = any(p.kind == p.VAR_POSITIONAL for p in params)
+    varkw = any(p.kind == p.VAR_KEYWORD for p in params)
+    # resolve real WW sentinels from the loader module namespace by identity
+    _try_collections = None
+    try:
+        import wickedwhims.sex.animations.animations_loader as _awl
+        _try_collections = [
+            ("EMPTY_ANIMATION_STRUCTURE_CONTAINER",
+             getattr(_awl, "EMPTY_ANIMATION_STRUCTURE_CONTAINER", None)),
+        ]
+    except Exception:
+        _try_collections = None
+    out.append("ORIG_SIGNATURE=pos:%s kw:%s varargs:%s varkw:%s" % (
+        ",".join(pos) if pos else "(none)",
+        ",".join(kw) if kw else "(none)",
+        "yes" if varargs else "no", "yes" if varkw else "no"))
+
+    def _healthies(d):
+        if d is _UNSET_SENTINEL:  # no default
+            return "UNSET"
+        if d is None:
+            return "type=NoneType; isNone=y"
+        try:
+            dt = type(d).__name__
+        except Exception:
+            dt = "<unknown-type>"
+        bits = ["type=%s" % dt, "isNone=n"]
+        if _try_collections:
+            for sym, real in _try_collections:
+                try:
+                    eq = (d is real) and (real is not None)
+                except Exception:
+                    eq = False
+                if eq:
+                    bits.append("=WW.%s:y" % sym)
+        return ";".join(bits)
+
+    pd = []
+    for p in pos_params:
+        d = p.default if p.default is not p.empty else _UNSET_SENTINEL
+        pd.append(_healthies(d))
+    out.append("ORIG_DEFAULTS=%d %s" % (len(pd), " | ".join(pd)))
+    kd = []
+    for p in kw_params:
+        d = p.default if p.default is not p.empty else _UNSET_SENTINEL
+        kd.append(_healthies(d))
+    out.append("ORIG_KWDEFAULTS=%d %s" % (len(kd), " | ".join(kd)))
+    return out
+
+
 def _hook_fn_impl(orig, modname):
-    """Return a wrapper around orig(animation_tuning, animation_override)."""
-    def _hook(animation_tuning=None, animation_override=None, *a, **kw):
-        # ---- BEFORE original: read the SAME tuning object (read-only) ----
+    """Return a STRICTLY TRANSPARENT wrapper around orig.
+
+    Root cause of the first real 18:55 INVALID run: the old wrapper authored its
+    own defaults `def _hook(animation_tuning=None, animation_override=None,...)`
+    and always forwarded `orig(animation_tuning, animation_override, *a, **kw)`.
+    If the real loader's second-parameter default is a non-None sentinel (WW
+    EMPTY_ANIMATION_STRUCTURE_CONTAINER / similar), then a caller that OMITS that
+    arg used to get the sentinel, but through our old wrapper it got a literal
+    None -- corrupting omitted-default semantics -> the loader then resolved a
+    None where it expected a tuning object (animations_loader.py:123
+    AttributeError: 'NoneType'.animation_raw_display_name).
+
+    Fix: do NOT write our own defaults, do NOT re-author the call.  Observe via
+    inspect.signature(orig).bind_partial(*args, **kwargs) [read-only, never fills
+    in an omitted arg], and forward the ORIGINAL `*args, **kwargs` verbatim to
+    orig.  An omitted arg is recorded as '<OMITTED>' and is NEVER synthesized.
+    """
+    import inspect as _hook_ins
+    _sig = None
+    try:
+        _sig = _hook_ins.signature(orig)
+    except Exception:
+        _sig = None
+
+    def _hook(*args, **kwargs):
+        # ---- map observed args (bind_partial: never fills omitted) ----
+        animation_tuning = _UNSET_SENTINEL
+        animation_override = _UNSET_SENTINEL
+        bound = None
+        if _sig is not None:
+            try:
+                bound = _sig.bind_partial(*args, **kwargs)
+            except Exception:
+                bound = None
+        if bound is not None:
+            anim_args = bound.arguments
+            animation_tuning = anim_args.get("animation_tuning", _UNSET_SENTINEL)
+            animation_override = anim_args.get("animation_override", _UNSET_SENTINEL)
+
+        # ---- BEFORE (read-only) ----
         tuning_type = "<none>"
         tuning_module = "<none>"
         raw_attr = "<undetermined>"
         disp_attr = "<undetermined>"
-        override_present = "NO"
-        if animation_tuning is not None:
+        if animation_override is _UNSET_SENTINEL:
+            override_present = "OMITTED"
+        elif animation_override is None:
+            override_present = "NO"  # provided as None == override not active
+        else:
+            override_present = "YES"
+        if animation_tuning is not _UNSET_SENTINEL and animation_tuning is not None:
             try:
                 tuning_type = type(animation_tuning).__name__
             except Exception:
@@ -201,9 +334,8 @@ def _hook_fn_impl(orig, modname):
                 tuning_module = "<unknown-module>"
             raw_attr = _safe_attr(animation_tuning, "animation_raw_display_name")
             disp_attr = _safe_attr(animation_tuning, "animation_display_name")
-        if animation_override is not None:
-            override_present = "YES"
-        # judge before deciding whether to keep (marker check)
+
+        # judge pre-call (marker pre-check; C recomputed after return)
         bucket = None
         result = None
         keep = False
@@ -221,18 +353,16 @@ def _hook_fn_impl(orig, modname):
         anim_id = "<no-return>"
         try:
             _STATE["observed"] += 1
+            # TRANSPARENT FORWARD: identical args/kwargs, never synthesized
+            ret = orig(*args, **kwargs)
             if keep:
                 _STATE["kept"] += 1
-            # call ORIGINAL untouched; do not suppress its return
-            ret = orig(animation_tuning, animation_override, *a, **kw)
-            # ---- AFTER original: read the returned instance (read-only) ----
             if ret is not None:
                 ret_disp = _safe_attr(ret, "display_name")
                 ret_override = _safe_attr(ret, "display_name_override")
                 author = _safe_attr(ret, "author")
                 anim_name = _safe_attr(ret, "animation_name")
                 anim_id = _safe_attr(ret, "animation_id")
-            # recompute judge with the return display in hand (C needs it)
             bucket, result, _label = _judge(raw_attr, disp_attr, ret_disp)
             keep = result is not None
         except Exception:
@@ -333,6 +463,11 @@ def _patch_module(mod, modname):
             except Exception:
                 pass
     _STATE["wrapped"] = True
+    # record the REAL loaded-function signature/defaults so the next run shows
+    # exactly what omitted args resolve to in the actual WW build.
+    for _digest_line in _signature_digest(orig):
+        _emit(_digest_line)
+    _emit("PASSTHROUGH_MODE=YES (args/kwargs forwarded verbatim, no authored defaults)")
     return True
 
 
@@ -495,7 +630,7 @@ def _reset_state_for_test():
                                 "C_correct": 0}
     _STATE["seen_markers_on"] = {"raw": set(), "display": set()}
     _STATE["target_record_emitted"] = False
-    _STATE["final_verdict"] = "TARGET_TUNING_NOT_OBSERVED"
+    _STATE["final_verdict"] = None  # D verdict is derived post-session ONLY by report_check
     _STATE["error"] = None
     _STATE["retry_count"] = 0
     _STATE["retry_cb_executed"] = False
@@ -504,11 +639,11 @@ def _reset_state_for_test():
     _STATE["last_func_present"] = False
 
 
-def _emit_final():
-    _emit("=== P29 TUNING SUMMARY ===")
-    _emit("OBSERVED=%d" % _STATE.get("observed", 0))
-    _emit("TARGET_KEPT=%d" % _STATE.get("kept", 0))
-    _emit("P29_RESULT=%s" % _STATE.get("final_verdict", "TARGET_TUNING_NOT_OBSERVED"))
+def _emit_final_unused_removed():
+    """(removed) The D verdict is derived POST-SESSION by ww_p29_tuning_report_check.py
+    from the real log when HOOK_INSTALLED=YES with zero target frames and NO
+    HOOK_ERROR.  This module never guesses TARGET_TUNING_NOT_OBSERVED mid-run."""
+    return None
 
 
 def main():

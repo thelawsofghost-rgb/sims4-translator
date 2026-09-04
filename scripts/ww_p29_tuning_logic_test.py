@@ -189,6 +189,79 @@ def main():
           and inst5.animation_display_name == "TEST299",
           "tuning object attrs unchanged by observer (read-only)")
 
+    # ---- TRANSPARENT PASSTHROUGH: omitted-default must reach orig UNCHANGED ----
+    # Regression for the first real 18:55 run: the old wrapper authored its own
+    # (..., animation_override=None) and forwarded orig(tuning, None) even when the
+    # caller omitted the arg -- so a real non-None default (WW sentinel) was
+    # clobbered by a literal None -> loader dereferenced the None.  The transparent
+    # wrapper must forward *args/**kwargs VERBATIM so orig's OWN default applies.
+    print("\n-- transparent passthrough preserves omitted-default semantics --")
+    hook._reset_state_for_test()
+    SENTINEL = object()
+    seen = {}
+    def _real_sentinel_loader(animation_tuning, animation_override=SENTINEL):
+        # the REAL loader contract: when the arg is omitted it must be SENTINEL
+        seen["tuning"] = animation_tuning
+        seen["override"] = animation_override
+        d = getattr(animation_tuning, "animation_display_name", None)
+        o = type("Inst", (object,), {})()
+        o.display_name = d
+        o.display_name_override = None
+        return o
+    modP = type("animations_loader", (object,), {})
+    modP._create_sex_animation_instance = _real_sentinel_loader
+    sys.modules["wickedwhims.sex.animations.animations_loader"] = modP
+    buf = io.StringIO(); sys.stdout = buf
+    try:
+        okP, _, _ = hook._try_patch()
+        class Tp(object):
+            animation_raw_display_name = "TEST299"
+            animation_display_name = "TEST299"
+        # CALLER OMITS the second arg entirely (the real WW call style that broke)
+        modP._create_sex_animation_instance(Tp())
+    finally:
+        sys.stdout = old_out
+    tP = buf.getvalue()
+    check(okP is True, "patch intercepts sentinel-default loader")
+    check(seen.get("override") is SENTINEL,
+          "omitted second arg reaches orig as ITS OWN SENTINEL (not synthetic None)",
+          "OMITTED_DEFAULT_PRESERVED=YES")
+    check(seen.get("override") is not None, "orig did NOT receive a literal None")
+    check(seen.get("tuning") is not None,
+          "first positional tuning forwarded unchanged")
+    check("ANIMATION_OVERRIDE_PRESENT=OMITTED" in tP,
+          "observer logs OMITTED (never injects None)")
+    check("PASSTHROUGH_MODE=YES" in tP, "install records PASSTHROUGH_MODE=YES")
+    check("ORIG_DEFAULTS=" in tP, "install records ORIG_DEFAULTS digest")
+    check("ORIG_SIGNATURE=" in tP, "install records ORIG_SIGNATURE digest")
+    sys.modules.pop("wickedwhims.sex.animations.animations_loader", None)
+    hook._restore_all()
+
+    # ...and an explicit-keyword call is forwarded unchanged (kwargs untouched)
+    print("\n-- passthrough leaves kwargs unchanged --")
+    hook._reset_state_for_test()
+    seen2 = {}
+    def _real_kw_loader(animation_tuning, animation_override=SENTINEL):
+        seen2["tuning"] = animation_tuning
+        seen2["override"] = animation_override
+        return type("Inst", (object,), {})()
+    modK = type("animations_loader", (object,), {})
+    modK._create_sex_animation_instance = _real_kw_loader
+    sys.modules["wickedwhims.sex.animations.animations_loader"] = modK
+    hook._try_patch()
+    class Tk(object):
+        animation_display_name = "TEST299"
+        animation_raw_display_name = "TEST299"
+        animation_name = None
+        animation_id = None
+    _obj = object()
+    _tk_inst = Tk()
+    modK._create_sex_animation_instance(animation_override=_obj, animation_tuning=_tk_inst)
+    check(seen2.get("override") is _obj and seen2.get("tuning") is _tk_inst,
+          "explicit keyword args forwarded unchanged (PASSTHROUGH_KWARGS_UNCHANGED=YES)")
+    sys.modules.pop("wickedwhims.sex.animations.animations_loader", None)
+
+
     # ---- scheduler/discovery: arm then late-load then HOOK_INSTALLED ----
     print("\n-- scheduler arms; retry installs on late module load --")
     hook._reset_state_for_test()

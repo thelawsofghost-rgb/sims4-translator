@@ -670,3 +670,58 @@ Dorothy one-key:  git pull ; powershell -ExecutionPolicy Bypass -File .\scripts\
                   (launch, trigger Nevely ordinal 299) ;
                   powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29_tuning_read_log.ps1
                   powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29_tuning_rollback.ps1
+
+## P29-TUNING 1st REAL RUN INVALID -> TRANSPARENT-PASSTHROUGH FIX (2026-09-04 ~18:56)
+
+Real 18:55 runtime caught a genuine hook-induced error (this is why we have the
+fail-closed + real-machine loop):
+    HOOK_ERROR=Traceback ... ww_p29_tuning_mod.py line 227 in _hook
+      animations_loader.py line 123 in _create_sex_animation_instance
+    AttributeError: 'NoneType' object has no attribute 'animation_raw_display_name'
+    MATCH=TARGET_FRAMES=0  -> (pre-fix) wrongly P29_RESULT=TARGET_TUNING_NOT_OBSERVED
+Game still ran (WW swallowed the animation-loading exception) but this session INVALID.
+
+ROOT_CAUSE (user-diagnosed, confirmed in source): the wrapper AUTHORED its own
+defaults `def _hook(animation_tuning=None, animation_override=None,...)` and ALWAYS
+forwarded `orig(animation_tuning, animation_override, *a, **kw)`.  If the real
+loader's second-parameter default is a NON-None sentinel (WW EMPTY_... or similar),
+a caller that OMITS that arg used to get the sentinel; through our wrapper it got a
+literal None -> the loader resolved a None where it expected a tuning object.
+
+FIX = STRICTLY TRANSPARENT passthrough (no authored defaults, no re-authored call):
+    def _hook(*args, **kwargs):
+        bound = sig.bind_partial(*args, **kwargs)   # READ-ONLY, never fills omitted
+        obs = provided args only; omitted -> OBV marker (_UNSET_SENTINEL), logged OMITTED
+        ...before observe...
+        ret = orig(*args, **kwargs)                 # EXACT received args, verbatim
+    Never inject None for an omitted arg; never synthesize any positional.
+Real defaults recorded once at install (evidence for next run):
+    ORIG_SIGNATURE=...  ORIG_DEFAULTS=...  ORIG_KWDEFAULTS=...  PASSTHROUGH_MODE=YES
+(_signature_digest emits shape + type/is-None + any resolved real WW sentinel identity,
+ never repr() of an untrusted object.)
+
+Verdict precedence fixed (report_check, post-session, real-log):
+    HOOK_ERROR present (ANY)            -> P29_RESULT=INVALID_HOOK_ERROR   (wins)
+    else HOOK_INSTALLED=NO              -> P29_RESULT=HOOK_NOT_INSTALLED
+    else per-target frames A|B|C|OTHER  -> P29_RESULT=<that>
+    else (installed, no error, 0 frames)-> P29_RESULT=TARGET_TUNING_NOT_OBSERVED
+The mod NO LONGER bikes a D default mid-run: _STATE final_verdict starts None and
+mod never emits TARGET_TUNING_NOT_OBSERVED; dead _emit_final removed.  D is derived
+solely by ww_p29_tuning_report_check.py from the captured log.
+
+Static check updated to the transparent contract:
+    B-missing-star-passthrough-call  (require 'ret = orig(*args, **kwargs)')
+    B-legacy-positional-authoring-forbidden (forbid 'orig(animation_tuning, animation_override')
+  D dropped the blanket 'animation_override =' ban (now a READ-shadow for logging,
+  never forwarded -> enforced by B-legacy); real field-write bans retained.
+Regression fixtures added to ww_p29_tuning_logic_test.py:
+    SENTINEL=object() orig(a, b=SENTINEL); wrapper('x') must deliver SENTINEL to orig
+      OMITTED_DEFAULT_PRESERVED=YES ; PASSTHROUGH_ARGS / _KWARGS_UNCHANGED=YES
+    (a class-vs-instance `is Tk` assert bug in the kw fixture fixed -> instance compare)
+All gates green under host AND real CPython 3.7.9: static PASS, logic PASS, py37 gate
+REAL PASS, report-check precedence verified (error>install>frames>D), builder round-trip
+PASS.  wintest 13/13 P29A_WINTEST=PASS.
+Dorothy: git pull; redeploy ONLY the debug ts4 (ww_p29_tuning_deploy.ps1) then re-run
+the trigger + ww_p29_tuning_read_log.ps1 -> expect ORIG_DEFAULTS/ORIG_KWDEFAULTS printed
+at install and a clean (HOOK_ERROR-free) session; if an ORIG_* shows isNone=n on
+animation_override, that CONFIRMS the sentinel-default hypothesis.

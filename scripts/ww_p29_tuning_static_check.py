@@ -7,8 +7,10 @@ Markers (robust, on executable code lines only -- never bare word bans):
   A  Patch install is a module-Attribute REBIND, never a body rewrite:
        'setattr(mod, ' + '"' + TUNING_FUNC + '", hook)'   (we allow the exact
        setattr on a module; enforcement of "calls original untouched" is B).
-  B  The hook calls the ORIGINAL with the same args untouched:
-       'orig(animation_tuning, animation_override, *a, **kw)'
+  B  The hook calls the ORIGINAL STRICTLY TRANSPARENTLY by forwarding the EXACT
+     received *args/**kwargs verbatim -- it must never re-author a positional
+     override (that authored-None was the 18:55 INVALID-run root cause):
+       'ret = orig(*args, **kwargs)'   and NO 'orig(animation_tuning, animation_override'
   C  On any exception the hook restores the original bindings and re-raises:
        '_restore_all()'  AND  a bare 'raise' in the except path.
   D  The observer NEVER ASSIGNS tuning/instance fields itself (it only READS them
@@ -54,16 +56,21 @@ def check(src_text):
 
     if "setattr(mod, _TUNING_FUNC, hook)" not in code:
         fails.append("A-missing-attr-rebind")
-    if "orig(animation_tuning, animation_override, *a, **kw)" not in code:
-        fails.append("B-missing-orig-call-untouched")
+    if "orig(*args, **kwargs)" not in code:
+        fails.append("B-missing-star-passthrough-call")
+    if "orig(animation_tuning, animation_override" in code.replace("orig(*args, **kwargs)", ""):
+        fails.append("B-legacy-positional-authoring-forbidden")
     if "_restore_all()" not in code:
         fails.append("C-missing-restore")
-    # D: no self/attr writes to the fields we only read
+    # D: no self/attr writes to the fields we only read.  (The observer may hold a
+    # read-shadow `animation_override = ...` from bind_partial for LOGGING only; it
+    # is never forwarded -- B-legacy-positional-authoring-forbidden + D's own real
+    # field-write bans below enforce that.  So we keep the field-write bans and no
+    # longer blanket-ban a local read-shadow assignment.)
     for pat in ("animation_tuning.animation_display_name =",
                 "animation_tuning.animation_raw_display_name =",
                 "t.animation_display_name =",
                 "t.animation_raw_display_name =",
-                "animation_override =",
                 "self.display_name =", "self.display_name_override =",
                 "self.name =", "self.localized =",
                 "display_name = ", "raw_display_name = "):
