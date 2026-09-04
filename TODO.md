@@ -982,6 +982,11 @@ P29-C real evidence (Dorothy) closed the runtime question cleanly:
     from stage_name (or a value materialized when the row was built), NOT from
     display_name / get_display_name.  stage_name is deliberately NOT edited (it likely
     participates in stage graph / sequencing).
+    [RETRACTED 2026-09-05 by Dorothy real static evidence #2: NO proof that stage_name
+     is the row title.  stage_name/get_stage_name appear ONLY in
+     _cache_animations_stages_lookup (stage_name->instance + next_stage).  The line
+     "almost certainly comes from stage_name" was an OVER-CLAIM.  Final:
+     STAGE_NAME_UI_SOURCE=UNPROVEN.  See P29-D STEP-2 section below.]
 
 So the open question is STATIC, and it is a WW-internal module/function identity
 question.  New in-game runtime hooks cannot answer it (the render does not call the
