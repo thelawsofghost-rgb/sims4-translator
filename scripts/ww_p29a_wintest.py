@@ -511,21 +511,25 @@ def p29b_report_mechanism():
     import collections
     rc = SCRIPTS / "ww_p29b_report_check.py"
     cases = {
-        "err": ['HOOK_INSTALLED=YES', 'BASE_DISPLAY_NAME=\'TEST300\'',
+        "err": ['P29B_MODULE_IMPORTED=YES', 'HOOK_INSTALLED=YES',
                 'HOOK_ERROR=Traceback...'],
-        "orig": ['HOOK_INSTALLED=YES', 'P29B_RESULT=UI_USING_ORIGINAL_INSTANCE'],
-        "ovr": ['HOOK_INSTALLED=YES', 'P29B_RESULT=DISPLAY_NAME_OVERRIDE_WINS'],
-        "switch": ['HOOK_INSTALLED=YES',
-                   'P29B_RESULT=GET_DISPLAY_NAME_IS_SWITCH'],
-        "pickerC": ['HOOK_INSTALLED=YES', "PICKER_#1",
+        "orig": ['P29B_MODULE_IMPORTED=YES', 'HOOK_INSTALLED=YES',
+                 'P29B_RESULT=UI_USING_ORIGINAL_INSTANCE'],
+        "ovr": ['P29B_MODULE_IMPORTED=YES', 'HOOK_INSTALLED=YES',
+                 'P29B_RESULT=DISPLAY_NAME_OVERRIDE_WINS'],
+        "switch": ['P29B_MODULE_IMPORTED=YES', 'HOOK_INSTALLED=YES',
+                    'P29B_RESULT=GET_DISPLAY_NAME_IS_SWITCH'],
+        "pickerC": ['P29B_MODULE_IMPORTED=YES', 'HOOK_INSTALLED=YES', "PICKER_#1",
                     "BASE_DISPLAY_NAME='TEST300'",
                     "GET_DISPLAY_NAME_RETURN='TEST300'",
                     "PICKER_ROW_TEXT='Caught Cheating 2'"],
-        "pickerA": ['HOOK_INSTALLED=YES', "PICKER_#1",
+        "pickerA": ['P29B_MODULE_IMPORTED=YES', 'HOOK_INSTALLED=YES', "PICKER_#1",
                     "BASE_DISPLAY_NAME='TEST300'",
                     "GET_DISPLAY_NAME_RETURN='TEST300'",
                     "PICKER_ROW_TEXT='TEST300'"],
-        "none": ['HOOK_INSTALLED=YES'],
+        "notimp": ['BASE_DISPLAY_NAME=\'TEST300\''],
+        "hookno": ['P29B_MODULE_IMPORTED=YES', 'HOOK_INSTALLED=NO'],
+        "none": ['P29B_MODULE_IMPORTED=YES', 'HOOK_INSTALLED=YES'],
     }
     expect = {
         "err": "INVALID_HOOK_ERROR",
@@ -534,9 +538,12 @@ def p29b_report_mechanism():
         "switch": "GET_DISPLAY_NAME_IS_SWITCH",
         "pickerC": "PICKER_ROW_USES_OTHER_SOURCE",
         "pickerA": "PICKER_POSTPROCESSING_OR_OTHER_UI_SOURCE",
+        "notimp": "MODULE_NOT_IMPORTED",
+        "hookno": "HOOK_NOT_INSTALLED",
         "none": "TARGET_TUNING_NOT_OBSERVED",
     }
-    require = {"none", "pickerC", "pickerA", "err", "orig"}
+    require = {"none", "pickerC", "pickerA", "err", "orig", "ovr", "switch",
+               "notimp", "hookno"}
     ok = True
     with tempfile.TemporaryDirectory() as td:
         for key, lines in cases.items():

@@ -5,9 +5,12 @@ ACTUAL captured trace log (run after the game session on the real box).
 
 Post-session derivation only (no mid-run guessing).  Scans every frame the mod
 wrote and classifies.  Precedence (strict):
-  1. any HOOK_ERROR=...                      -> P29B_RESULT=INVALID_HOOK_ERROR
-  2. NO_HOOK_INSTALLED                        -> P29B_RESULT=HOOK_NOT_INSTALLED
-  3. a captured get_display_name root cause, strongest first:
+  0. no log, or log but NO boot marker (P29B_MODULE_IMPORTED=YES)
+        -> P29B_RESULT=MODULE_NOT_IMPORTED   (module body never ran in game)
+  1. module imported but no HOOK_INSTALLED=YES
+        -> P29B_RESULT=HOOK_NOT_INSTALLED
+  2. any HOOK_ERROR=...                      -> P29B_RESULT=INVALID_HOOK_ERROR
+  3. a captured get_display_name root cause, strongest first:  (install verified)
         UI_USING_ORIGINAL_INSTANCE  (self.original_instance used -> old English)
         DISPLAY_NAME_OVERRIDE_WINS  (self.display_name_override == old English)
         GET_DISPLAY_NAME_IS_SWITCH  (base TEST300 but get_display_name returns old)
@@ -39,11 +42,13 @@ def main():
     ap.add_argument("logpath")
     a = ap.parse_args()
     if not os.path.isfile(a.logpath):
-        print("LOG=NOT_FOUND")
-        print("P29B_RESULT=NO_LOG")
+        print("LOG_ENTRY=NOT_FOUND")
+        print("MODULE_IMPORTED=NO")
+        print("P29B_RESULT=MODULE_NOT_IMPORTED")
         return 0
     installed = False
     hook_error = False
+    imported = False
     gdn_verdicts = collections.Counter()
     gdn_returned_test299 = False
     gdn_base_test299 = False
@@ -53,7 +58,9 @@ def main():
     with open(a.logpath, encoding="utf-8", errors="replace") as f:
         for ln in f:
             s = ln.rstrip("\n")
-            if s.startswith("HOOK_INSTALLED=YES"):
+            if s.startswith("P29B_MODULE_IMPORTED=YES"):
+                imported = True
+            elif s.startswith("HOOK_INSTALLED=YES"):
                 installed = True
             elif s.startswith("HOOK_ERROR="):
                 hook_error = True
@@ -75,15 +82,22 @@ def main():
             elif s.startswith(_OLD_TOK):
                 picker_row_old = True
                 any_target = True
-    # 1. error precedence
+    # 0. module-import proof is mandatory gate
+    if not imported:
+        print("MODULE_IMPORTED=NO")
+        print("LOG_PRESENT=YES")
+        print("P29B_RESULT=MODULE_NOT_IMPORTED")
+        return 0
+    # 1. imported but hook not installed
+    if not installed:
+        print("MODULE_IMPORTED=YES")
+        print("HOOK_INSTALLED=NO")
+        print("P29B_RESULT=HOOK_NOT_INSTALLED")
+        return 0
+    # 2. error precedence (module imported + hook installed)
     if hook_error:
         print("HOOK_ERROR=PRESENT")
         print("P29B_RESULT=INVALID_HOOK_ERROR")
-        return 0
-    # 2. not installed
-    if not installed:
-        print("HOOK_INSTALLED=NO")
-        print("P29B_RESULT=HOOK_NOT_INSTALLED")
         return 0
     # 3. in-gdn named root cause (strongest present)
     for v in _ORDERED_GDN:

@@ -848,3 +848,50 @@ NEXT (Dorothy real machine):
       PICKER_ROW_USES_OTHER_SOURCE, PICKER_POSTPROCESSING_OR_OTHER_UI_SOURCE, INVALID_HOOK_ERROR}
   6. Rollback:      powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29b_rollback.ps1
   7. Paste read_log output -> assistant finalizes the real root cause for ordinal 300.
+
+## P29-B: import-gate instrumentation + layout inspection (2026-09-04 21:4x)
+
+PROBLEM (real machine): ww_p29b_display_trace.ts4script deployed cleanly
+(P28C TEST300 + VERDICT=DEPLOYED) but produced NO log at all after the session
+(`LOG_ENTRY=NOT_FOUND` in %TEMP%/%USERPROFILE%/repo).  That means we could not tell
+whether the module was never auto-imported OR it ran but attached no hook.  The
+already-working P29-TUNING ts4script on the SAME box proved auto-import works for a
+flat top-level module; P29-B shares that shape yet did not produce a single line.
+
+Verdict rules tightened so the machine tells us WHICH failure:
+  - no log at all, or log missing P29B_MODULE_IMPORTED=YES
+        -> P29B_RESULT=MODULE_NOT_IMPORTED   (packaged but the module body never ran)
+  - imported but no HOOK_INSTALLED=YES
+        -> P29B_RESULT=HOOK_NOT_INSTALLED
+  - (error -> INVALID_HOOK_ERROR; then the UI trace verdicts; else NOT_OBSERVED)
+
+WHAT CHANGED (task-supplied, NOT architecture/payload):
+  1. Earliest boot marker.  ww_p29b_display_trace.main() now calls
+     _bootstrap_boot_marker() as its very FIRST statement (before any WW-class
+     import / hook discovery / scheduler / target matching), writing on the real
+     game import:
+         P29B_MODULE_IMPORTED=YES / BOOT_AT=... / MODULE_NAME=ww_p29b_display_trace
+     Verified offline: importing the module with no sims4 present still writes the
+     boot marker first, then discovery retries fail harmlessly (HOOK_INSTALLED=NO) ->
+     so "a log if-and-only-if the module was imported" now holds unconditionally.
+  2. Bootstrap reuse.  The module-scope autorun block is byte-shaped like the
+     P29-TUNING-proven one (module-level `if _RUN: main()` inside try/except; game
+     sets neither disable var).  Only the hook payload (get_display_name /
+     get_picker_row) and the boot/header emitter differ.
+  3. Build-artifact inspection.  NEW scripts/ww_p29b_inspect.py reads the REAL staged
+     *.ts4script zip and prints TS4SCRIPT_MEMBERS / ENTRY_MODULE / BOOTSTRAP_MEMBER /
+     PYC_MAGIC / P29_TUNING_WORKING_LAYOUT / P29B_LAYOUT / LAYOUT_EQUIVALENT, compared
+     against the known-good tuning layout (a single top-level <module>.pyc at root
+     whose code carries the module-scope autorun guard).  ww_p29b_deploy.ps1 now runs
+     it right after BUILD; LAYOUT_EQUIVALENT=YES currently (both single-root-member,
+     magic 420d0d0a) -- so if the real Windows build produces anything nested/wrong,
+     the deploy prints LAYOUT_EQUIVALENT=NO instead of silently deploying.
+  4. ww_p29b_report_check.py dropped the old NO_LOG; log-absent + no-boot-marker ->
+     MODULE_NOT_IMPORTED; imported-but-no-install -> HOOK_NOT_INSTALLED; error still
+     wins after import proof.  read_log.ps1 NOT_FOUND branch prints
+     P29B_RESULT=MODULE_NOT_IMPORTED (never only LOG_ENTRY=NOT_FOUND).
+
+GATES (host + real CPython 3.7.9): ww_p29b_{static,logic} PASS both interpreters;
+py_compile 3.7 of p29b module/report/inspect + wintest PASS; P29-A wintest 16 gate
+rows all PASS (BLOGIC/BSTATIC/BREPORT/BBUILD); ps1 static 13 PASS.  Boot-marker emit
+only-on-real-import (disabled probe writes nothing) verified offline.

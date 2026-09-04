@@ -27,9 +27,17 @@ Write-Output "=== P29-B LOG ==="
 $report = Join-Path $PSScriptRoot "ww_p29b_report_check.py"
 if (-not $found) {
     Write-Output "LOG_ENTRY=NOT_FOUND"
+    Write-Output "MODULE_IMPORTED=NO"
     Write-Output "SEARCHED="
     foreach ($p in $candidates) { Write-Output "  $p" }
-    Write-Output "(no log yet: launch game with the p29b ts4script, open Nevely picker, quit, re-run.)"
+    Write-Output "--- DERIVED P29B_RESULT ---"
+    Write-Output "P29B_RESULT=MODULE_NOT_IMPORTED"
+    Write-Output "(no log at all: the p29b module body never executed an import-time statement"
+    Write-Output " in-game -- it was packaged but not auto-imported.  This is distinct from"
+    Write-Output " 'module ran but hook missed', which would show a log containing"
+    Write-Output " P29B_MODULE_IMPORTED=YES and P29B_RESULT=HOOK_NOT_INSTALLED.  Compare the"
+    Write-Output " ts4script layout to the working ww_p29_tuning_debug.ts4script, re-run"
+    Write-Output " deploy, launch the game so the import fires, quit, then re-run read_log.)"
     exit 0
 }
 Write-Output "LOG_FILE=$found"

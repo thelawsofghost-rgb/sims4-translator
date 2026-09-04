@@ -44,6 +44,7 @@ $STA            = Join-Path $WORKSPACE "scripts\ww_p29b_static_check.py"
 $PSCHK          = Join-Path $WORKSPACE "scripts\ww_p29a_ps1_static_check.py"
 $LOG            = Join-Path $WORKSPACE "scripts\ww_p29b_logic_test.py"
 $BUILD_WIN      = Join-Path $WORKSPACE "scripts\ww_p29a_build_on_win.ps1"
+$INSPECT        = Join-Path $WORKSPACE "scripts\ww_p29b_inspect.py"
 $DEBUG_TS4      = Join-Path $MODS "ww_p29b_display_trace.ts4script"
 $STAGE          = Join-Path $WORKSPACE "dist\ww_p29b_display_trace.ts4script"
 $FLAG_P28C_DEP  = Join-Path $WORKSPACE "dist\ww_p29b_deployed_p28c.flag"
@@ -77,6 +78,7 @@ if (-not (Test-Path -LiteralPath $STA))       { Fail "p29b static_check missing"
 if (-not (Test-Path -LiteralPath $PSCHK))     { Fail "ps1_static_check missing" }
 if (-not (Test-Path -LiteralPath $LOG))       { Fail "p29b logic_test missing" }
 if (-not (Test-Path -LiteralPath $BUILD_WIN)) { Fail "build_on_win missing" }
+if (-not (Test-Path -LiteralPath $INSPECT))   { Fail "p29b_inspect missing" }
 if (-not (Test-Path -LiteralPath $P28C_DEPLOY)) { Fail "P28C deploy missing (auto-deploy) " }
 
 # ---------- 1. gates ----------
@@ -102,6 +104,12 @@ $b = @(& $BUILD_WIN -Mods $MODS -GamePython $GamePython -SrcMod $SRC_MOD -OutTs4
 if ($LASTEXITCODE -ne 0) { Write-Output ($b -join "`n"); Fail "BUILD_ON_WIN_FAIL" }
 Write-Output (($b | Where-Object { $_ -like 'VERDICT=*' -or $_ -like 'OUT=*' -or $_ -like 'TARGET_PYC_MAGIC=*' -or $_ -like 'PYC_MAGIC_MATCH=*' -or $_ -like 'BUILT_PYC_MAGIC=*' -or $_ -like 'COMPILER_PATH=*' }) -join "`n")
 if (-not (Test-Path -LiteralPath $STAGE)) { Fail "stage ts4script not produced" }
+
+# ---------- 2b. build-artifact inspection (prove auto-loadable layout, not guess) ----------
+Write-Output "--- ARTIFACT INSPECTION (layout vs working P29-TUNING) ---"
+$insp = Run-Python -Script $INSPECT -PyArgs @($STAGE)
+foreach ($row in $insp[1]) { Write-Output $row }
+if ($insp[0] -ne 0) { Fail "INSPECT_FAIL(exit $($insp[0]))" }
 
 # ---------- 3. place debug ts4script ----------
 Write-Output "--- PLACE DEBUG TS4 ---"

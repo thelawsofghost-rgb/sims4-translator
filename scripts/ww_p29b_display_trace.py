@@ -586,9 +586,25 @@ def _hook_cls_factory():
     return _find_class
 
 
-def main():
-    _STATE["_log_path"] = _log_path()
+def _bootstrap_boot_marker():
+    """Earliest-possible in-game proof-of-import.  Emitted before ANY WW-class
+    import / hook discovery / scheduler / target matching so a reader can strictly
+    separate 'module never ran' from 'module ran but hook missed'.  Fires once : the
+    very first statements the game executes when it imports this top-level module."""
+    path = _log_path()
+    _STATE["_log_path"] = path
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     _log_header()
+    # Boot marker lines are emitted unconditionally right after the header, in
+    # order, before main() does discovery -- the earliest batch of statements.
+    _emit("P29B_MODULE_IMPORTED=YES")
+    _emit("BOOT_AT=%s" % ts)
+    _emit("MODULE_NAME=ww_p29b_display_trace")
+    _emit("BOOT_GUARD_ACTIVE=WW_P29_DISABLE_AUTORUN|WW_P29B_DISABLE_AUTORUN")
+
+
+def main():
+    _bootstrap_boot_marker()
     ok = False
     for _ in range(3):
         if _retry_once():
@@ -608,10 +624,13 @@ def main():
     _emit("VERDICT=DISCOVERY_PENDING (in-world retry armed)")
 
 
-# Auto-run on import by the game.  Offline tests set WW_P29_DISABLE_AUTORUN /
-# WW_P29B_DISABLE_AUTORUN.
-if not os.environ.get("WW_P29_DISABLE_AUTORUN") and \
-        not os.environ.get("WW_P29B_DISABLE_AUTORUN"):
+# Auto-run on import by the game.  Reuses the P29-TUNING-proven bootstrap exactly
+# (single module-scope guard, try/except around main()); offline tests set
+# WW_P29_DISABLE_AUTORUN=1 (a compat alias WW_P29B_DISABLE_AUTORUN is also honored
+# by map so old offline harnesses keep working).
+_RUN = (not os.environ.get("WW_P29_DISABLE_AUTORUN")) and (not os.environ.get(
+    "WW_P29B_DISABLE_AUTORUN"))
+if _RUN:
     try:
         main()
     except Exception:
