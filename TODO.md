@@ -496,3 +496,38 @@ NEXT_WINDOWS_COMMAND (task #2/#3 static dataflow):
   paste output back -> infer CALLER_FUNCTION / DISPLAY_NAME_ARGUMENT_SOURCE /
   DISPLAY_NAME_OVERRIDE_BEHAVIOR / RAW_FIELD_TO_DISPLAY_NAME_CHAIN.
 Scope unchanged: no WW ts4script / Nevely / P28C / P24 / zh / P29-B.
+
+## P29-A DISPLAY_SOURCE_PIN (2026-09-04) -- animation_raw_display_name -> display_name -> ctor
+
+New read-only bytecode dataflow pin (native 3.7.9 marshal, NO xdis):
+  scripts/ww_p29a_display_source_trace.py + scripts/ww_p29a_display_source_trace.ps1
+
+Target fn = _create_sex_animation_instance in animations_loader.pyc.  Emits
+  CALLER_FUNCTION
+  RAW_FIELD_LITERAL_PRESENT        ('animation_raw_display_name' const within fn)
+  RAW_FIELD_LITERAL_IN_LOADER      (same literal anywhere in the loader member)
+  RAW_FIELD_READ_PATTERN           (.get / [] window consuming the literal)
+  DISPLAY_NAME_STORE_COUNT / DISPLAY_NAME_STORE_PATTERN  (producer of display_name
+                                                          incl. copy-chain resolution)
+  CTOR_ARG[i]=... per SexAnimationInstance(...) CALL arg; the display arg is detected
+              by producer referencing the local display_name (live ctor contract:
+              self,animation_id,display_name,display_icon,... so the passed slot is
+              CALL-arg index 1).
+  DISPLAY_NAME_ARGUMENT_TO_CTOR
+  RAW_TO_DISPLAY_CHAIN = CONFIRMED  ONLY for a clean unbranching container-read ->
+                         display_name -> ctor-arg in the SAME fn; PARTIAL_HELPER_ROUTED
+                         when the raw literal only lives in a callee/helper (the real
+                         hop is reported verbatim, never simplified) ; NO_RAW_LITERAL
+                         when the field is gone.
+Override consolidation from animation_instance.pyc (live body names, already evidenced):
+  DISPLAY_NAME_OVERRIDE_PRIORITY / SET_DISPLAY_NAME_WRITES_OVERRIDE /
+  GET_DISPLAY_NAME_FALLBACK_TO_BASE + DISPLAY_NAME_OVERRIDE_BEHAVIOR one-liner.
+VM handles 3.7 CALL_METHOD (receiver-in-method) so args aren't shifted -- validated
+on synthesized fixtures under the REAL 3.7.9 (magic 420d0d0a): clean chain -> CONFIRMED
+with CTOR_ARG[1]=L:display_name ; helper/fallback variant -> PARTIAL (not faked).
+
+Enforced what Dorothy asked NOT to do: no P29-A runtime deploy, no P29-B, no WW or
+Nevely ts4script edit, no P28C/P24 change, no Chinese.  Pure read-only native trace.
+ps1 static gate now checks 7 ps1 scripts (build_on_win/deploy/rollback/liveprobe/
+static_trace/display_source_trace + debug runner).  wintest gained DISP mechanism
+(offline fixtures, both branches PASS).  wintest all PASS.

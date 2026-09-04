@@ -119,6 +119,111 @@ def livecls_mechanism():
     return 0
 
 
+def display_source_mechanism():
+    """Mechanism check for ww_p29a_display_source_trace.py (the animation_raw_display_name
+    -> display_name -> SexAnimationInstance(...) dataflow pin).
+
+    Proven on synthesized loader+instance fixtures compiled by THIS interpreter (its
+    magic therefore matches the tracer's own, so native-marshal is valid):
+      -- A: clean chain  'x = node.get('animation_raw_display_name');
+            display_name = x(or re-get); SexAnimationInstance(0, display_name,...)'
+         -> RAW_FIELD_LITERAL_PRESENT=YES, RAW_TO_DISPLAY_CHAIN=CONFIRMED, and the
+            display slot (ctor arg that carries display_name) is detected.
+      -- B: helper-routed / fallback chain where the raw literal only lives in a
+         callee outside _create_sex_animation_instance and the display_name producer
+         is a local call -> chain must NOT be CONFIRMED; must report PARTIAL_...
+         (no simplification).
+    Returns 0 on PASS."""
+    import py_compile
+    import shutil
+    import tempfile
+    import zipfile
+    tracer = SCRIPTS / "ww_p29a_display_source_trace.py"
+    d = tempfile.mkdtemp(prefix="wwdisp_")
+    try:
+        def _src_to_zip(src, fname, dfile, z):
+            py = os.path.join(d, os.path.basename(fname) + ".py")
+            with open(py, "w") as fh:
+                fh.write(src)
+            pyc = os.path.join(d, os.path.basename(fname) + ".pyc")
+            py_compile.compile(py, cfile=pyc, dfile=dfile)
+            z.write(pyc, dfile)
+
+        loader_A = (
+            "def _create_sex_animation_instance(node, author_name, author_id):\n"
+            "    from wickedwhims.sex.animations.animation_instance import " +
+            "SexAnimationInstance\n"
+            "    display_name = node.get('animation_raw_display_name')\n"
+            "    return SexAnimationInstance(0, display_name, 'ic', author_name, " +
+            "author_id)\n"
+        )
+        loader_B = (
+            "def _localize_or(obj):\n"
+            "    return obj.get('animation_raw_display_name')\n"
+            "def _create_sex_animation_instance(node, author_name, author_id):\n"
+            "    from wickedwhims.sex.animations.animation_instance import " +
+            "SexAnimationInstance\n"
+            "    display_name = _localize_or(node)\n"
+            "    return SexAnimationInstance(0, display_name, 'ic', author_name, " +
+            "author_id)\n"
+        )
+        inst_src = (
+            "class SexAnimationInstance(object):\n"
+            "    def __init__(self, animation_id, display_name, display_icon, " +
+            "author, author_id, unsafe=False):\n"
+            "        self.animation_id = animation_id\n"
+            "        self.display_name = display_name\n"
+            "        self.display_icon = display_icon\n"
+            "        self.author = author\n"
+            "        self.author_id = author_id\n"
+            "        self.display_name_override = None\n"
+            "        self.original_instance = None\n"
+            "    def get_display_name(self):\n"
+            "        if self.display_name_override is not None:\n"
+            "            return self.display_name_override\n"
+            "        return self.display_name\n"
+            "    def set_display_name(self, name):\n"
+            "        self.display_name_override = name\n"
+        )
+        L_MEM = "wickedwhims/sex/animations/animations_loader.pyc"
+        I_MEM = "wickedwhims/sex/animations/animation_instance.pyc"
+        fa = os.path.join(d, "a.ts4script")
+        fb = os.path.join(d, "b.ts4script")
+        with zipfile.ZipFile(fa, "w", zipfile.ZIP_DEFLATED) as z:
+            _src_to_zip(loader_A, "loader", L_MEM, z)
+            _src_to_zip(inst_src, "instance", I_MEM, z)
+        with zipfile.ZipFile(fb, "w", zipfile.ZIP_DEFLATED) as z:
+            _src_to_zip(loader_B, "loaderB", L_MEM, z)
+            _src_to_zip(inst_src, "instanceB", I_MEM, z)
+
+        def run(fixture):
+            r = subprocess.run([sys.executable, str(tracer), fixture],
+                               cwd=str(REPO), capture_output=True, text=True)
+            return r.returncode, (r.stdout or "") + (("\n[stderr] " + r.stderr)
+                                                      if r.stderr else "")
+
+        rc, op = run(fa)
+        print((op or "").strip())
+        print("DISP_CHAIN_A_CONFIRMED=%s" % (
+            "PASS" if (rc == 0 and "RAW_TO_DISPLAY_CHAIN=CONFIRMED" in op
+                        and "RAW_FIELD_LITERAL_PRESENT=YES" in op
+                        and "CTOR_ARG[1]=L:display_name" in op) else "FAIL"))
+        if rc != 0 or "RAW_TO_DISPLAY_CHAIN=CONFIRMED" not in op \
+                or "CTOR_ARG[1]=L:display_name" not in op:
+            return 1
+        rc2, op2 = run(fb)
+        print((op2 or "").strip())
+        not_conf = "RAW_TO_DISPLAY_CHAIN=CONFIRMED" not in op2
+        print("DISP_CHAIN_B_NONCONFIRMED=%s" % (
+            "PASS" if (rc2 == 0 and not_conf) else "FAIL"))
+        if rc2 != 0 or not not_conf:
+            return 1
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    print("DISP=PASS (mechanism OK; real answer needs Dorothy's live loader)")
+    return 0
+
+
 def py37_argv():
     """Assert the PowerShell wrapper assembles the DOUBLE-dash '--py37' flag and
     that the exact argv shape `--py37 <py37.exe> <files...>` parses cleanly.
@@ -250,6 +355,7 @@ def main():
                           str(MOD), str(SCRIPTS / "ww_p29a_logic_test.py")])
     codes["PY37ARGV"] = py37_argv()
     codes["LIVECLS"] = livecls_mechanism()
+    codes["DISP"] = display_source_mechanism()
     codes["BUILD"] = run("BUILD_ROUNDTRIP",
                          [sys.executable, str(SCRIPTS / "ww_p29a_build_ts4script.py"),
                           "--src", str(MOD), "--out", str(TS4_OUT)])
