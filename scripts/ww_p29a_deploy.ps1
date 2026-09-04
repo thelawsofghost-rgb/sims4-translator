@@ -99,11 +99,11 @@ $l = Run-Python -Script $LOGIC
 if ($l[0] -ne 0) { Write-Output "PY_STDERR=$($l[2])"; Fail "LOGIC_FAIL(exit $($l[0]))" }
 Write-Output "LOGIC=PASS"
 
-# ---------- 2. build ts4script under game python ----------
-Write-Output "--- BUILD (game python) ---"
-$b = & $BUILD_WIN -GamePython $GamePython
+# ---------- 2. build ts4script with a magic-matching local compiler ----------
+Write-Output "--- BUILD (magic-matched compiler) ---"
+$b = @(& $BUILD_WIN -Mods $MODS -GamePython $GamePython)
 if ($LASTEXITCODE -ne 0) { Write-Output ($b -join "`n"); Fail "BUILD_ON_WIN_FAIL" }
-Write-Output (($b | Where-Object { $_ -like 'VERDICT=*' -or $_ -like 'OUT=*' -or $_ -like 'PY_VER=*' }) -join "`n")
+Write-Output (($b | Where-Object { $_ -like 'VERDICT=*' -or $_ -like 'OUT=*' -or $_ -like 'TARGET_PYC_MAGIC=*' -or $_ -like 'COMPILER_PATH=*' -or $_ -like 'COMPILER_VERSION=*' -or $_ -like 'BUILT_PYC_MAGIC=*' -or $_ -like 'PYC_MAGIC_MATCH=*' }) -join "`n")
 if (-not (Test-Path -LiteralPath $STAGE)) { Fail "stage ts4script not produced" }
 
 # ---------- 3. place debug ts4script ----------

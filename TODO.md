@@ -268,3 +268,50 @@ deploy 顺序(fail-closed 保持): PS1_STRUCTURE -> STATIC -> LOGIC -> BUILD(gam
 不 P29-B UI hook; 不改 WW ts4script / Nevely 源 package / P28C / P24。
 真机勿跑旧 bea8936; pull 到新 commit 后再跑:
   powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29a_deploy.ps1
+
+---
+
+## P29-A fix2 (2026-09-04 17:24) 编译器发现重设计: 不再找 game python.exe (a0b7bfd->b10f576)
+
+真机二次失败(仍属 BUILD 层, 未进 runtime): 二次执行通过 PS1/STATIC/LOGIC gate 后
+在 BUILD 报 REASON=Could not locate the game python automatically。
+根因(用户点破): "找 game python.exe" 假设错误 -- TS4 只内嵌 python*_x64.dll(无 exe)。
+
+设计修正(只改构建链, 不动 constructor trace 实验):
+  GAME_PYTHON_EXE_ASSUMPTION=INVALID。DLL 不是编译器; 唯一能产出被游戏加载的 pyc 的
+  办法是运行一个 LOCAL CPython, 其 importlib.util.MAGIC_NUMBER == 游戏 pyc magic。
+
+新机制 (scripts/ww_p29a_game_py.py, 只读, 跨平台可测):
+  magic-from-pyc --locate-mod <Mods>: 从 real WW *.ts4script 内已知可加载成员
+     (animations_loader.pyc / animation_instance.pyc, 兜底任意 .pyc 成员) 读前4字节
+     -> TARGET_PYC_MAGIC (最直接的兼容性 gate, 不假定版本)。
+  compilers: 枚举本机可运行 CPython (py -0p / python / python3 / 常见安装目录),
+     各自 sys.version + MAGIC_NUMBER.hex()。
+  match --target <magic> [--prefer <py>]: 只允许 LOCAL_PYC_MAGIC==TARGET 者;
+     无匹配 -> FAIL-CLOSED MATCH=NONE + 列出可用 -> 告知需装哪个 python major/minor。
+
+ww_p29a_build_on_win.ps1 改写为 4 段:
+  1) 读 live WW member -> TARGET_PYC_MAGIC
+  2) match 选 magic 相符的本机编译器 (偏好 -GamePython/<env WW_GAME_PYTHON>, 但该 py
+     仍必须 magic 相符, 不再当作 "游戏目录里的 exe")
+  3) 用该编译器跑 build_ts4script.py
+  4) 从产物 zip member 读回 BUILT_PYC_MAGIC 并断言 == TARGET; 不等即 FAIL。
+  输出 TARGET_PYC_MAGIC/COMPILER_PATH/COMPILER_VERSION/BUILT_PYC_MAGIC/PYC_MAGIC_MATCH/
+      BUILD=PASS。无匹配编译器绝不硬编译/不下载/不装/不猜版本。
+
+deploy 顺序(fail-closed 保持): PS1_STRUCTURE -> STATIC -> LOGIC ->
+  BUILD(magic gate 内) -> 才 PLACE DEBUG TS4 -> 才 P28C redep。BUILD 失败不写 Mods/不动 P28C。
+
+OLD_WORKING_TS4SCRIPT_BUILD_FOUND=NO: git history 复查确认本仓库从未成功产出可被
+  Sims 4 加载的 .ts4script(py) 构建 -- 历史 P13-P25 全是只读 xdis 反汇编 .pyc(读),
+  P27/P28 交付的是 .package/XML/STBL 剪辑, 非编译 Python。故无既有 python/magic 可复用,
+  此 magic-pinning 为新增。
+
+wintest 新增 MAGIC gate(离线, 无需 pwsh): 合成一可加载 pyc(magic=宿主 magic, 代替
+  Windows 上的 live WW member) -> magic-from-pyc 读得 TARGET -> match 选宿主编译器 ->
+  build -> 断言 BUILT_PYC_MAGIC==TARGET。MAGIC/PS1/STATIC/LOGIC/BUILD 全 PASS。
+
+真机勿跑旧 a0b7bfd; pull 到新 commit 后再跑:
+  powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29a_deploy.ps1
+若不自动匹配到本机 python 则 fail-closed 列出, 按 REASON/GUIDANCE 装对应
+CPython major.minor 后再带 -GamePython <path>\python.exe 重跑。
