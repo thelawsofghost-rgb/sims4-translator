@@ -967,3 +967,47 @@ FIX in ww_p29c_deploy.ps1 (payload/static/TEST300/P28C/WW-source all UNTOUCHED):
   8. On logic-test failure the deploy now prints BOTH stdout tail and stderr
      (PY_STDOUT=... / PY_STDERR=...) instead of only stderr, so an empty PY_STDERR no
      longer hides the real verdict.
+
+## P29-D STEP-1: static UI-source trace tool (real WW pyc, READ-ONLY) (2026-09-05)
+
+P29-C real evidence (Dorothy) closed the runtime question cleanly:
+  - The picker RENDER does NOT call the target instance get_display_name().
+    6 TEST300 calls total, all during load/collect (animations_handler
+    `_collect_sex_animations` lambda @ line 288 + get_identifier/__repr__), NONE from
+    picker/dialog/UI row construction.
+  - Same real object carries TWO text fields simultaneously:
+        display_name = 'TEST300'   (the field get_display_name returns)
+        stage_name   = 'caught cheating 2'   (a SEPARATE field)
+    Game still draws "Caught Cheating 2" -> the visible row text almost certainly comes
+    from stage_name (or a value materialized when the row was built), NOT from
+    display_name / get_display_name.  stage_name is deliberately NOT edited (it likely
+    participates in stage graph / sequencing).
+
+So the open question is STATIC, and it is a WW-internal module/function identity
+question.  New in-game runtime hooks cannot answer it (the render does not call the
+instance accessor), and guessing a hook point is forbidden by rule.  Therefore:
+
+ww_p29d_static_ui_trace.py (this step) -- READ-ONLY real-WW disassembly+dataflow that
+LOCATES the row-builder before any P29-D hook is designed.  Runs on Dorothy's real box
+against the CURRENT WW .pyc in the Mods .ts4script (whatever the version, incl. v185k).
+Engine: xdis (parses .pyc of any CPython without the runtime).  ZERO_WRITE_TO_MODS=YES;
+writes evidence only to output/ww_p29d/{.txt,.csv}.
+  - Resolves the cited dotted modules to concrete .pyc members inside the WW ts4script:
+      wickedwhims.sex.integral.dialogs.sex_animation
+      wickedwhims.sex.integral.dialogs.universal_sex_animations
+      wickedwhims.sex.animations.animations_handler
+  - Enumerates nested code objects; flags + FULL-DISASSEMBLES every function whose
+    co_names/str_consts touch row/picker/title/text/name/display/stage/localized/...
+    so the evidence shows exactly WHICH function LOAD_ATTRs which instance field into
+    a row's title/text (row-builder identity + source field).
+  - Dumps every animations_handler collection lambda (incl. the reported-line sort/
+    collect lambda) to answer "sort-only vs also-builds."
+  - Answers (from real bytecode): row-builder module/function, row title field source,
+    stage_name usage, get_display_name role at render, pre-picker caching.
+  - FAIL-CLOSED exit codes 2/3/4/5/6/7; VERDICT=STATIC_TRACE_COMPLETE.
+Offline-validated in sandbox: real 3.7.9 pyc members (magic 420d0d0a) zipped as a fake
+WW ts4script; the tool resolves each cited member, census + full disasm of row-KW
+functions print exactly which attr feeds row.title/text (animation_stage_name in the
+fixture), and collection lambdas are separate.  ASCII-only, 3.7-syntax-clean.
+NO P29-D HOOK IS DESIGNED YET - rule: single hook ONLY after the static evidence names
+the one real row/title-builder function.  This step only LOCATES.
