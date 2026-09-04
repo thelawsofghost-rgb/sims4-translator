@@ -197,3 +197,42 @@ game 结果解释:
 安全: 源只读/只写 output/只写 P28C_Overrides/Resource.cfg 备份/rollback 恢复 SHA/不中文/不 P24/不 479 批量/不自动部署/不启动游戏。
 
 
+
+---
+
+## P29-A (IMPLEMENTED + OFFLINE-TESTED 2026-09-04) SexAnimationInstance constructor runtime trace (debug-only)
+
+目的(单一): P28C TEST299 override 生效时回答 CONSTRUCTOR_ARG=TEST299 还是 =OLD。
+不一次 hook constructor+UI+picker; 无 P29-B; 不 reimport; 不中文; 不 P24; 不改 WW 原 ts4script; 不改源 Nevely package。
+
+Hook 点 (committed decompiled transcription, 真机需再确认签名——若不同即报告不硬 hook):
+  SexAnimationInstance.__init__(self, animation_id, animation_raw_display_name, animation_type)
+  内: self.h=hash_string("story_animations."+str(animation_id)); self.display_name=raw;
+      self.localized=TurboLocalizedString(self.h, raw); self.name=raw
+  即 constructor 收到 TEST299 -> display_name/name==TEST299; 收到 OLD -> OLD(UI 仍 OLD 但 CONSTRUCTOR_ARG=OLD 则问题在 loader/import 上游)。
+
+实现(独立 debug ts4script monkey-patch wrapper, 只记录不改参/不改 display/localized/不改返回):
+  scripts/ww_p29a_mod.py              运行时 hook 模块(顶层模块; 包裹原 __init__->调用原 __init__ 不变->读 display_name/name/localized.hash 记录; 错则 restore 原并 re-raise; 动态定位类: wickedwhims.sex.animations.* 候选 + sys.modules 扫描 + 仅包裹签名匹配目标形)
+  scripts/ww_p29a_logic_test.py       OFFLINE: 对 stand-in 类(严格同签名)证明 wrap 语义 + RAW_ARG(positional bind)/INSTANCE_* / hash / TEST299 vs OLD 匹配 + sig 不匹配不包裹(fail-closed) → PASS
+  scripts/ww_p29a_static_check.py     静态安全门(不写 display_name/name/localized; 不读 localized.text; 调用原 __init__; restore-on-error; 无 walrus) → PASS
+  scripts/ww_p29a_build_ts4script.py  packer: src.py -> ts4script(zip member ww_p29a_mod.pyc), 自省 member import → OK
+  scripts/ww_p29a_build_on_win.ps1    Windows: 用 GAME python 编译(保证 pyc magic 匹配), 否则 fail-closed(可 -GamePython / WW_GAME_PYTHON)
+  scripts/ww_p29a_deploy.ps1          ONE-KEY: static+logic 门 → game-python build → copy 进 Mods root 记录 SHA → (可选)调 P28C deploy 重上 TEST299 override
+  scripts/ww_p29a_rollback.ps1        只删 ww_p29a_debug.ts4script + P29 log/flag; 若 P29A 曾 redep P28C 则调 P28C rollback 恢复 base; 不碰其它 Mod
+  scripts/ww_p29a_wintest.py          OFFLINE 三gate: STATIC/LOGIC/BUILD 全 PASS
+
+输出(易回贴):
+  HOOK_INSTALLED=YES/NO ; RAW_ARG=OLD|TEST299 ; INSTANCE_DISPLAY_NAME= ; INSTANCE_NAME= ; LOCALIZED_HASH= ; MATCH=OLD|TEST299|NONE ; VERDICT=TRACE_CAPTURED
+
+判定(用户 2026-09-04):
+  A. RAW_ARG=OLD & INSTANCE_DISPLAY_NAME=OLD -> P29A_RESULT=OVERRIDE_NOT_RECONSTRUCTING_TARGET (下一步查 loader/import registry/stable identity/同实例 reload)
+  B. RAW_ARG=TEST299 & INSTANCE_DISPLAY_NAME=TEST299 -> P29A_RESULT=CONSTRUCTOR_RECEIVES_OVERRIDE (这时才做 P29-B: TurboLocalizedString/get_display_name/picker trace)
+  C. hook 装上但 OLD 与 TEST299 都未出现 -> P29A_RESULT=TARGET_OBJECT_NOT_OBSERVED (先查目标映射/对象类型)
+
+真机命令 (交给 Dorothy; 顺序: build+deploy -> 开游戏触发 Nevely 动画 -> 退出读 trace -> rollback):
+  powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29a_deploy.ps1 [-SkipP28C] [-GamePython <path>]
+  powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29a_rollback.ps1
+
+安全/未决:
+  - hook 的 in-game HOOK_INSTALLED=YES 只能在真机验证(sandbox 只证 logic/static/build)。若类名/模块路径/signature 与真机不符 -> hook 诚实报 HOOK_INSTALLED=NO 而非假 OLD。
+  - pyc magic 必须由 game python 产出 -> build_on_win 找 game python, 找不到则 fail-closed(不猜版本)。
