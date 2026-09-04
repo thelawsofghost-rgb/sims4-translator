@@ -787,3 +787,64 @@ wintest 14/14? (all listed PASS; P29A_WINTEST=PASS).  Scope unchanged: no source
 Nevely / P28C payload / XML / P24 / Chinese / new canary.  Deploy NOT run (observation-only).
 Dorothy: git pull; ww_p29b_deploy.ps1 -> launch, open Nevely picker -> ww_p29b_read_log.ps1
 -> ww_p29b_rollback.ps1.  Expect ORIGINAL_INSTANCE_PRESENT / _DISPLAY_NAME + P29B_RESULT.
+
+## P29-B TARGET RELOCATION -> "Caught Cheating 2" (ordinal 300 / TEST300) 2026-09-04
+
+REAL USER OBSERVATION (2026-09-04 21:28): on the real WW/Nevely UI the row the user
+ACTUALLY sees under the previous single-row trial is labeled "Caught Cheating 2", NOT
+"1".  So we STOP guessing by ordinal and re-confirm from the real XML mapping:
+
+  TARGET_OLD_RAW=Caught Cheating 2
+  TARGET_ORDINAL=300
+  TARGET_NEW_RAW=TEST300
+  TARGET_MAPPING_CONFIRMED=YES
+
+Mapping source (authoritative, NOT guessed -- both from real WW_Nevely42_Animations.package):
+  output/ww_p27/mapping.csv      : 300,Caught Cheating 2
+  output/story_animation_xml_trace.txt : <U n="anm300"> animation_id=2301
+                                     animation_raw_display_name="Caught Cheating 2"
+
+CHANGES (architecture untouched -- only the target object swapped):
+  * P28C generator ww_p28c_ascii_canary.py: TARGET_ORDINAL 299->300,
+    TARGET_NEW_RAW TEST299->TEST300, artifact -> WW_P28C_TEST300_Override.package,
+    NEW: TARGET_OLD_RAW="Caught Cheating 2" + fail-closed guard that ordinal==300's raw
+    really == TARGET_OLD_RAW before replacing (never "change whatever sits at 300").
+  * p28c report_check / tgi_check / static_check / cfg_audit / deploy / rollback ps1s:
+    token + artifact baseline names -> TEST300; report now also requires /
+    emits TARGET_OLD_RAW.
+  * P29-B matcher (ww_p29b_display_trace.py) whole set switched:
+        _TARGET_OLD_RAW="Caught Cheating 2"  _TARGET_NEW_RAW="TEST300"
+        _TARGET_NAMES=(TEST300,'Caught Cheating 2')
+    all inline verdict literals + report_check tokens + logic-test fixtures + wintest
+    report_mechanism tokens now use TEST300 / 'Caught Cheating 2'.
+  * ps1 wrappers / header prose point at TEST300 row.
+
+Preserved (unchanged): mem_size = new decompressed length; same real TGI; source=
+500 priority 600 chain; post-write re-audit override_eff>src_eff; source SHA unchanged;
+fail-closed every gate; transparent orig() passthrough; HOOK_ERROR precedence; py3.7 /
+magic 420d0d0a; no XML/source-WW/Nevely/P24/Chinese edits.
+
+GATES (host + real CPython 3.7.9 where meaningful):
+  P29-A wintest 14/14 PASS (BLOGIC/BSTATIC/BREPORT/BBUILD all PASS)   [P29A_WINTEST=PASS]
+  P28C static PASS (exit 0) + P28C wintest PASS (39 checks, exit 0)    (host tooling)
+  ps1_static 13/13 PASS ; py37 real compile of p28c+p29b tool+game files pass.
+  NOTE: ww_p28c_wintest under /tmp/py37inst real-3.7 fails at IMPORT of src/dbpf_fast.py
+        ('type' object is not subscriptable) -- pre-existing host-tooling annotation,
+        unrelated to target switch and out of scope (P28C pipeline tests run under host
+        python; the authoritative real-3.7 gate is only the WW-deployed ts4script bytes).
+
+NEXT (Dorothy real machine):
+  1. git pull
+  2. Regenerate the P28C TEST300 artifact from the real source (ZERO_WRITE_TO_MODS):
+       python scripts\\ww_p28c_ascii_canary.py --source "<Mods>\\2026.7.20\\WW_Nevely42_Animations.package" --force
+     (this writes output/ww_p28c/WW_P28C_TEST300_Override.package + new report + mapping.csv)
+  3. One-key deploy:  powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29b_deploy.ps1
+     (install ww_p29b_display_trace.ts4script + auto-deploy P28C TEST300 + cfg priority)
+  4. Launch TS4, open the Nevely picker so the "Caught Cheating 2" row renders, quit.
+  5. Read log:      powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29b_read_log.ps1
+     expect BASE_DISPLAY_NAME='TEST300' / ORIGINAL_INSTANCE_PRESENT / _DISPLAY_NAME /
+     GET_DISPLAY_NAME_RETURN / PICKER_ROW_TEXT and P29B_RESULT in
+     {UI_USING_ORIGINAL_INSTANCE, DISPLAY_NAME_OVERRIDE_WINS, GET_DISPLAY_NAME_IS_SWITCH,
+      PICKER_ROW_USES_OTHER_SOURCE, PICKER_POSTPROCESSING_OR_OTHER_UI_SOURCE, INVALID_HOOK_ERROR}
+  6. Rollback:      powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29b_rollback.ps1
+  7. Paste read_log output -> assistant finalizes the real root cause for ordinal 300.

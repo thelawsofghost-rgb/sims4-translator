@@ -1,6 +1,6 @@
 ﻿# ww_p28c_rollback.ps1 -- P28C rollback (Windows real machine)
 # Strictly reverts ww_p28c_deploy.ps1 effects only:
-#   1. Delete P28C_Overrides\WW_P28C_TEST299_Override.package
+#   1. Delete P28C_Overrides\WW_P28C_TEST300_Override.package
 #   2. Delete P28C_Overrides if empty
 #   3. Restore Resource.cfg from Resource.cfg.p28c_backup (only if current cfg contains P28C_Overrides marker)
 #   4. Verify restored cfg SHA == backup SHA
@@ -15,7 +15,7 @@ $MODS          = "C:\Users\thela\Documents\Electronic Arts\The Sims 4\Mods"
 $RESOURCE_CFG  = Join-Path $MODS "Resource.cfg"
 $CFG_BACKUP    = Join-Path $MODS "Resource.cfg.p28c_backup"
 $OVERRIDE_DIR  = Join-Path $MODS "P28C_Overrides"
-$OVERRIDE_PKG  = Join-Path $OVERRIDE_DIR "WW_P28C_TEST299_Override.package"
+$OVERRIDE_PKG  = Join-Path $OVERRIDE_DIR "WW_P28C_TEST300_Override.package"
 $CACHE         = "C:\Users\thela\Documents\Electronic Arts\The Sims 4\localthumbcache.package"
 
 function Fail($reason) { Write-Output "VERDICT=ROLLBACK_FAIL"; Write-Output "REASON=$reason"; exit 1 }

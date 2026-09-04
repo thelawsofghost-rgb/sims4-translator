@@ -9,8 +9,9 @@ ww_p28c_static_check.py —— P28C 源码级静态不变式 (Linux/沙箱可运
        - meta 的 mem_size 必须 = 新解压实际长度 (len(decompress_maybe(new_body))), 不得沿用 source 旧 field7
        - 禁止源码出现 ww_animation_xml_displayname_override.py 那行的 m0.get("mem_size", ...) 复用坏逻辑
        - 必须解压 new_body 算 NEW_XML_DECOMPRESSED_SIZE
-  B. ASCII 语义: 只改 ordinal 299 -> TEST299 (无中文, 无 抓奸, 无 1..8), 且
-       TARGET_ORDINAL=299 / TARGET_NEW_RAW=TEST299 / TARGETS_CHANGED=1 / NON_TARGET_XML_DIFF=0
+  B. ASCII 语义: 只改 ordinal 300 -> TEST300 (无中文, 无 抓奸, 无 1..8), 且
+       TARGET_ORDINAL=300 / TARGET_OLD_RAW='Caught Cheating 2' / TARGET_NEW_RAW=TEST300 /
+       TARGETS_CHANGED=1 / NON_TARGET_XML_DIFF=0
   C. 只读源 + 只写 output/ww_p28c: ZERO_WRITE_TO_MODS=YES; 单 WW_ANIM_XML source-faithful TGI
   D. report_check: read_text(encoding='utf-8') + 独立对真实包 bytes 复核 (不信 report YES)
   E. cfg_audit: 硬编码 P28C_Overrides, 输出 P28C_OVERRIDE_EFFECTIVE_PRIORITY, 与 P27/P28A/P28B0 隔离
@@ -101,14 +102,16 @@ def main():
     check("A. generator 机验 WRITTEN==NEW", "written_field7 == new_xml_decompressed_size" in g and "MEM_SIZE_MATCH_NEW_XML" in g)
 
     # B. ASCII canary 语义
-    check("B. TARGET_ORDINAL=299", "TARGET_ORDINAL = 299" in g)
-    check("B. TARGET_NEW_RAW=TEST299", 'TARGET_NEW_RAW = "TEST299"' in g)
-    check("B. 无中文/抓奸/1..8 替换默认", "抓奸" not in code_g and "299" in g)
+    check("B. TARGET_ORDINAL=300", "TARGET_ORDINAL = 300" in g)
+    check("B. TARGET_OLD_RAW=Caught Cheating 2", 'TARGET_OLD_RAW = "Caught Cheating 2"' in g)
+    check("B. TARGET_NEW_RAW=TEST300", 'TARGET_NEW_RAW = "TEST300"' in g)
+    check("B. 无中文/抓奸/1..8 替换默认", "抓奸" not in code_g and "300" in g)
+    check("B. generator 机验旧值取自目标 ordinal", "if target_old != TARGET_OLD_RAW:" in g)
     check("B. NON_TARGET_XML_DIFF=0", "NON_TARGET_XML_DIFF" in g and "non_target_zero" in g)
 
     # C. ZERO_WRITE / output p28c / single xml
     check("C. output/ww_p28c", 'out_dir = Path(a.out_dir) / "ww_p28c"' in g)
-    check("C. artifact 名 WW_P28C_TEST299_Override.package", '"WW_P28C_TEST299_Override.package"' in g)
+    check("C. artifact 名 WW_P28C_TEST300_Override.package", '"WW_P28C_TEST300_Override.package"' in g)
     check("C. ZERO_WRITE_TO_MODS=YES", "ZERO_WRITE_TO_MODS=YES" in g)
 
     # D. report_check 独立复核

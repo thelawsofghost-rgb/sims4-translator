@@ -1,5 +1,5 @@
 ﻿# ww_p28c_deploy.ps1 -- P28C deploy (Windows real machine)
-# Copies output/ww_p28c/WW_P28C_TEST299_Override.package -> Mods\P28C_Overrides\
+# Copies output/ww_p28c/WW_P28C_TEST300_Override.package -> Mods\P28C_Overrides\
 # Uses the real-machine-proven Resource.cfg priority mechanism (higher number = higher priority).
 # POST-WRITE RE-AUDIT: after appending the P28C rule, re-run ww_p28c_cfg_audit check and require
 #   SOURCE_EFFECTIVE_PRIORITY=500 / P28C_OVERRIDE_EFFECTIVE_PRIORITY=600 / PRIORITY_RELATION=OVERRIDE_HIGHER
@@ -15,9 +15,9 @@ $CFG_BACKUP    = Join-Path $MODS "Resource.cfg.p28c_backup"
 $SRC_SUB       = Join-Path $MODS "2026.7.20"
 $SOURCE_PKG    = Join-Path $SRC_SUB "WW_Nevely42_Animations.package"
 $OVERRIDE_DIR  = Join-Path $MODS "P28C_Overrides"
-$OVERRIDE_PKG  = Join-Path $OVERRIDE_DIR "WW_P28C_TEST299_Override.package"
+$OVERRIDE_PKG  = Join-Path $OVERRIDE_DIR "WW_P28C_TEST300_Override.package"
 $WORKSPACE     = "D:\projects\sims4_trans"
-$ARTIFACT      = Join-Path $WORKSPACE "output\ww_p28c\WW_P28C_TEST299_Override.package"
+$ARTIFACT      = Join-Path $WORKSPACE "output\ww_p28c\WW_P28C_TEST300_Override.package"
 $REPORT_TXT    = Join-Path $WORKSPACE "output\ww_p28c\ww_p28c_report.txt"
 $CACHE         = "C:\Users\thela\Documents\Electronic Arts\The Sims 4\localthumbcache.package"
 
@@ -65,12 +65,16 @@ Write-Output "P28C_TGI_CHECK=PASS"
 Write-Output (($t[1] | Where-Object { $_ -like "TGI_EQUAL=*" }) -join '')
 Write-Output (($t[1] | Where-Object { $_ -like "WW_XML_SOURCE_INSTANCE=*" }) -join '')
 
-# MEM_SIZE_MATCH_NEW_XML + TARGET_299 from the generator report (ASCII keys)
+# MEM_SIZE_MATCH_NEW_XML + TARGET_300 from the generator report (ASCII keys)
 $repText = Get-Content -LiteralPath $REPORT_TXT -Raw -Encoding UTF8
 if ($repText -notmatch "MEM_SIZE_MATCH_NEW_XML=YES") { Fail "MEM_SIZE_MATCH_NEW_XML != YES" }
-if ($repText -notmatch "TARGET_299=TEST299" -and $repText -notmatch "TARGET_ORDINAL=299" -and $repText -notmatch "TARGET_NEW_RAW=TEST299") { Fail "TARGET_299=TEST299 not present" }
+if ($repText -notmatch "TARGET_ORDINAL=300") { Fail "TARGET_ORDINAL=300 not present" }
+if ($repText -notmatch "TARGET_OLD_RAW=Caught Cheating 2") { Fail "TARGET_OLD_RAW not present" }
+if ($repText -notmatch "TARGET_NEW_RAW=TEST300") { Fail "TARGET_NEW_RAW=TEST300 not present" }
 Write-Output "MEM_SIZE_MATCH_NEW_XML=YES"
-Write-Output "TARGET_299=TEST299"
+Write-Output "TARGET_ORDINAL=300"
+Write-Output "TARGET_OLD_RAW=Caught Cheating 2"
+Write-Output "TARGET_NEW_RAW=TEST300"
 
 # artifact double check vs report-independent (report_check already independently byte-verified mem_size)
 
@@ -110,7 +114,7 @@ if ($appendReq -eq "YES") {
     $after = Get-Content -LiteralPath $RESOURCE_CFG -Raw -Encoding UTF8
     if ($after -notmatch "P28C_Overrides") { Fail "append verification failed" }
     Write-Output "OVERRIDE_PRIORITY=$proposedPrio (appended)"
-    Write-Output "OVERRIDE_PATH=P28C_Overrides\WW_P28C_TEST299_Override.package"
+    Write-Output "OVERRIDE_PATH=P28C_Overrides\WW_P28C_TEST300_Override.package"
 } else {
     Write-Output "OVERRIDE_PRIORITY=$proposedPrio (reuse existing dedicated rule)"
 }

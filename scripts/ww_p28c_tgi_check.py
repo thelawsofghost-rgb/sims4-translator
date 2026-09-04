@@ -7,7 +7,7 @@ ww_p28c_tgi_check.py —— P28C 独立 TGI/raw-index 普查 (source 实机多�
 确与源 WW package 唯一 WW_ANIM_XML 完全一致 (same-TGI override), 且 override 只含 1 个资源。
 
   source  : 真实 WW_Nevely42_Animations.package (多条目, 只读)
-  override: output/ww_p28c/WW_P28C_TEST299_Override.package (单 WW_ANIM_XML)
+  override: output/ww_p28c/WW_P28C_TEST300_Override.package (单 WW_ANIM_XML)
 
 机验 (raw-index, 不经 safe_parse 掩码, 直接读 32 字节 index):
   SOURCE_ENTRY_COUNT=<n>            (源多条目)

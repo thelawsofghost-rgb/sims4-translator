@@ -23,7 +23,7 @@ and prove, offline:
      OWN default (omitted-default semantics preserved; no authored None);
   5. get_picker_row records PICKER_INSTANCE_DISPLAY_NAME / _OVERRIDE / ROW_TEXT / NAME /
      DESCRIPTION (UNAVAILABLE when the row lacks them); a row with plain-str text that
-     equals the old English while instance base is TEST299 -> PICKER_ROW_USES_OTHER_SOURCE;
+     equals the old English ('Caught Cheating 2') while instance base is TEST300 -> PICKER_ROW_USES_OTHER_SOURCE;
   6. non-target instances are NOT framed.
   7. restore removes both method wrappers.
 
@@ -83,8 +83,8 @@ def main():
     print("=== P29B DISPLAY TRACE OFFLINE LOGIC TEST ===")
 
     # ---------- 1+2+3 : hook works; normal get_display_name (override=None,
-    # original=None) returning TEST299 ----------
-    print("\n-- hook + transparent gdn, base TEST299 returns TEST299 --")
+    # original=None) returning TEST300 ----------
+    print("\n-- hook + transparent gdn, base TEST300 returns TEST300 --")
     mod = _stand_in_class_loader()
     class SexAnimationInstance(object):
         def get_display_name(self, string_hash, original=False):
@@ -102,36 +102,36 @@ def main():
     try:
         ok, mp, cp = hook._try_patch()
         # display via the (now-wrapped) class method
-        inst = _make_instance("TEST299", author="Nevely42")
+        inst = _make_instance("TEST300", author="Nevely42")
         out = SexAnimationInstance.get_display_name(inst, 12345, False)
     finally:
         sys.stdout = old
     t = buf.getvalue()
     check(ok is True and cp is True, "class discovered+patched (both methods)")
-    check(out == "TEST299", "get_display_name transparently returns TEST299")
+    check(out == "TEST300", "get_display_name transparently returns TEST300")
     check("GDN_#1" in t, "gdn target frame emitted")
-    check("BASE_DISPLAY_NAME='TEST299'" in t, "BASE_DISPLAY_NAME=TEST299")
+    check("BASE_DISPLAY_NAME='TEST300'" in t, "BASE_DISPLAY_NAME=TEST300")
     check("DISPLAY_NAME_OVERRIDE=None" in t, "override None recorded")
     check("ORIGINAL_INSTANCE_PRESENT=NO" in t, "no original_instance recorded")
     check("ARG_STRING_HASH=12345" in t, "string_hash recorded")
     check("ARG_ORIGINAL=False" in t, "original flag recorded")
-    check("GET_DISPLAY_NAME_RETURN='TEST299'" in t, "return recorded")
+    check("GET_DISPLAY_NAME_RETURN='TEST300'" in t, "return recorded")
 
     # ---------- UI_USING_ORIGINAL_INSTANCE ----------
     print("\n-- UI_USING_ORIGINAL_INSTANCE (original holds old English) --")
     hook._reset_state_for_test()
     hook._try_patch()  # re-wrap after reset (reset unwraps)
-    orig_inst = _make_instance("Caught Cheating 1", author="Nevely42")
-    inst2 = _make_instance("TEST299", original=orig_inst, author="Nevely42")
+    orig_inst = _make_instance("Caught Cheating 2", author="Nevely42")
+    inst2 = _make_instance("TEST300", original=orig_inst, author="Nevely42")
     buf = io.StringIO(); sys.stdout = buf
     try:
         out = SexAnimationInstance.get_display_name(inst2, 1, True)
     finally:
         sys.stdout = old
     t2 = buf.getvalue()
-    check(out == "Caught Cheating 1", "gdn returns old English (via original)")
+    check(out == "Caught Cheating 2", "gdn returns old English (via original)")
     check("ORIGINAL_INSTANCE_PRESENT=YES" in t2, "original present=YES")
-    check("ORIGINAL_INSTANCE_DISPLAY_NAME='Caught Cheating 1'" in t2,
+    check("ORIGINAL_INSTANCE_DISPLAY_NAME='Caught Cheating 2'" in t2,
           "original display old English recorded")
     check("ARG_ORIGINAL=True" in t2, "ARG_ORIGINAL=True")
     check("P29B_RESULT=UI_USING_ORIGINAL_INSTANCE" in t2,
@@ -141,14 +141,14 @@ def main():
     print("\n-- DISPLAY_NAME_OVERRIDE_WINS --")
     hook._reset_state_for_test()
     hook._try_patch()  # re-wrap after reset
-    inst3 = _make_instance("TEST299", override="Caught Cheating 1", author="x")
+    inst3 = _make_instance("TEST300", override="Caught Cheating 2", author="x")
     buf = io.StringIO(); sys.stdout = buf
     try:
         out = SexAnimationInstance.get_display_name(inst3, 7, False)
     finally:
         sys.stdout = old
     t3 = buf.getvalue()
-    check(out == "Caught Cheating 1", "gdn returns override value")
+    check(out == "Caught Cheating 2", "gdn returns override value")
     check("P29B_RESULT=DISPLAY_NAME_OVERRIDE_WINS" in t3,
           "P29B_RESULT=DISPLAY_NAME_OVERRIDE_WINS")
 
@@ -168,7 +168,7 @@ def main():
     mod2.SexAnimationInstance = SexAnimationInstance2
     hook._reset_state_for_test()
     hok, _, _ = hook._try_patch()
-    instP = _make_instance("TEST299", author="Nevely42")
+    instP = _make_instance("TEST300", author="Nevely42")
     osent = object()
     # caller provides string_hash but OMITS the sentinel-defaulted original
     hit = SexAnimationInstance2.get_display_name(instP, 5)
@@ -178,10 +178,10 @@ def main():
           "OMITTED_DEFAULT_PRESERVED=YES")
 
     # ---------- get_picker_row + PICKER_ROW_USES_OTHER_SOURCE ----------
-    print("\n-- get_picker_row records row; row old English while base TEST299 --")
+    print("\n-- get_picker_row records row; row old English while base TEST300 --")
     hook._reset_state_for_test()
     row_old = type("Row", (object,), {})()
-    row_old.text = "Caught Cheating 1"
+    row_old.text = "Caught Cheating 2"
     class SexAnimationInstance3(object):
         def get_display_name(self, string_hash, original=False):
             return self.display_name
@@ -191,7 +191,7 @@ def main():
     mod3.SexAnimationInstance = SexAnimationInstance3
     hook._reset_state_for_test()
     hook._try_patch()
-    inst4 = _make_instance("TEST299", author="Nevely42")
+    inst4 = _make_instance("TEST300", author="Nevely42")
     buf = io.StringIO(); sys.stdout = buf
     try:
         hookr = SexAnimationInstance3.get_picker_row(inst4)
@@ -199,8 +199,8 @@ def main():
         sys.stdout = old
     t4 = buf.getvalue()
     check(hookr is row_old, "picker row returned transparently")
-    check("PICKER_INSTANCE_DISPLAY_NAME='TEST299'" in t4, "picker instance display")
-    check("PICKER_ROW_TEXT='Caught Cheating 1'" in t4, "PICKER_ROW_TEXT=old English")
+    check("PICKER_INSTANCE_DISPLAY_NAME='TEST300'" in t4, "picker instance display")
+    check("PICKER_ROW_TEXT='Caught Cheating 2'" in t4, "PICKER_ROW_TEXT=old English")
     check("P29B_PHASE=GET_PICKER_ROW" in t4, "picker phase marker")
     check("P29B_RESULT=PICKER_ROW_USES_OTHER_SOURCE" in t4,
           "PICKER_ROW_USES_OTHER_SOURCE (row built from other source)")
@@ -219,7 +219,7 @@ def main():
     mod4.SexAnimationInstance = SexAnimationInstance4
     hook._reset_state_for_test()
     hook._try_patch()
-    inst5 = _make_instance("Caught Cheating 1", author="Nevely42")
+    inst5 = _make_instance("Caught Cheating 2", author="Nevely42")
     buf = io.StringIO(); sys.stdout = buf
     try:
         SexAnimationInstance4.get_picker_row(inst5)

@@ -2,30 +2,37 @@
 # -*- coding: utf-8 -*-
 """ww_p29b_display_trace.py --- P29-B: RUNTIME UI-DOWNSTREAM observation only.
 
-REAL FIXED FACTS this phase acts on (authoritative live trace, 2026-09-04 21:04,
-P28C ordinal299 raw=TEST299 override LIVE):
-    HOOK_INSTALLED=YES ; TUNING_#2055
-    RAW_ATTR='TEST299'  DISPLAY_ATTR=None  TUNING_TYPE=TunableFactoryWrapper
-    ANIMATION_OVERRIDE_PRESENT=OMITTED
-    RETURN_INSTANCE_DISPLAY_NAME='TEST299'  _OVERRIDE=None
-    AUTHOR='Nevely42'  ANIMATION_IDENTIFIER=0  MATCH=TARGET
-  => P28C_REACHES_RUNTIME_TUNING=YES  RAW_ATTR_TEST299=YES
-     INSTANCE_DISPLAY_NAME_TEST299=YES  INSTANCE_DISPLAY_NAME_OVERRIDE_NONE=YES
-So the OLD question ("does TEST299 reach WW runtime?") is RESOLVED -> YES.  The NEW
-question is pure UI-downstream: instance.display_name is ALREADY TEST299, yet the
-final picker/UI still shows the old English.  WE DO NOT hunt XML/package/tuning/
-parser anymore.  This phase ONLY observes the two real UI-facing instance methods:
+CURRENT TARGET (switched 2026-09-04): the real WW/Nevely UI in this session shows the
+row labeled "Caught Cheating 2" (arbitrary).  Authoritative real XML mapping
+(output/story_animation_xml_trace.txt + output/ww_p27/mapping.csv) puts that at
+ordinal 300 (anm300, animation_raw_display_name='Caught Cheating 2', animation_id
+2301).  P28C now overrides ONLY that entry:  Caught Cheating 2 -> TEST300.  This mod
+observes ONLY the runtime instances whose display/author match the target BELOW.
+
+PRIOR TRIAL (kept as history, NOT the target anymore): the first single-row trial was
+ordinal 299 (raw='Caught Cheating 1' -> TEST299).  Its live trace resolved the
+upstream question:
+    HOOK_INSTALLED=YES ; TUNING_#2055 RAW_ATTR='TEST299' ;
+    RETURN_INSTANCE_DISPLAY_NAME='TEST299' _OVERRIDE=None AUTHOR='Nevely42' ID=0
+  => P28C_REACHES_RUNTIME_TUNING=YES  INSTANCE_DISPLAY_NAME_TEST299=YES
+That proved a P28C-style single-entry raw override DOES reach WW runtime tuning and
+instance.display_name.  The reason that trial's UI still showed old English was that
+selecting ordinal 299 showed arbitrary NOT matching the raw field the UI surfaces at
+the intended target; the box shows "Caught Cheating 2".  We now re-run the SAME
+architecture against ordinal 300 to decide where the old English reappears.
+
+This phase ONLY observes the two real UI-facing instance methods:
 
     SexAnimationInstance.get_display_name(self, string_hash, original)
     SexAnimationInstance.get_picker_row(self, ...)   (calls get_display_name)
 
 PURPOSE (evidence only): decide WHERE the old English reappears downstream:
-    A  base/display return TEST299 and picker get_display_name TEST299
+    A  base/display return TEST300 and picker get_display_name TEST300
          -> the switch is AFTER the picker row (row/post-row).
-    B  base TEST299 but GET_DISPLAY_NAME_RETURN='Caught Cheating 1'
+    B  base TEST300 but GET_DISPLAY_NAME_RETURN='Caught Cheating 2'
          -> get_display_name ITSELF is the switch point.
-    C  base TEST299, get_display_name returns TEST299, but PICKER_ROW_TEXT=
-       'Caught Cheating 1'
+    C  base TEST300, get_display_name returns TEST300, but PICKER_ROW_TEXT=
+       'Caught Cheating 2'
          -> the picker builds its row from ANOTHER source.
 Plus two named root causes inside get_display_name:
     * if self.original_instance is used (ARG_ORIGINAL=True and original_instance
@@ -40,10 +47,11 @@ SAFETY CONTRACT (identical fail-closed, observation-only):
      (orig(*args, **kwargs)), HOOK_ERROR precedence over any business verdict.
   3. Read instance/row attrs ONLY via guarded getattr; never assign any field we
      only read; never guess a picker row field -- unknown -> UNAVAILABLE.
-  4. Auto-deploy P28C TEST299 + one-key rollback handled by the .ps1 wrappers.
+  4. Auto-deploy P28C TEST300 (single-entry Caught Cheating 2 -> TEST300) + one-key
+     rollback handled by the .ps1 wrappers.
 
 Target match helper (do NOT rely on animation_id which is 0 for this target):
-    self DISPLAY_NAME in {'TEST299','Caught Cheating 1'}
+    self DISPLAY_NAME in {'TEST300','Caught Cheating 2'}
     OR (self.AUTHOR=='Nevely42' AND self is the runtime instance or has a marker)
     OR instance is the exact object we saw via the _create hook (hot target).
 """
@@ -52,7 +60,9 @@ import sys
 import time
 import traceback as _traceback
 
-_TARGET_NAMES = ("TEST299", "Caught Cheating 1")
+_TARGET_OLD_RAW = "Caught Cheating 2"
+_TARGET_NEW_RAW = "TEST300"
+_TARGET_NAMES = (_TARGET_NEW_RAW, _TARGET_OLD_RAW)
 _TARGET_AUTHOR = "Nevely42"
 
 # Where the SexAnimationInstance class lives (authoritative live module).  We scan
@@ -286,11 +296,11 @@ def _hook_get_display_name(orig):
         bs, rs = _safe_str(base), _safe_str(ret)
         ovs = _safe_str(ovr)
         if oi_present == "YES" and original is not _UNSET_SENTINEL and \
-                _safe_str(oi_disp) == "Caught Cheating 1" and rs == "Caught Cheating 1":
+                _safe_str(oi_disp) == _TARGET_OLD_RAW and rs == _TARGET_OLD_RAW:
             verdict = "UI_USING_ORIGINAL_INSTANCE"
-        elif ovs == "Caught Cheating 1" and rs == "Caught Cheating 1":
+        elif ovs == _TARGET_OLD_RAW and rs == _TARGET_OLD_RAW:
             verdict = "DISPLAY_NAME_OVERRIDE_WINS"
-        elif bs == "TEST299" and rs == "Caught Cheating 1":
+        elif bs == _TARGET_NEW_RAW and rs == _TARGET_OLD_RAW:
             verdict = "GET_DISPLAY_NAME_IS_SWITCH"
         _emit("P29B_PHASE=GET_DISPLAY_NAME")
         if verdict:
@@ -330,9 +340,9 @@ def _hook_get_picker_row(orig):
         _emit("PICKER_ROW_TEXT=%r" % (rinfo["text"],))
         _emit("PICKER_ROW_NAME=%r" % (rinfo["name"],))
         _emit("PICKER_ROW_DESCRIPTION=%r" % (rinfo["description"],))
-        # branch C: base TEST299 but row text is old English
+        # branch C: base NEW_RAW but row text is old English
         bs = _safe_str(base)
-        if bs == "TEST299" and rinfo["text"] == "Caught Cheating 1":
+        if bs == _TARGET_NEW_RAW and rinfo["text"] == _TARGET_OLD_RAW:
             _emit("P29B_PHASE=GET_PICKER_ROW")
             _emit("P29B_RESULT=PICKER_ROW_USES_OTHER_SOURCE")
         return ret

@@ -8,7 +8,7 @@ fork 自 ww_p28b0_cfg_audit.py 的已实证逻辑 (glob/eff/Sims4 高数值优�
 
   * OBJECT_DIR  = "P28C_Overrides"
   * SOURCE      = Mods/2026.7.20/WW_Nevely42_Animations.package  (真实源 WW, priority 500 下方)
-  * OVERRIDE_TARGET = P28C_Overrides/WW_P28C_TEST299_Override.package (虚拟目标, 可不存在/可已存在)
+  * OVERRIDE_TARGET = P28C_Overrides/WW_P28C_TEST300_Override.package (虚拟目标, 可不存在/可已存在)
   * 输出 P28C_OVERRIDE_EFFECTIVE_PRIORITY -> deploy 以此 + SOURCE_EFFECTIVE_PRIORITY 判定
     PRIORITY_RELATION=OVERRIDE_HIGHER (严格大于才放行).
 
@@ -45,7 +45,7 @@ from pathlib import Path
 OBJECT_DIR = "P28C_Overrides"
 SOURCE_SUBDIR = "2026.7.20"
 SOURCE_BASENAME = "WW_Nevely42_Animations.package"
-OVERRIDE_BASENAME = "WW_P28C_TEST299_Override.package"
+OVERRIDE_BASENAME = "WW_P28C_TEST300_Override.package"
 
 
 def sha256_file(p):

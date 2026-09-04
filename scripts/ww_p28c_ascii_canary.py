@@ -10,20 +10,23 @@ P27 的问题已确认为 re-introduced mem_size/field7 regression:
 
 P28C = 新独立生成器 (不覆盖 P27/P28B/P28B0, 独立 output/ww_p28c):
   * 只读源 WW package, 定位唯一 WW_ANIM_XML (type 0x7DF2169C, instance 0x43F3438A94EDEB2B)。
-  * 只改 ordinal 299 的 animation_raw_display_name -> "TEST299"; 其余所有 raw / 字段【逐字节不变】。
+  * 只改 ordinal 300 的 animation_raw_display_name -> "TEST300"; 其余所有 raw / 字段【逐字节不变】。
   * 修复 mem_size: 写出 WRITTEN_MEM_SIZE = len(decompress_maybe(new_body)) == NEW_XML_DECOMPRESSED_SIZE
     (绝不沿用 source 旧 field7); 机验 WRITTEN_MEM_SIZE == NEW_XML_DECOMPRESSED_SIZE, 否则 fail-closed。
   * source-faithful: 同 TGI / header_comp / major / minor / offset+size high bit / comp_type。
   * 生成单资源 same-TGI override (P28B-1 真机证明 single-resource same-TGI override 可被加载)。
+  * 目标 = ordinal 300 (权威 XML anm300, animation_raw_display_name='Caught Cheating 2') -> TEST300;
+    替换前机验 ordinal==TARGET_ORDINAL 的 raw 必须 == TARGET_OLD_RAW, 否则 fail-closed。
   * 输出 output/ww_p28c/:
-      WW_P28C_TEST299_Override.package
+      WW_P28C_TEST300_Override.package
       ww_p28c_report.txt
       mapping.csv            (ordinal, old, new)
   * ZERO_WRITE_TO_MODS=YES。
 
 机验键 (ASCII):
-  TARGET_ORDINAL=299
-  TARGET_NEW_RAW=TEST299
+  TARGET_ORDINAL=300
+  TARGET_OLD_RAW=Caught Cheating 2
+  TARGET_NEW_RAW=TEST300
   SOURCE_MEM_SIZE=...                  (P27 曾错误沿用的源旧 field7)
   NEW_XML_DECOMPRESSED_SIZE=...        (新解压实际长度)
   WRITTEN_MEM_SIZE=...                 (写进包的真实 field7)
@@ -66,8 +69,9 @@ EXPECTED_INSTANCE = 0x43F3438A94EDEB2B
 ANIM_LIST_FIELD = "animations_list"
 RAW_FIELD = "animation_raw_display_name"
 
-TARGET_ORDINAL = 299
-TARGET_NEW_RAW = "TEST299"
+TARGET_ORDINAL = 300
+TARGET_OLD_RAW = "Caught Cheating 2"
+TARGET_NEW_RAW = "TEST300"
 
 
 def fmt_inst(i):
@@ -87,7 +91,7 @@ def main():
         return 2
 
     out_dir = Path(a.out_dir) / "ww_p28c"
-    out_pkg = out_dir / "WW_P28C_TEST299_Override.package"
+    out_pkg = out_dir / "WW_P28C_TEST300_Override.package"
     out_report = out_dir / "ww_p28c_report.txt"
     csv_out = out_dir / "mapping.csv"
 
@@ -164,11 +168,15 @@ def main():
     if target_el is None:
         print(f"ERROR: 目标 ordinal {TARGET_ORDINAL} 不存在于 XML (总条目 {ordinal}) (exit 3)", file=sys.stderr)
         return 3
+    if target_old != TARGET_OLD_RAW:
+        print(f"ERROR: ordinal {TARGET_ORDINAL} 的 raw = {target_old!r} != 权威 {TARGET_OLD_RAW!r} "
+              f"(exit 3)", file=sys.stderr)
+        return 3
     if target_old == TARGET_NEW_RAW:
         print(f"ERROR: ordinal {TARGET_ORDINAL} 已是 {TARGET_NEW_RAW}, 无需改 (exit 3)", file=sys.stderr)
         return 3
 
-    # 在源 XML 文本上做仅一处精确替换 <T n="animation_raw_display_name">OLD</T> -> TEST299 (其余字节不变)
+    # 在源 XML 文本上做仅一处精确替换 <T n="animation_raw_display_name">OLD</T> -> TEST300 (其余字节不变)
     nname = target_el.get("n")
     frag_old = f'<T n="{nname}">{target_old}</T>'
     frag_new = f'<T n="{nname}">{TARGET_NEW_RAW}</T>'
@@ -227,7 +235,7 @@ def main():
     mem_match_write = (written_field7 == new_xml_decompressed_size)
 
     # ---------- 机验 2: NON_TARGET_XML_DIFF=0 ----------
-    # 读回生成包 WW XML, 逐条目 raw 与源比; 除 ordinal 299 外必须全等
+    # 读回生成包 WW XML, 逐条目 raw 与源比; 除 ordinal 300 外必须全等 (ordinal 300 必须 == TEST300)
     b2 = read_body_raw(out_pkg, ww2[0]) if count_ok else b""
     non_target_diff = -1
     new_pkg_plain = decompress_maybe(b2).decode("utf-8", errors="replace")
@@ -263,7 +271,7 @@ def main():
         return 3
 
     non_target_zero = (non_target_diff == 0)
-    targets_changed = 1  # 恰好 ordinal 299 改成 TEST299
+    targets_changed = 1  # 恰好 ordinal 300 改成 TEST300
 
     verdict_ok = (parser_ok and count_ok and tgi_ok and mem_match_write
                   and non_target_zero and targets_changed == 1)
@@ -281,6 +289,7 @@ def main():
     report.append(f"INSTANCE={fmt_inst(inst)}")
     report.append(f"TGI_MATCH={'YES' if tgi_ok else 'NO'}")
     report.append(f"TARGET_ORDINAL={TARGET_ORDINAL}")
+    report.append(f"TARGET_OLD_RAW={TARGET_OLD_RAW}")
     report.append(f"TARGET_NEW_RAW={TARGET_NEW_RAW}")
     report.append(f"TARGETS_CHANGED={targets_changed}/{sum(1 for _ in all_raw_vals) or 1}")
     report.append(f"NON_TARGET_XML_DIFF={non_target_diff}")

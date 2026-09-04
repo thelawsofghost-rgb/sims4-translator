@@ -4,12 +4,13 @@
 ww_p28c_wintest.py —— P28C 全链路沙箱测试 (证明 mem_size 修复 + ASCII canary 语义)
 
 构造一个真实形态的多条目源 fixture (含 1 个压缩 WW_ANIM_XML, instance 0x43F3438A94EDEB2B,
-animations_list 数百条 U), 其中 ordinal 299 的 animation_raw_display_name 原文为一段**非 7 字节**
-英文串 (长度 != "TEST299"), 使"改 299->TEST299"必然改变解压总长度 -> source 旧 field7 必然过期。
+animations_list 数百条 U), 其中 ordinal 300 的 animation_raw_display_name 原文为
+'Caught Cheating 2' (长度 != 'TEST300'), 使"改 300->TEST300"必然改变解压总长度 -> source 旧 field7 必然过期。
 
 跑通:
   1. generator (ww_p28c_ascii_canary.py) -> output/ww_p28c/artifact + report
-     必须:  TARGET_299=TEST299 / TARGETS_CHANGED=1/1 / NON_TARGET_XML_DIFF=0 (除299 全等)
+     必须:  TARGET_ORDINAL=300 / TARGET_OLD_RAW='Caught Cheating 2' / TARGET_NEW_RAW=TEST300 /
+             TARGETS_CHANGED=1/1 / NON_TARGET_XML_DIFF=0 (除300 全等)
            / WRITTEN_MEM_SIZE == NEW_XML_DECOMPRESSED_SIZE (修复; 已不等于 SOURCE_MEM_SIZE, 证明旧 P27 逻辑会写错)
            / MEM_SIZE_MATCH_NEW_XML=YES
   2. report_check 独立机验 PASS (独立读包 bytes, 不信 report YES)
@@ -44,9 +45,9 @@ INST = 0x43F3438A94EDEB2B
 STBL = 0x220557DA
 CLIP = 0x0354E541
 
-TARGET_ORD = 299
-TARGET_NEW = "TEST299"
-OLD_299 = "A deliberately longer english animation display name NumberTwoNineNine not seven bytes"
+TARGET_ORD = 300
+TARGET_NEW = "TEST300"
+OLD_ORD = "Caught Cheating 2"
 
 
 def make_anim_xml_body(n_entries=306):
@@ -55,7 +56,7 @@ def make_anim_xml_body(n_entries=306):
              '<I c="WickedWhimsAnimationPackage" i="1" s="1">',
              '<U n="wickedwhims_animations"><L n="animations_list">']
     for i in range(n_entries):
-        raw = OLD_299 if i == TARGET_ORD else f"Animation English #{i} plain text"
+        raw = OLD_ORD if i == TARGET_ORD else f"Animation English #{i} plain text"
         author = "Nevely42" if i in (TARGET_ORD, 0) else "SomeAuthor"
         clip = f"clip_{i}"
         parts.append(f'<U n="animation"><T n="animation_raw_display_name">{raw}</T>'
@@ -115,7 +116,7 @@ def main():
         root = Path(td)
         src_pkg = make_fixture(root / "WW_Nevely42_Animations.package")
         outdir = root / "out" / "ww_p28c"
-        art = outdir / "WW_P28C_TEST299_Override.package"
+        art = outdir / "WW_P28C_TEST300_Override.package"
         report = outdir / "ww_p28c_report.txt"
 
         # ---- 1. generator ----
@@ -124,8 +125,9 @@ def main():
         check("1. generator exit=0", code == 0, f"(exit {code})")
         check("1. 无 stderr", err.strip() == "", err[:120])
         check("1. VERDICT=PASS", g.get("VERDICT") == "PASS", g.get("VERDICT"))
-        check("1. TARGET_ORDINAL=299", g.get("TARGET_ORDINAL") == "299", g.get("TARGET_ORDINAL"))
-        check("1. TARGET_NEW_RAW=TEST299", g.get("TARGET_NEW_RAW") == "TEST299", g.get("TARGET_NEW_RAW"))
+        check("1. TARGET_ORDINAL=300", g.get("TARGET_ORDINAL") == "300", g.get("TARGET_ORDINAL"))
+        check("1. TARGET_OLD_RAW=Caught Cheating 2", g.get("TARGET_OLD_RAW") == "Caught Cheating 2", g.get("TARGET_OLD_RAW"))
+        check("1. TARGET_NEW_RAW=TEST300", g.get("TARGET_NEW_RAW") == "TEST300", g.get("TARGET_NEW_RAW"))
         check("1. TARGETS_CHANGED=1/1", str(g.get("TARGETS_CHANGED", "")).startswith("1/"), g.get("TARGETS_CHANGED"))
         check("1. NON_TARGET_XML_DIFF=0", g.get("NON_TARGET_XML_DIFF") == "0", g.get("NON_TARGET_XML_DIFF"))
         check("1. artifact 存在", art.is_file())

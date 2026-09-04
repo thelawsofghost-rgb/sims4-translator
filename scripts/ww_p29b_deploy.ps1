@@ -1,14 +1,16 @@
 # ww_p29b_deploy.ps1 -- P29-B deploy (Windows real machine, ONE-KEY).
 #
-# GOAL (2026-09-04 21:04): P28C TEST299 already REACHES runtime (instance
-# display_name=TEST299); the open question moved DOWNSTREAM to the UI.  This deploy
-# installs ww_p29b_display_trace.ts4script, a RUNTIME OBSERVATION mod that hooks the
-# REAL UI-facing class methods
+# GOAL (2026-09-04 21:2x, relocated to row 300): the real WW/Nevely UI row the user
+# sees is labeled "Caught Cheating 2" (not "1").  Authoritative XML (output/ww_p27/
+# mapping.csv + story_animation_xml_trace.txt) maps it -> ordinal 300 (anm300, raw
+# 'Caught Cheating 2', animation_id 2301).  P28C now overrides ONLY that entry:
+# Caught Cheating 2 -> TEST300.  This deploy installs ww_p29b_display_trace.ts4script,
+# a RUNTIME OBSERVATION mod that hooks the REAL UI-facing class methods
 #     SexAnimationInstance.get_display_name(self, string_hash, original)
 #     SexAnimationInstance.get_picker_row(self, ...)
 # by rebinding them transparently (orig(self, *args, **kwargs) -- self + args unchanged,
 # never authored) and records, for target instances only (AUTHOR Nevely42 / display_name
-# 'TEST299' / 'Caught Cheating 1'), the fields that answer "where does the old English
+# 'TEST300' / 'Caught Cheating 2'), the fields that answer "where does the old English
 # reappear": BASE_DISPLAY_NAME / DISPLAY_NAME_OVERRIDE / ORIGINAL_INSTANCE_PRESENT /
 # ORIGINAL_INSTANCE_DISPLAY_NAME / ARG_STRING_HASH / ARG_ORIGINAL /
 # GET_DISPLAY_NAME_RETURN and the picker fields PICKER_ROW_TEXT/NAME/DESCRIPTION.
@@ -23,7 +25,7 @@
 #   2. Build ww_p29b_display_trace.ts4script under the game-magic python (reuses
 #      ww_p29a_build_on_win.ps1 in P29-B mode).
 #   3. Place it in Mods as ww_p29b_display_trace.ts4script.
-#   4. Auto-deploy the already-verified P28C TEST299 override + set a P29-B flag.
+#   4. Auto-deploy the already-verified P28C TEST300 override + set a P29-B flag.
 # ASCII-only; Run-Python named params; no 2>&1 / no &&.
 [CmdletBinding()]
 param(
@@ -108,8 +110,8 @@ Copy-Item -LiteralPath $STAGE -Destination $DEBUG_TS4 -Force
 Write-Output "DEBUG_TS4=SHA:$(Sha256 $DEBUG_TS4) (was $preSha)"
 Write-Output "DEBUG_TS4_PATH=$DEBUG_TS4"
 
-# ---------- 4. auto-deploy P28C TEST299 override ----------
-Write-Output "--- P28C TEST299 AUTO-DEPLOY (artifact already verified) ---"
+# ---------- 4. auto-deploy P28C TEST300 override ----------
+Write-Output "--- P28C TEST300 AUTO-DEPLOY (artifact already verified) ---"
 & $P28C_DEPLOY
 if ($LASTEXITCODE -ne 0) { Fail "P28C auto-deploy failed; run ww_p29b_rollback.ps1 to clean" }
 if (Test-Path -LiteralPath $FLAG_P28C_DEP) { Remove-Item -LiteralPath $FLAG_P28C_DEP -Force }

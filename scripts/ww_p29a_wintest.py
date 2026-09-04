@@ -511,20 +511,20 @@ def p29b_report_mechanism():
     import collections
     rc = SCRIPTS / "ww_p29b_report_check.py"
     cases = {
-        "err": ['HOOK_INSTALLED=YES', 'BASE_DISPLAY_NAME=\'TEST299\'',
+        "err": ['HOOK_INSTALLED=YES', 'BASE_DISPLAY_NAME=\'TEST300\'',
                 'HOOK_ERROR=Traceback...'],
         "orig": ['HOOK_INSTALLED=YES', 'P29B_RESULT=UI_USING_ORIGINAL_INSTANCE'],
         "ovr": ['HOOK_INSTALLED=YES', 'P29B_RESULT=DISPLAY_NAME_OVERRIDE_WINS'],
         "switch": ['HOOK_INSTALLED=YES',
                    'P29B_RESULT=GET_DISPLAY_NAME_IS_SWITCH'],
         "pickerC": ['HOOK_INSTALLED=YES', "PICKER_#1",
-                    "BASE_DISPLAY_NAME='TEST299'",
-                    "GET_DISPLAY_NAME_RETURN='TEST299'",
-                    "PICKER_ROW_TEXT='Caught Cheating 1'"],
+                    "BASE_DISPLAY_NAME='TEST300'",
+                    "GET_DISPLAY_NAME_RETURN='TEST300'",
+                    "PICKER_ROW_TEXT='Caught Cheating 2'"],
         "pickerA": ['HOOK_INSTALLED=YES', "PICKER_#1",
-                    "BASE_DISPLAY_NAME='TEST299'",
-                    "GET_DISPLAY_NAME_RETURN='TEST299'",
-                    "PICKER_ROW_TEXT='TEST299'"],
+                    "BASE_DISPLAY_NAME='TEST300'",
+                    "GET_DISPLAY_NAME_RETURN='TEST300'",
+                    "PICKER_ROW_TEXT='TEST300'"],
         "none": ['HOOK_INSTALLED=YES'],
     }
     expect = {
