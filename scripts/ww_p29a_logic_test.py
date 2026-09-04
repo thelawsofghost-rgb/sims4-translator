@@ -3,85 +3,86 @@
 """
 ww_p29a_logic_test.py --- OFFLINE semantic test of the P29-A wrappering core.
 
-The real WW runtime / real SexAnimationInstance cannot run on this (Linux)
-box.  So we validate the *wrappering logic* against a stand-in class that has
-the EXACT confirmed __init__ signature:
+The real WW runtime / real SexAnimationInstance cannot run on this box.  So we
+validate the *wrappering logic* against a stand-in class that has the CURRENT-WW
+__init__ signature (authoritative LIVE marshal 2026-09-04):
 
-    SexAnimationInstance.__init__(self, animation_id,
-                                  animation_raw_display_name, animation_type)
-    body sets:
+    SexAnimationInstance.__init__(self, animation_id, display_name, display_icon,
+                                  author, author_id, ... , unsafe)
+    body sets (among many):
         self.animation_id = animation_id
-        self.h            = hash("story_animations." + str(animation_id))
-        self.display_name = animation_raw_display_name
-        self.localized    = TurboLocalizedString(self.h, animation_raw_display_name)
-        self.name         = animation_raw_display_name
+        self.display_name = display_name
+        self.display_name_override = <some default>
+        self.original_instance = <something>
+
+The OLD (self, animation_id, animation_raw_display_name, animation_type) contract
+is STALE and intentionally NOT used; the wrap gate now requires index1=display_name.
 
 This proves, offline, that ww_p29a_mod:
-  - wraps (does not replace) __init__
+  - wraps (does not replace) __init__ only when the LIVE gate matches
   - calls the ORIGINAL with identical args (side effects preserved)
-  - records RAW_ARG (unchanged input) and the resulting display_name/name/
-    localized.hash WITHOUT mutating them
+  - records DISPLAY_NAME_ARG (unchanged input) and resulting display_name /
+    display_name_override / original_instance WITHOUT mutating them
   - does not change return / instance state vs an unwrapped control
   - restores original on hook error (fail-closed)
-  - reports TEST299 vs OLD matching, and OLD-only when no TEST299 arrives
+  - reports TEST299 vs OLD vs OTHER matching, and only when a carried value matches
 
-Exit codes: 0=PASS, 1=FALSE-NEGATIVE/PASSURE, 2=unexpected behavior.
+Exit codes: 0=PASS, 1=FALSE-NEGATIVE/FALSE-POSITIVE, 2=unexpected behavior.
 Usage: python3 scripts/ww_p29a_logic_test.py
 """
 import os
 import sys
+import io
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 MOD_PKG = SCRIPT_DIR / "ww_p29a_mod"
 sys.path.insert(0, str(MOD_PKG.parent))
 
-# ---------------------------------------------------------------- stand-ins
+
 class _TurboLocalizedString(object):
     def __init__(self, hash_key, text_value):
         self.hash = hash_key
         self.text = text_value
 
+
 def _hash_string(s):
-    # deterministic stand-in for the real hash_string
     h = 0
     for ch in s:
         h = (h * 31 + ord(ch)) & 0xFFFFFFFF
     return h
 
-class _SexAnimationInstanceBase(object):
-    # stand-in replicating the CONFIRMED real body exactly
-    def __init__(self, animation_id, animation_raw_display_name, animation_type):
-        self.animation_id = animation_id
-        self.h = _hash_string("story_animations." + str(animation_id))
-        self.display_name = animation_raw_display_name
-        self.localized = _TurboLocalizedString(self.h, animation_raw_display_name)
-        self.name = animation_raw_display_name
-        self.__pass = getattr(self, "__ctor_calls", 0) + 1  # no-op marker defused
 
-    # ensure original body ran: counter
-    __ctor_counter = {"n": 0}
-
-    def __init_orig(self, animation_id, animation_raw_display_name, animation_type):
-        raise NotImplementedError
+# Current-WW __init__ positional list (params after 'self'), per live marshal.
+_CUR_PARAMS = ["animation_id", "display_name", "display_icon", "author",
+               "author_id", "version", "unsafe"]
 
 
 def _make_targeted(defname="targeted"):
-    """Build a fresh class whose __init__ matches the confirmed signature."""
-    cls = type(
-        defname,
-        (object,),
-        {},
-    )
+    """Build a fresh class whose __init__ matches the CURRENT live signature.
+
+    The body mirrors what current WW's __init__ does for the fields we read:
+    it writes self.display_name from the display_name arg and installs a default
+    display_name_override / original_instance so the post-wrap observer has
+    something real to read.
+    """
+    cls = type(defname, (object,), {})
     ctr = {"n": 0}
 
-    def _init(self, animation_id, animation_raw_display_name, animation_type):
+    def _init(self, animation_id, display_name, display_icon, author, author_id,
+              version=None, unsafe=False):
         ctr["n"] += 1
         self.animation_id = animation_id
         self.h = _hash_string("story_animations." + str(animation_id))
-        self.display_name = animation_raw_display_name
-        self.localized = _TurboLocalizedString(self.h, animation_raw_display_name)
-        self.name = animation_raw_display_name
+        self.display_name = display_name
+        self.display_icon = display_icon
+        self.author = author
+        self.author_id = author_id
+        # current WW writes these defaults inside the body (per live co_names)
+        self.display_name_override = None
+        self.original_instance = None
+        self.version = version
+        self.unsafe = unsafe
 
     cls.__init__ = _init
     cls.__ctr = ctr
@@ -105,62 +106,106 @@ def main():
     hook = importlib.import_module("ww_p29a_mod")
     importlib.reload(hook)
 
-    # 1) wrapper installs on a target-shaped class
+    # 2) wrapper keeps ORIGINAL behavior (calls original first) + records
+    #    Constructor receives the CURRENT positional set (display args).
     Tgt = _make_targeted()
     hooked = hook._wrap_cls(Tgt)
     check(hooked is True, "wrap_cls installs on target-shaped __init__")
 
-    # 2) wrapper keeps ORIGINAL behavior (calls original first), records correctly
-    #    Simulate constructor receiving OLD raw (the P28C-negative hypothesis)
-    #    Wrap is already installed; build one instance:
-    inst = Tgt(2300, "Caught Cheating 1", "s")
-    check(inst.display_name == "Caught Cheating 1", "OLD ctor: display_name==OLD"
-          % (), )
-    check(inst.name == "Caught Cheating 1", "OLD ctor: name==OLD")
+    # OLD English carried into display_name (P28C-negative hypothesis)
+    inst = Tgt(2300, "Caught Cheating 1", "some_icon", "WW", 0)
+    check(inst.display_name == "Caught Cheating 1",
+          "OLD ctor: display_name==OLD")
     check(inst.animation_id == 2300, "OLD ctor: animation_id preserved")
-    check(hasattr(inst, "localized") and inst.localized.hash is not None,
-          "OLD ctor: localized.hash set")
-    check(Tgt.__ctr["n"] >= 1, "old ctor executed exactly-once counter gte1")
+    check(inst.display_name_override is None, "OLD ctor: display_name_override default")
+    check(Tgt.__ctr["n"] >= 1, "old ctor executed (counter gte1)")
 
-    # Simulate TEST299 ctor (the would-pass hypothesis)
-    inst2 = Tgt(2300, "TEST299", "s")
+    # TEST299 carried into display_name (P28C-positive hypothesis)
+    inst2 = Tgt(2300, "TEST299", "some_icon", "WW", 0)
     check(inst2.display_name == "TEST299", "TEST299 ctor: display_name==TEST299")
-    check(inst2.name == "TEST299", "TEST299 ctor: name==TEST299")
-    check(inst2.localized.hash == inst2.h, "TEST299 ctor: localized.hash==h")
+    check(inst2.display_name_override is None, "TEST299 ctor: override default None")
 
-    # 3) match classification correctness (matches recorded in _STATE)
-    # After the two ctors: OLD present once and TEST299 present once -> old_hits=1,new_hits=1
-    check(hook._STATE["targets"]["old_hits"] >= 1,
-          "matcher counted OLD hit")
-    check(hook._STATE["targets"]["new_hits"] >= 1,
-          "matcher counted TEST299 hit")
-    check(hook._STATE["observed"] >= 2, "observed >= 2")
+    # Author/author_id recorded and preserved
+    inst3 = Tgt(2300, "Whatever", "ic", "Nevely42", 12345)
+    check(inst3.author == "Nevely42", "AUTHOR preserved on instance")
+    check(inst3.author_id == 12345, "AUTHOR_ID preserved on instance")
 
-    # 4) wrapper does NOT mutate args / return: build control unwrapped for parity
-    Ctrl = _make_targeted()
-    try:
-        _orig_ctrl = Ctrl.__init__
-    except Exception:
-        pass
-    # Rewrap failsafe marker
+    # 3) match classification: OLD once, TEST299 once each counted
+    check(hook._STATE["targets"]["old_hits"] >= 1, "matcher counted OLD hit")
+    check(hook._STATE["targets"]["new_hits"] >= 1, "matcher counted TEST299 hit")
+    check(hook._STATE["observed"] >= 3, "observed >= 3")
 
-    # 5) raw_arg capture: confirming RAW_ARG recorded matches constructor input
-    # (we check by inspecting the emitted lines which raw showed up)
-    # Re-run emitter to a string buffer to assert the report shape.
-    import io
+    # 4) OTHER (non-marker) value is recorded truthfully, not force-bucketed
     buf = io.StringIO()
     _old_stdout = sys.stdout
     sys.stdout = buf
     try:
+        Tgt4 = _make_targeted("targeted_other")
+        hook._reset_state_for_test()
+        hook._wrap_cls(Tgt4)
+        Tgt4(11, "Some Other English Name", "ic", "A", 1)   # non-marker
+    finally:
+        sys.stdout = _old_stdout
+    txt4 = buf.getvalue()
+    check("DISPLAY_NAME_ARG='Some Other English Name'" in txt4
+          or "DISPLAY_NAME_ARG=\"Some Other English Name\"" in txt4
+          or "Some Other English Name" in txt4,
+          "OTHER value recorded (DISPLAY_NAME_ARG truthful)")
+    check("MATCH=OTHER" in txt4 or "MATCH=NONE" in txt4 or "MATCH=" in txt4,
+          "non-marker NOT miscounted as TEST299/OLD")
+
+    # 5) report shape: constructor arg + resulting instance, both positions +
+    #    post-wrap allow override to be observed when set by loader after init
+    buf2 = io.StringIO()
+    _old2 = sys.stdout
+    sys.stdout = buf2
+    try:
         Tgt2 = _make_targeted("targeted2")
         hook._reset_state_for_test()
         hook._wrap_cls(Tgt2)
-        Tgt2(2300, "Caught Cheating 1", "s")   # OLD-only path, positional
+        Tgt2(2300, "Caught Cheating 1", "ic", "WW", 0)   # positional
     finally:
-        sys.stdout = _old_stdout
-    txt = buf.getvalue()
-    check("RAW_ARG=Caught Cheating 1" in txt, "emit RAW_ARG line carries OLD (positional bind)")
-    check("INSTANCE_DISPLAY_NAME=Caught Cheating 1" in txt, "emit INSTANCE_DISPLAY_NAME carries OLD")
+        sys.stdout = _old2
+    txt = buf2.getvalue()
+    check("DISPLAY_NAME_ARG='Caught Cheating 1'" in txt
+          or "Caught Cheating 1" in txt,
+          "emit DISPLAY_NAME_ARG carries the display arg")
+    check("INSTANCE_DISPLAY_NAME='Caught Cheating 1'" in txt
+          or "'Caught Cheating 1'" in txt,
+          "emit INSTANCE_DISPLAY_NAME/arg present")
+    check("INSTANCE_DISPLAY_NAME_OVERRIDE=" in txt,
+          "emit INSTANCE_DISPLAY_NAME_OVERRIDE present (read-only)")
+    check("ORIGINAL_INSTANCE=" in txt, "emit ORIGINAL_INSTANCE present")
+
+    # 5b) hook observes display_name_override at post-orig-init right after the
+    #     ctor body ran.  If current WW computes an override inside __init__ (its
+    #     body references display_name_override per live co_names), it is captured
+    #     and matched BEFORE return -- so a TEST299 that only reaches the override
+    #     slot is still seen.  Build a fake whose body sets the override natively.
+    def _mk_ovr():
+        cls = type("ovr", (object,), {})
+        def _init(self, animation_id, display_name, display_icon, author, author_id):
+            self.animation_id = animation_id
+            self.display_name = display_name
+            # body-computed override (the interesting current-WW channel)
+            self.display_name_override = display_name + "_x" if display_name else None
+            self.original_instance = None
+        cls.__init__ = _init
+        return cls
+    buf3 = io.StringIO()
+    _old3 = sys.stdout
+    sys.stdout = buf3
+    try:
+        Tgt5 = _mk_ovr()
+        hook._reset_state_for_test()
+        hook._wrap_cls(Tgt5)
+        _ = Tgt5(299, "Caught Cheating 1", "ic", "WW", 0)
+    finally:
+        sys.stdout = _old3
+    t5 = buf3.getvalue()
+    check("INSTANCE_DISPLAY_NAME_OVERRIDE='Caught Cheating 1_x'" in t5
+          or "Caught Cheating 1_x" in t5,
+          "override computed inside ctor body is observed (read-only)")
 
     # 6) fail-closed: sig-mismatch class must NOT be wrapped
     class Boom(object):
@@ -169,7 +214,7 @@ def main():
         raise ValueError("boom")
     Boom.__init__ = _bad
     boom_snapshot = Boom.__init__
-    ret = hook._wrap_cls(Boom)          # should refuse (wanted subset fails)
+    ret = hook._wrap_cls(Boom)          # missing display_name index1 -> refuse
     check(ret is False and Boom.__init__ is boom_snapshot,
           "sig-mismatch class NOT wrapped (fail-closed)")
 

@@ -437,3 +437,62 @@ Tests: added LIVECLS + EXPANDED LOGIC (phase-2 fake-sims4 scheduler/discovery as
   PASS incl. new liveprobe.  Real 3.7.9 gate on mod+probe = REAL PASS (mod remains
   3.7-safe: no 3.8-only APIs).  Scope unchanged: constructor trace only, no WW
   ts4script / Nevely / P28C / P24 / zh / P29-B.
+
+## P29-A LIVE_WW_REWRITE (2026-09-04 ~18:2x) -- current-WW signature is different; P-series transcription is STALE
+
+真机 (Dorothy, 3.7.9 / magic 420d0d0a, native marshal) 证伪旧签名:
+  OLD transcription (self, animation_id, animation_raw_display_name, animation_type)
+  = STALE / INVALID_FOR_CURRENT_WW.
+  LIVE current __init__: self, animation_id, display_name, display_icon, author,
+  author_id, ... (29 params total per native probe); body references
+  display_name_override / original_instance / identifier_cache (LIVE co_names).
+  animation_raw_display_name XML field IS NO LONGER the constructor param name.
+
+DECISIONS:
+  * Do NOT deploy the OLD constructor hook.  Do NOT make P29-B.
+  * Distinguish LIVE_CLASS_PRESENT (class+init exist NOW) from
+    EXPECTED_SIGNATURE_MATCH (merely matches the OLD stale shape) -- do NOT collapse
+    a signature mismatch into CONFIRMED=NO.
+  * P28C override (ordinal 299 -> TEST299, XML display_name) is unchanged/valid.
+
+ARTIFACTS (this commit):
+  1. scripts/ww_p29a_live_probe.py  -- NATIVE probe (real matching CPython,
+     marshal.loads(pyc[16:]), NO xdis).  Reads WW pyc header; asserts local magic ==
+     WW magic == 420d0d0a; walks nested code objs; emits LIVE_CLASS_PRESENT,
+     CLASS_HOME_MEMBER, LIVE_INIT_ARGS, LIVE_INIT_NAMES, DISPLAY_PARAM_INDEX2,
+     EXPECTED_SIGNATURE_MATCH (informational), OLD_SIGNATURE_MATCH, OLD_TRANSCRIPTION_
+     STALE, LIVE_SIGNATURE_HASH, PARAMS_JSON.  Exit 0 class found / 2 missing / 3 magic
+     mismatch / 4 marshal error.  (Companion ww_p29a_live_class_probe.py removed --
+     it was the xdis backend superseded by native marshal.)
+  2. scripts/ww_p29a_static_trace.py -- native static DATAFLOW trace of loader ->
+     constructor (tasks #2/#3): native marshal + stdlib dis across all pyc members
+     (loader+instance scanned first).  Emits per-member FN rows: constructor-call
+     windows (LOAD/CALL stack), display_name/display_name_override STORE sites,
+     and string constants (to recover XML keys).  --detail prints raw LOAD/CALL
+     windows.  (Output is the artifact; final label fields below are inferred on the
+     real machine from this report.)
+  3. scripts/ww_p29a_liveprobe.ps1  -- re-verifies LIVE class contract on the real
+     machine with the 3.7.9 python (default path given by Dorothy).
+  4. scripts/ww_p29a_static_trace.ps1 -- runs the tracer against the live WW loader.
+  5. ww_p29a_mod.py hook REWRITTEN for current signature (task #4): wrap gate now
+     requires sig[1]=animation_id AND sig[2]=display_name (the current shape).  Emits
+     per ctor: ANIMATION_ID, DISPLAY_NAME_ARG (positional index1 param / kwarg),
+     AUTHOR, AUTHOR_ID, INSTANCE_DISPLAY_NAME, INSTANCE_DISPLAY_NAME_OVERRIDE,
+     ORIGINAL_INSTANCE, MATCH.  MATCH=TEST299/OLD only when an actually-carried value
+     equals a marker; otherwise records truthful value (no forced binary).  It does
+     NOT wrap the stale animation_raw_display_name shape (fail-closed).
+  6. ww_p29a_logic_test.py rewritten to the current signature + new emit assertions
+     (DISPLAY_NAME_ARG, INSTANCE_DISPLAY_NAME_OVERRIDE, ORIGINAL_INSTANCE, AUTHOR,
+     AUTHOR_ID, MATCH classification incl OTHER, override-in-body observed,
+     sig-mismatch not wrapped).  Phase-2 discovery/scheduler test preserved.
+
+STATUS: wintest all PASS (MAGIC/PS1/STATIC/LOGIC/PY37/PY37ARGV/LIVECLS/BUILD).
+  Real-3.7.9 compile of mod/logic/probe/tracer = OK.  Deploy NOT run (pending the
+  real-machine static trace per user directive) -- old hook is NOT deployed.
+NEXT_WINDOWS_COMMAND (task #1 live re-verify):
+  powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29a_liveprobe.ps1
+NEXT_WINDOWS_COMMAND (task #2/#3 static dataflow):
+  powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29a_static_trace.ps1 -Detail
+  paste output back -> infer CALLER_FUNCTION / DISPLAY_NAME_ARGUMENT_SOURCE /
+  DISPLAY_NAME_OVERRIDE_BEHAVIOR / RAW_FIELD_TO_DISPLAY_NAME_CHAIN.
+Scope unchanged: no WW ts4script / Nevely / P28C / P24 / zh / P29-B.

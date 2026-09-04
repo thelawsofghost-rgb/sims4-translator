@@ -172,7 +172,8 @@ def main():
                     default=["scripts/ww_p29a_build_on_win.ps1",
                              "scripts/ww_p29a_deploy.ps1",
                              "scripts/ww_p29a_rollback.ps1",
-                             "scripts/ww_p29a_liveprobe.ps1"],
+                             "scripts/ww_p29a_liveprobe.ps1",
+                             "scripts/ww_p29a_static_trace.ps1"],
                     help=".ps1 files to check")
     a = ap.parse_args()
 

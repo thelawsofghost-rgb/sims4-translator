@@ -3,13 +3,15 @@
 """ww_p29a_mod.py --- P29-A SexAnimationInstance constructor runtime trace (debug-only).
 
 PURPOSE (single, minimal):
-  While the P28C TEST299 override is live, answer exactly one question:
-      CONSTRUCTOR_ARG=TEST299     (constructor receives our overridden raw)
-  or  CONSTRUCTOR_ARG=OLD         (constructor receives the original English raw)
-
-This splits the problem into "upstream of the constructor" (loader / import /
-registry / same-instance-reload) vs "downstream" (TurboLocalizedString /
-get_display_name / picker).  NO downstream hook.  NO xml change.  NO P24.  NO zh.
+  While the P28C TEST299 override is live, answer exactly one question per Nevely
+  target animation:
+      does the CURRENT constructor receive/retain TEST299 (our override), or the
+      original English display value, or something else already lost upstream?
+  We record TRUTHFULLY the display-bearing constructor arg and the resulting
+  instance attrs (display_name / display_name_override / original_instance / etc.)
+  and only LABEL a bucket when an observed value actually equals a known marker;
+  otherwise we record the real value.  NO forced binary judgement, NO downstream
+  hook, NO xml change, NO P24, NO zh.
 
 SAFETY CONTRACT (fail-closed):
   1. We NEVER modify TURBODRIVER_WickedWhims_Scripts.ts4script.
@@ -18,22 +20,22 @@ SAFETY CONTRACT (fail-closed):
         - call original __init__ with the SAME args, untouched
         - return its return value untouched
         - record values AFTER the original __init__ ran (read-only)
-        - do NOT assign display_name / name / localized ourselves
+        - do NOT assign display_name / display_name_override / name / etc. ourselves
   4. If anything we do raises, we restore the original __init__ and re-raise in a
      way that must not corrupt WW: we wrap the whole hook body in try/except and
      only log failures; we never call resolvers that might have side effects.
   5. Rollback = delete this debug ts4script only (never touches WW / P28C / source).
 
-TARGET (confirmed from committed decompiled transcription):
-    SexAnimationInstance.__init__(self, animation_id, animation_raw_display_name,
-                                  animation_type)
-    body (semantic, stable across P-series transcriptions):
-        self.animation_id = animation_id
-        self.h            = hash_string("story_animations." + str(animation_id))
-        self.display_name = animation_raw_display_name
-        self.localized    = TurboLocalizedString(self.h, animation_raw_display_name)
-        self.name         = animation_raw_display_name
-    NOTE: we do not re-implement the body; we only observe the resulting attrs.
+CURRENT-WW TARGET SIGNATURE (authoritative LIVE marshal 2026-09-04, 3.7.9 / 420d0d0a):
+    SexAnimationInstance.__init__(self, animation_id, display_name, display_icon,
+                                  author, author_id, object_animation_clip_name,
+                                  object_geometry_state, ... , unsafe)
+    (*29 parameters shown live by the native probe; the OLD committed transcription
+     "(self, animation_id, animation_raw_display_name, animation_type)" is STALE /
+     INVALID_FOR_CURRENT_WW and we no longer trust or gate on it.)
+    __init__ body also references display_name_override / original_instance /
+    identifier_cache (from the LIVE co_names), so we record those attrs after wrap.
+  We do NOT re-implement the body; we only observe constructor arg + resulting attrs.
 
 DISCOVERY / TIMING (first real-machine run: class unavailable at boot; nothing retried):
   Round-1 log showed HOOK_NOT_YET then a single "retrying, deferred schedule active"
@@ -168,86 +170,86 @@ def _log_header():
     _emit("TARGET_NEW_RAW=%r" % (_MATCH_NEW_RAW,))
 
 
-def _hook_factory(orig_init, param_names):
+def _hook_factory(orig_init, param_names, cls_qualname):
     """Return a wrapper around orig_init that records, then returns untouched.
 
-    param_names: ordered list of __init__ param names (excl 'self'), derived from
-    inspect at wrap time.  Used to map positional args to the confirmed
-    animation_raw_display_name / animation_id slots fail-closed.
+    param_names: ordered list of __init__ param names EXCLUDING 'self', derived
+    from inspect at wrap time (the LIVE current-WW signature).  Used to bind
+    positional args to the real display-bearing slot fail-closed -- we never trust
+    a hard-coded index beyond this recovered list.
+
+    Current-WW contract (live marshal):
+        index0 animation_id, index1 display_name (the display-bearing arg the
+        loader passes), index2 display_icon, index3 author, index4 author_id, ...
+    We ALSO record post-init instance attrs (display_name_override /
+    original_instance / etc.) that the __init__ body sets, read-only.
     """
     def _hook(self, *args, **kwargs):
-        # Map positional args onto the real signature so RAW_ARG reflects the
-        # ACTUAL constructor argument the loader passed (not our guess). If the
-        # loader used keywords, kwargs carry them. Never trust a hard-coded index
-        # beyond the confirmed signature length.
-        animation_id = kwargs.get("animation_id", None)
-        raw_arg = kwargs.get("animation_raw_display_name", "<undetermined>")
-        # positional binding only while we stay within the confirmed signature
+        # positional binding onto the LIVE parameter list (index in param_names):
+        #   0 animation_id, 1 display_name, 3 author, 4 author_id
+        def _pos(idx):
+            if idx < len(param_names):
+                return param_names[idx]
+            return None
+        p_anim = _pos(0)
+        p_disp = _pos(1)
+        p_author = _pos(3)
+        p_author_id = _pos(4)
+        animation_id = kwargs.get(p_anim) if p_anim else None
+        display_name_arg = kwargs.get(p_disp, "<undetermined>") if p_disp else "<undetermined>"
+        author = kwargs.get(p_author) if p_author else None
+        author_id = kwargs.get(p_author_id) if p_author_id else None
+        # positional slots < len(args) -> bind by recovered name (fail-closed)
         for pos, val in enumerate(args):
             if pos < len(param_names):
                 nm = param_names[pos]
-                if nm == "animation_id" and animation_id is None:
+                if nm == p_anim and p_anim and animation_id is None:
                     animation_id = val
-                elif nm == "animation_raw_display_name" and raw_arg == "<undetermined>":
-                    raw_arg = val
+                elif nm == p_disp and p_disp and display_name_arg == "<undetermined>":
+                    display_name_arg = val
+                elif nm == p_author and p_author and author is None:
+                    author = val
+                elif nm == p_author_id and p_author_id and author_id is None:
+                    author_id = val
         try:
             _STATE["observed"] += 1
             orig_init(self, *args, **kwargs)
 
-            display_name = _safe_attr(self, "display_name")
-            name = _safe_attr(self, "name")
-            localized_hash = "<unreadable>"
-            try:
-                localized = _safe_attr(self, "localized")
-                if hasattr(localized, "hash"):
-                    localized_hash = localized.hash
-                else:
-                    localized_hash = _safe_attr(localized, "_hash")
-            except Exception:
-                localized_hash = "<unreadable>"
+            # read-only attrs the __init__ body may have set (never call anything)
+            inst_display = _safe_attr(self, "display_name")
+            inst_override = _safe_attr(self, "display_name_override")
+            inst_orig = _safe_attr(self, "original_instance")
+            inst_name = _safe_attr(self, "name")
 
-            # Decide raw_arg for report: prefer observed display/name equality
-            # to raw when raw unavailable, but report both.
-            matched = False
-            which = "NONE"
-            observed_disp = str(display_name)
-            observed_name = str(name)
-            # normalization helper
-            def _norm(x):
-                try:
-                    return str(x)
-                except Exception:
-                    return ""
-            nd = _norm(observed_disp)
-            nn = _norm(observed_name)
-            nraw = _norm(raw_arg)
-            if nraw == _MATCH_NEW_RAW or nd == _MATCH_NEW_RAW or nn == _MATCH_NEW_RAW:
+            # Bucket ONLY when an actually-carried value equals a known marker;
+            # otherwise leave it truthful.
+            which = "OTHER"
+            _norm = lambda x: str(x) if x is not None else ""
+            carried = [
+                _norm(display_name_arg), _norm(inst_display), _norm(inst_override),
+                _norm(inst_orig), _norm(inst_name),
+            ]
+            if any(c == _MATCH_NEW_RAW for c in carried):
                 which = "TEST299"
                 _STATE["targets"]["new_hits"] += 1
-                matched = True
-            elif nraw == _MATCH_OLD_RAW or nd == _MATCH_OLD_RAW or nn == _MATCH_OLD_RAW:
+            elif any(c == _MATCH_OLD_RAW for c in carried):
                 which = "OLD"
                 _STATE["targets"]["old_hits"] += 1
-                matched = True
-            if matched:
+            if which in ("TEST299", "OLD"):
                 _STATE["matched"] += 1
 
-            # Always emit a per-construction line (A: record all).  Simpler for
-            # diagnosis; quantities are expected to be modest in one session.
             _emit("---")
             _emit("CONSTRUCT_#%d" % _STATE["observed"])
             _emit("ANIMATION_ID=%r" % (animation_id,))
-            _emit("RAW_ARG=%s" % (raw_arg,))
-            _emit("INSTANCE_DISPLAY_NAME=%s" % (observed_disp,))
-            _emit("INSTANCE_NAME=%s" % (observed_name,))
-            _emit("LOCALIZED_HASH=%s" % (localized_hash,))
+            _emit("DISPLAY_NAME_ARG=%r" % (display_name_arg,))
+            _emit("AUTHOR=%r" % (author,))
+            _emit("AUTHOR_ID=%r" % (author_id,))
+            _emit("INSTANCE_DISPLAY_NAME=%r" % (inst_display,))
+            _emit("INSTANCE_DISPLAY_NAME_OVERRIDE=%r" % (inst_override,))
+            _emit("ORIGINAL_INSTANCE=%r" % (inst_orig,))
             _emit("MATCH=%s" % (which,))
 
         except Exception:
-            # Never corrupt WW: log and restore original to avoid repeated
-            # breakage, then re-raise so WW sees the original failure *as the
-            # original would have raised* if it raised at all.  If the original
-            # itself raised, this path also just propagates it.
             tb = _traceback.format_exc()
             _emit("HOOK_ERROR=%s" % (tb,))
             _restore_orig()
@@ -271,25 +273,33 @@ def _restore_orig():
 
 
 def _wrap_cls(cls):
-    """Wrap cls.__init__ if signature matches the confirmed target."""
+    """Wrap cls.__init__ if its LIVE signature matches the current WW contract.
+
+    Current WW requires (index0=animation_id, index1=display_name).  We gate on the
+    recovered param list so we never wrap a stale-shape or unrelated init by guess.
+    """
     try:
         init = cls.__init__
-        # Peek at parameter names (fail-closed: only wrap target-shaped sig)
         import inspect
         sig_params = list(inspect.signature(init).parameters.keys())
-        # Confirmed: self, animation_id, animation_raw_display_name, animation_type
-        wanted = {"animation_id", "animation_raw_display_name"}
-        if not wanted.issubset(sig_params):
-            return False
     except Exception:
         # inspect unavailable/signature unreadable -> refuse (do not guess)
+        return False
+    # current contract: self, animation_id, display_name, display_icon, ...
+    if len(sig_params) < 3:
+        return False
+    p1 = sig_params[1] if len(sig_params) > 1 else ""   # after 'self'
+    p2 = sig_params[2] if len(sig_params) > 2 else ""   # after 'self','animation_id'
+    if p1 != "animation_id":
+        return False
+    if p2 != "display_name":
+        # The old stale (animation_raw_display_name) or an unrelated shape -> skip
         return False
 
     _STATE["cls"] = cls
     _STATE["orig"] = init
-    # param names excluding 'self'
     pnames = [p for p in sig_params if p != "self"]
-    cls.__init__ = _hook_factory(init, pnames)
+    cls.__init__ = _hook_factory(init, pnames, getattr(cls, "__name__", repr(cls)))
     _STATE["wrapped"] = True
     _emit("CLASS_FOUND=%s" % (getattr(cls, "__qualname__", repr(cls)),))
     _emit("INIT_ARG_SIG=%s" % (list(sig_params),))
