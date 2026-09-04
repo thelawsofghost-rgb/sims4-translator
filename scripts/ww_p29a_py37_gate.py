@@ -173,10 +173,13 @@ def main():
     ap.add_argument("files", nargs="+", help="python source files to audit")
     ap.add_argument("--py37", default="", help="explicit 3.7 interpreter")
     a = ap.parse_args()
+    # Regression contract for the PowerShell wrapper: the flag MUST be the
+    # double-dash '--py37'.  Archive the parsed provenance so a wrapper/test can
+    # assert on the exact argv shape.  (argparse itself rejects a single-dash
+    # '-py37' with 'unrecognized arguments: -py37', exit 2, which is exactly the
+    # 4th real-machine failure this module/ps1 pair guards against.)
+    print("ARGV_FLAG=%s" % ("--py37" if a.py37 else "(unset)"))
     files = [os.path.abspath(f) for f in a.files]
-    if not files:
-        print("PY37_GATE=SKIPPED-NO-INPUT")
-        return 1
 
     py37 = a.py37 or find_py37()
 

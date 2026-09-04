@@ -16,6 +16,7 @@ on a real machine).  That single fact is returned by Dorothy via the deploy log.
 Exit: 0 = all offline PASS.  Non-zero = first failing gate.
 """
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +33,47 @@ def run(label, cmd):
     out = (r.stdout or "") + (("\n[stderr] " + r.stderr) if r.stderr else "")
     print(out.strip())
     return r.returncode
+
+
+REGEX_SINGLE_DASH = re.compile(r'"-py37"|\s-py37(\s|\))')
+
+
+def py37_argv():
+    """Assert the PowerShell wrapper assembles the DOUBLE-dash '--py37' flag and
+    that the exact argv shape `--py37 <py37.exe> <files...>` parses cleanly.
+
+    Regression for the 4th real-machine deploy: build_on_win passed '-py37'
+    (single dash) which argparse rejects ('unrecognized arguments: -py37', exit 2),
+    dying at the 3a. py3.7 compat gate.  We check BOTH:
+      (a) no P29 ps1 contains a single-dash '-py37' invocation (pure text) and
+          every gate PyArgs uses '--py37'; and
+      (b) literally running `python ww_p29a_py37_gate.py --py37 <this python>
+          <builder> <mod> <logic>` parses and prints ARGV_FLAG=--py37,
+          proving shape correctness end-to-end on THIS interpreter.
+    Returns 0 on PASS else the first failing code."""
+    ps1 = "".join((SCRIPTS / p).read_text(encoding="utf-8", errors="replace")
+                   for p in ("ww_p29a_build_on_win.ps1", "ww_p29a_deploy.ps1",
+                             "ww_p29a_rollback.ps1"))
+    if REGEX_SINGLE_DASH.search(ps1):
+        print("ARGV_FLAG=FAIL (single-dash '-py37' found in a P29 ps1)")
+        return 1
+    gate = SCRIPTS / "ww_p29a_py37_gate.py"
+    files = [str(SCRIPTS / "ww_p29a_build_ts4script.py"), str(MOD),
+             str(SCRIPTS / "ww_p29a_logic_test.py")]
+    cmd = [sys.executable, str(gate), "--py37", sys.executable] + files
+    r = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True)
+    print((r.stdout or "").strip())
+    if r.stderr:
+        print("[stderr] " + r.stderr.strip())
+    if r.returncode != 0:
+        print("ARGV_FLAG=PASS? no -- exact --py37 argv was REJECTED (exit %d)" % r.returncode)
+        return 1
+    # The gate echoes ARGV_FLAG=--py37 after a successful parse with --py37.
+    echoed = [ln for ln in (r.stdout or "").splitlines() if ln.startswith("ARGV_FLAG=")]
+    if echoed and "--py37" in echoed[0]:
+        print(echoed[0].replace("ARGV_FLAG=", "ARGV_FLAG(confirmed)="))
+    print("ARGV_FLAG=--py37 (wrapper uses double-dash; exact argv parsed OK)")
+    return 0
 
 
 def magic_chain():
@@ -125,6 +167,7 @@ def main():
                          [sys.executable, str(SCRIPTS / "ww_p29a_py37_gate.py"),
                           str(SCRIPTS / "ww_p29a_build_ts4script.py"),
                           str(MOD), str(SCRIPTS / "ww_p29a_logic_test.py")])
+    codes["PY37ARGV"] = py37_argv()
     codes["BUILD"] = run("BUILD_ROUNDTRIP",
                          [sys.executable, str(SCRIPTS / "ww_p29a_build_ts4script.py"),
                           "--src", str(MOD), "--out", str(TS4_OUT)])

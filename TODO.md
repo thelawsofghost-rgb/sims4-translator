@@ -354,3 +354,31 @@ fail-closed 保持: script 层 gate(含新 PY37)全过才进真实 build; BUILD 
 不动 P28C。实验 scope 不变(仅 constructor trace)。
 
 sandbox 已装 CPython 3.7.9(由源码, huawei 镜像), 用于在沙盒权威复现/证 3.7 compat。
+
+## P29-A fix4 (2026-09-04 17:50) 4th real-machine BUILD-gate failure -> py37 argv shape
+
+ROOT_CAUSE_CONFIRMED: ww_p29a_build_on_win.ps1 调 py37 gate 用单横线 "@(\"-py37\", ...)",
+但 argparse 定义的是长选项 "--py37"; argparse 不接受单横缩写, 报
+  ww_p29a_py37_gate.py: error: unrecognized arguments: -py37   (exit 2)
+死在 build_on_win 的 "3a. py3.7 compat gate", 早于 real build / PLACE / P28C。
+Python 3.7 compat / magic / hook / runtime 均无关。
+
+PY37_ARG_FIXED: build_on_win.ps1 -> @(\"--py37\", $GATE_PY, ...)。已在真实 from-source
+  CPython 3.7.9 下验证: --py37 -> ARGV_FLAG=--py37 + PY37_GATE=REAL + exit 0; 单横 -py37
+  -> argparse unrecognized (exit 2) 复现原错误。
+
+ALL_CALL_SITES_AUDITED: grep 全 P29-A, 唯一坏点 build_on_win.ps1:144(现 --py37);
+  deploy/wintest/rollback 不传该 flag(wintest 用无 flag 静态层 + PY37ARGV 精确 argv)。
+
+REGRESSION_TEST_ADDED:
+  * ps1_static_check.py 新增 C) PY37_ARGV_SHAPE(text, 跨平台): 拒绝任何单横 \"-py37\" 调用,
+    并要求 gate PyArgs 含 --py37; 负向已验(单横 ps1 -> FAIL)。
+  * py37_gate.py 解析后 echo ARGV_FLAG=--py37。
+  * wintest 新增 PY37ARGV gate: (a) 扫三个 ps1 不得出现单横 -py37; (b) 真跑
+    python ww_p29a_py37_gate.py --py37 <exe> <builder> <mod> <logic> 并断言 exit 0 +
+    ARGV_FLAG=--py37。
+  沙盒不再只测 Python gate 而漏 wrapper 拼出的真实参数。
+
+FAIL_OCCURRED_BEFORE_MODS_WRITE=YES : 3a 在 build_on_win 内(先于 PLACE DEBUG TS4 与
+  P28C redep 块); 失败即 exit 非0 -> BUILD_ON_WIN_FAIL, 未到 Copy-Item 亦未调 P28C。
+P28C_TOUCHED=NO

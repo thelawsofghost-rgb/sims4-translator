@@ -19,6 +19,14 @@ Two independent checks:
        Any other statement before the header -> FAIL.  This scans comment-only /
        blank lines and is robust regardless of whether PowerShell is installed.
 
+  C) PY37_ARGV_SHAPE (pure text): argparse defines the gate flag as `--py37`.
+       argparse does NOT accept the single-dash `-py37` (it errors
+       'unrecognized arguments: -py37' exit 2) -- the real-machine 4th deployment
+       hit exactly that because build_on_win passed `-py37`.  We assert every .ps1
+       that invokes the gate passes the DOUBLE-dash `--py37` and never `-py37`.
+       This catches wrapper-assembled-arg bugs even when only the static gate
+       (and not a live pwsh run) executes on the sandbox.
+
   B) REAL_PARSER (best effort; skipped when no PowerShell host is present):
        When `pwsh` or `powershell` exists on PATH, run
          $t=@(); $e=@()
@@ -33,6 +41,7 @@ Exit: 0 = PASS (placement OK and, if a PS host exists, parser reports 0 errors).
 """
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -50,6 +59,29 @@ def _is_header_line(line):
     if s.startswith("param("):
         return True
     return False
+
+
+def _check_py37_argv_shape(text, name):
+    """Ensure any gate invocation uses the double-dash '--py37', never '-py37'.
+
+    argparse rejects single-dash '-py37' (unrecognized arguments, exit 2).  Search
+    for a literal token that would be handed to argparse as the flag -- i.e. a
+    double-quoted or bare '-py37' used as a PyArgs element -- while tolerating
+    comment/doc references.  Return list of failure reasons."""
+    fails = []
+    for i, ln in enumerate(text.splitlines()):
+        # allow comment lines and the worker's doc banner
+        stripped = ln.lstrip()
+        if stripped.startswith("#"):
+            continue
+        # reject a single-dash gate invocation (the bug)
+        if re.search(r'"-py37"|\s-py37(\s|\))', ln) and "--py37" not in ln:
+            fails.append("single-dash '-py37'@L%d: %r" % (i + 1, ln.strip()[:80]))
+        # also require that an actual invocation site uses double-dash --py37
+        if re.search(r'py37_gate\.py.*-PyArgs|Run-Py.*PyArgs.*py37', ln):
+            if '--py37' not in ln:
+                fails.append("gate PyArgs missing '--py37'@L%d: %r" % (i + 1, ln.strip()[:80]))
+    return fails
 
 
 def _check_param_placement(text_lines, name):
@@ -151,11 +183,18 @@ def main():
             any_fail = True
             continue
         placement, host_bool, parser_fails, parser_err = _check_ps1(path)
+        argv_shape = _check_py37_argv_shape(path.read_text(encoding="utf-8", errors="replace"),
+                                            path.name)
         print("PS1_STATIC %s" % path.name)
         print("  PARAM_PLACEMENT=%s" % ("PASS" if not placement else "FAIL"))
         if placement:
             any_fail = True
             for f in placement:
+                print("    " + f)
+        print("  PY37_ARGV_SHAPE=%s" % ("PASS" if not argv_shape else "FAIL"))
+        if argv_shape:
+            any_fail = True
+            for f in argv_shape:
                 print("    " + f)
         if host_bool:
             print("  REAL_PARSER=%s" % ("PASS" if not parser_fails else "FAIL"))

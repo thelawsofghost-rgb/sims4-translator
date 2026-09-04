@@ -141,7 +141,7 @@ Write-Output "COMPILER_VERSION=$compVer ($compAbi)"
 # ---- 3a. Python-3.7 compatibility gate (run under the matched 3.7 compiler) ----
 Write-Output "--- 3a. py3.7 compat gate ---"
 if (-not (Test-Path -LiteralPath $PY37GATE)) { Fail "py37 gate helper missing: $PY37GATE" }
-$g37 = Run-Py -Interp $GATE_PY -Script $PY37GATE -PyArgs @("-py37", $GATE_PY, $BUILDER, $SRC_MOD, $LOGIC)
+$g37 = Run-Py -Interp $GATE_PY -Script $PY37GATE -PyArgs @("--py37", $GATE_PY, $BUILDER, $SRC_MOD, $LOGIC)
 if ($g37[0] -ne 0) {
     Write-Output "PY37_GATE_DIAG_STDERR=$($g37[2])"
     Fail "PY37_GATE_FAIL (inputs not CPython-3.7 compatible)"
