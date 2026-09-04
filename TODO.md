@@ -112,3 +112,35 @@ offset 高位/相邻字段有关联, 需根据核实后的布局填上 size。
 
 ## 明确不做 (规格允许范围外)
 缩略图修复 / AI看图 / 动作包删除移动 / MOD整理 / 文件名汉化 / 衣服家具功能MOD汉化 / 重复检测 / UI / 自动下载
+
+---
+
+## P28B-0 (IMPLEMENTED + TESTED 2026-09-04, 待 Dorothy 真机跑; 勿让用户在真机跑 P28B-1)
+
+P28B-0 = 完全禁止 build_package 的"整包 byte-identical clone" control:
+  - 真实源包 bytes -> output clone (整个文件 byte-for-byte copy, 不 parse/不 rebuild/不改 header/index/resource)
+  - 验证 SOURCE_PACKAGE_SHA256 / CLONE_PACKAGE_SHA256 / PACKAGE_BYTE_IDENTICAL=YES / 长度一致 / entries 原样
+  - 放更高 Priority: 情况A FULL_PACKAGE_CLONE=LOADS_OK -> 才执行 P28B-1; 情况B BREAKS_LOAD -> 问题在 duplicate/precedence/registration 语义, 先调查 WW 如何发现注册 animation package
+  - 独立目录 P28B0_Overrides, 独立备份 Resource.cfg.p28b0_backup, 不与 P28B-1 混用
+  - post-write re-audit: Resource.cfg 写完后、Copy 前再跑 ww_p28b0_cfg_audit.py check, 必须实际得
+      SOURCE_EFFECTIVE_PRIORITY=500 / P28B0_OVERRIDE_EFFECTIVE_PRIORITY=600 / PRIORITY_RELATION=OVERRIDE_HIGHER
+    才复制; 否则 fail-closed (不能只依赖 proposed priority)
+
+已实现 (8 files, commit xx):
+  scripts/ww_p28b0_full_clone.py                (生成器: shutil.copyfile 全文件字节复制 + 逐块SHA + 逐字节比对 + report)
+  scripts/ww_p28b0_full_clone_report_check.py   (独立重读 report + 对 source/clone 实际文件独立逐字节比对)
+  scripts/ww_p28b0_full_clone_tgi_check.py      (独立 raw-index 条目普查: 同条目数/单WW_XML/TGI一致/权威 instance)
+  scripts/ww_p28b0_cfg_audit.py                 (P28B0 专属 cfg 审计 + 决策; 输出 P28B0_OVERRIDE_EFFECTIVE_PRIORITY)
+  scripts/ww_p28b0_full_clone_deploy.ps1        (部署: 双重验证->备份->_append->post-write re-audit(须 override_eff>src_eff)->copy, 全 ASCII+Run-Python)
+  scripts/ww_p28b0_full_clone_rollback.ps1      (回滚: 只删 P28B0 clone/空目录/独立backup恢复 cfg+校验SHA/删缓存)
+  scripts/ww_p28b0_full_clone_static_check.py   (21 项静态不变式全 PASS)
+  scripts/ww_p28b0_full_clone_wintest.py        (34 项全链路沙箱测试 PASS)
+
+真机命令 (交给 Dorothy):
+  生成: python D:\projects\sims4_trans\scripts\ww_p28b0_full_clone.py --source "C:\Users\thela\Documents\Electronic Arts\The Sims 4\Mods\2026.7.20\WW_Nevely42_Animations.package" --force
+  部署: powershell -ExecutionPolicy Bypass -File .\scripts\ww_p28b0_full_clone_deploy.ps1
+  回滚: powershell -ExecutionPolicy Bypass -File .\scripts\ww_p28b0_full_clone_rollback.ps1
+
+安全: 源包只读/只写 output/只写 P28B0 clone/Resource.cfg 必须备份/localthumbcache 可删/rollback 恢复 cfg SHA/不启 P24/不自动开游戏。
+保留 fa6da01(P28B-1), 不废弃; 仅 P28B-0 LOADS_OK 后执行。
+
