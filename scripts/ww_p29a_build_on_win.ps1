@@ -34,7 +34,9 @@
 [CmdletBinding()]
 param(
     [string]$Mods = "C:\Users\thela\Documents\Electronic Arts\The Sims 4\Mods",
-    [string]$GamePython = ""
+    [string]$GamePython = "",
+    [string]$SrcMod = "",
+    [string]$OutTs4 = ""
 )
 
 Set-StrictMode -Version Latest
@@ -43,13 +45,15 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
 $WORKSPACE   = "D:\projects\sims4_trans"
-$SRC_MOD     = Join-Path $WORKSPACE "scripts\ww_p29a_mod.py"
 $BUILDER     = Join-Path $WORKSPACE "scripts\ww_p29a_build_ts4script.py"
 $GAMEPY      = Join-Path $WORKSPACE "scripts\ww_p29a_game_py.py"
 $PY37GATE    = Join-Path $WORKSPACE "scripts\ww_p29a_py37_gate.py"
-$LOGIC       = Join-Path $WORKSPACE "scripts\ww_p29a_logic_test.py"
 $OUT_DIR     = Join-Path $WORKSPACE "dist"
-$OUT_TS4     = Join-Path $OUT_DIR "ww_p29a_debug.ts4script"
+if (-not $SrcMod) { $SRC_MOD = Join-Path $WORKSPACE "scripts\ww_p29a_mod.py" } else { $SRC_MOD = $SrcMod }
+if (-not $OutTs4) { $OUT_TS4 = Join-Path $OUT_DIR "ww_p29a_debug.ts4script" } else { $OUT_TS4 = $OutTs4 }
+$SRC_IS_TUNING = ($SrcMod -like "*ww_p29_tuning_mod.py")
+$MEMBER_TARGET = if ($SRC_IS_TUNING) { "ww_p29_tuning_mod.pyc" } else { "ww_p29a_mod.pyc" }
+$LOGIC         = if ($SRC_IS_TUNING) { Join-Path $WORKSPACE "scripts\ww_p29_tuning_logic_test.py" } else { Join-Path $WORKSPACE "scripts\ww_p29a_logic_test.py" }
 $FIRST_PY    = "python"   # any local python to drive the two read-only probes
 $GATE_PY     = $null       # the local python whose magic == target
 
@@ -150,9 +154,13 @@ Write-Output (($g37[1] | Where-Object { $_ -like 'PY37_*=' -or $_ -like 'FILE=*'
 Write-Output "PY37_GATE=PASS ($(($g37[1] | Where-Object { $_ -like 'PY37_GATE=*' }) -join ';'))"
 
 # ---- 3. build with the matched compiler ----
+# probe attribute/module by target family
+$PROBE_ATTR = if ($SRC_IS_TUNING) { "_looks_like_target" } else { "_hook_factory" }
+$PROBE_MOD  = if ($SRC_IS_TUNING) { "ww_p29_tuning_mod_probe" } else { "ww_p29_mod_probe" }
+
 Write-Output "--- 3. build under matched compiler ---"
-$buildCommand = "& $GATE_PY $BUILDER --src $SRC_MOD --out $OUT_TS4"
-$r = Run-Py -Interp $GATE_PY -Script $BUILDER -PyArgs @("--src", $SRC_MOD, "--out", $OUT_TS4)
+$buildCommand = "& $GATE_PY $BUILDER --src $SRC_MOD --out $OUT_TS4 --member $MEMBER_TARGET --probe-attr $PROBE_ATTR --probe-mod $PROBE_MOD"
+$r = Run-Py -Interp $GATE_PY -Script $BUILDER -PyArgs @("--src", $SRC_MOD, "--out", $OUT_TS4, "--member", $MEMBER_TARGET, "--probe-attr", $PROBE_ATTR, "--probe-mod", $PROBE_MOD)
 if ($r[0] -ne 0) {
     Write-Output "BUILD_COMMAND=$buildCommand"
     Write-Output "BUILD_EXIT_CODE=$($r[0])"
@@ -173,7 +181,7 @@ try {
 try {
     $zip = [System.IO.Compression.ZipFile]::OpenRead($OUT_TS4)
     try {
-        $entry = $zip.GetEntry("ww_p29a_mod.pyc")
+        $entry = $zip.GetEntry($MEMBER_TARGET)
         if ($entry) {
             $ms = New-Object System.IO.MemoryStream
             $s = $entry.Open()

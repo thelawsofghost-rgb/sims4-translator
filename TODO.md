@@ -621,3 +621,52 @@ BUILD -> P29A_WINTEST=PASS).  ps1 static: 7/7 STRUCT_BALANCE=PASS.
 Deploy NOT run (read-only per user).  No P29-B, no new canary, no WW/Nevely/P28C/P24,
 no Chinese.  Dorothy: git pull, run the origin ps1, paste back
 ANIMATION_*_WRITERS / ANIMATION_TUNING_SOURCE / XML_KEY_* / RAW_TO_ANIMATION_DISPLAY_RELATION.
+
+## P29-TUNING RUN-TIME __init__-FREE LOADER TRACE (2026-09-04 18:37) -- observation only
+
+Authoritative real static (Dorothy, 18:37) RETIRED the "raw is the wrong field / raw
+derives display" assumptions for good:
+    CALLER_FUNCTION=_create_sex_animation_instance   FN_PARAMS=animation_tuning, animation_override
+    DISPLAY_NAME_STORE_PATTERN= animation_tuning.animation_display_name -> local display_name
+    RAW_FIELD_READ_PATTERN= LOAD_ATTR animation_raw_display_name
+    ANIMATION_DISPLAY_NAME_WRITERS=(none)  ANIMATION_RAW_DISPLAY_NAME_WRITERS=(none)
+    XML_KEY_FOR_ANIMATION_DISPLAY_NAME=NOT_LITERAL/ATTRIBUTE_DERIVED
+    XML_KEY_FOR_ANIMATION_RAW_DISPLAY_NAME=literal 'animation_raw_display_name'
+    DISPLAY_NAME_OVERRIDE_BEHAVIOR= override_wins_else_base
+Both fields are RUNTIME attrs of the same animation_tuning object; WW has no STORE
+writer -> relation is decided at tuning/parser/dynamic-descriptor layer -> ONLY
+observable at runtime. So: NO SexAnimationInstance.__init__ hook.
+
+NEW ww_p29_tuning_mod.py (+ deploy/read_log/rollback/report_check ps1+py).  Hooks the
+REAL module-level loader  wickedwhims.sex.animations.animations_loader._create_sex_animation_instance
+(animation_tuning, animation_override) by REBINDING the module attr + re-pointing any
+already-imported alias binding; calls the ORIGINAL with identical args + returns its
+value untouched; reads BEFORE  TUNING_TYPE/TUNING_MODULE/RAW_ATTR/DISPLAY_ATTR/
+ANIMATION_OVERRIDE_PRESENT and AFTER RETURN_INSTANCE_DISPLAY_NAME/
+RETURN_INSTANCE_DISPLAY_NAME_OVERRIDE/AUTHOR/ANIMATION_NAME/ANIMATION_IDENTIFIER,
+all read-only.  Match keep = raw/display/return carries TEST299 or "Caught Cheating 1".
+Verdicts (only on real marker equality, never fabricated):
+    A raw=TEST299 disp=OLD            -> P29_RESULT=RAW_CHANGED_DISPLAY_DERIVED_OLD
+    B raw=OLD disp=OLD                -> P29_RESULT=OVERRIDE_NOT_PRESENT_IN_RUNTIME_TUNING
+    C raw=TEST299 disp=TEST299 ret=TEST299 -> P29_RESULT=TUNING_AND_INSTANCE_CORRECT
+    other marker combo                -> P29_RESULT=MATCH_TARGET_OTHER_PATTERN (truthful)
+    D target never seen (post-session, from the real log) -> report_check emits
+      P29_RESULT=TARGET_TUNING_NOT_OBSERVED  (never guessed mid-run)
+Discovery/timing reuses the P29-A-proven real scheduler (module appears in sys.modules
+LATE -> in-world retry installs; NO fake "deferred schedule active"):
+    HOOK_INSTALLED=YES/NO  HOOK_MODULE=...  RETRY_COUNT=...  HOOK_TARGET=...
+
+REUSE (zero change to P29-A behavior): generalized ww_p29a_build_ts4script.py
+(--member/--probe-attr/--probe-mod, defaults = P29-A) and ww_p29a_build_on_win.ps1
+(-SrcMod/-OutTs4 TUNING mode) so the same magic-matched compiler + py37 gate drive
+the tuning ts4script.  Registered 3 ps1s in ww_p29a_ps1_static_check (10 ps1).
+wintest: +TSTATIC/TLOGIC/TBUILD gates -> P29A_WINTEST=PASS (13 gates).
+
+Deploy NOT run (observation-only; user runs on real box).  No P29-B UI hook, no
+animation_display_name edit, no new package canary, no P24, no Chinese, no WW/Nevely
+source change.  P28C TEST299 auto-deploy is the already-verified artifact; rollback
+restores base via P28C rollback when flagged.
+Dorothy one-key:  git pull ; powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29_tuning_deploy.ps1
+                  (launch, trigger Nevely ordinal 299) ;
+                  powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29_tuning_read_log.ps1
+                  powershell -ExecutionPolicy Bypass -File .\scripts\ww_p29_tuning_rollback.ps1

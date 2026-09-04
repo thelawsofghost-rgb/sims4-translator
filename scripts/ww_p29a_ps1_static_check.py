@@ -291,7 +291,10 @@ def main():
                              "scripts/ww_p29a_liveprobe.ps1",
                              "scripts/ww_p29a_static_trace.ps1",
                              "scripts/ww_p29a_display_source_trace.ps1",
-                             "scripts/ww_p29a_display_origin_trace.ps1"],
+                             "scripts/ww_p29a_display_origin_trace.ps1",
+                             "scripts/ww_p29_tuning_deploy.ps1",
+                             "scripts/ww_p29_tuning_read_log.ps1",
+                             "scripts/ww_p29_tuning_rollback.ps1"],
                     help=".ps1 files to check")
     ap.add_argument("--selftest", action="store_true", default=True,
                     help="run the balance-detector self tests (guards the guard)")

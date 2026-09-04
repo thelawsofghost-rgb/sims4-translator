@@ -24,7 +24,9 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent
 REPO = SCRIPTS.parent
 MOD = SCRIPTS / "ww_p29a_mod.py"
+TUNING_MOD = SCRIPTS / "ww_p29_tuning_mod.py"
 TS4_OUT = Path(os.environ.get("TMPDIR", "/tmp")) / "ww_p29a_debug.ts4script"
+TUNING_TS4_OUT = Path(os.environ.get("TMPDIR", "/tmp")) / "ww_p29_tuning_debug.ts4script"
 
 
 def run(label, cmd):
@@ -516,6 +518,19 @@ def main():
     codes["LIVECLS"] = livecls_mechanism()
     codes["DISP"] = display_source_mechanism()
     codes["ORIGIN"] = display_origin_mechanism()
+    codes["TSTATIC"] = run("TUNING_STATIC_CHECK",
+                            [sys.executable,
+                             str(SCRIPTS / "ww_p29_tuning_static_check.py")])
+    codes["TLOGIC"] = run("TUNING_LOGIC_TEST",
+                           [sys.executable,
+                            str(SCRIPTS / "ww_p29_tuning_logic_test.py")])
+    codes["TBUILD"] = run("TUNING_BUILD_ROUNDTRIP",
+                           [sys.executable,
+                            str(SCRIPTS / "ww_p29a_build_ts4script.py"),
+                            "--src", str(TUNING_MOD), "--out", str(TUNING_TS4_OUT),
+                            "--member", "ww_p29_tuning_mod.pyc",
+                            "--probe-attr", "_looks_like_target",
+                            "--probe-mod", "ww_p29_tuning_mod_probe"])
     codes["BUILD"] = run("BUILD_ROUNDTRIP",
                          [sys.executable, str(SCRIPTS / "ww_p29a_build_ts4script.py"),
                           "--src", str(MOD), "--out", str(TS4_OUT)])

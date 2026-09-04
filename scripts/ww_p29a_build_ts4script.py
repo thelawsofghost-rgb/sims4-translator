@@ -33,33 +33,39 @@ import traceback as _traceback
 import zipfile
 from pathlib import Path
 
+# Default member name for the P29-A debug mod (backward compatible).  A caller may
+# override --module-name / --probe-attr (e.g. the P29-TUNING mod family).
 ZIP_MEMBER = "ww_p29a_mod.pyc"
 
 
-def verify_pack(out_ts4, src_py):
+def verify_pack(out_ts4, src_py, member=None, probe_attr="_hook_factory",
+                probe_mod="ww_p29_tuning_mod_probe"):
     """Confirm the packed member is a structurally importable module on THIS
     interpreter by importing it in a subprocess with autorun disabled.  This
     proves layout/member correctness; the final loadability depends on the pyc
     magic matching the game python (handled by building on game python)."""
+    member = member or ZIP_MEMBER
     import subprocess
     import sys as _sys
     import tempfile, os
     with tempfile.TemporaryDirectory() as tmpdir:
-        pyc_path = os.path.join(tmpdir, "ww_p29a_mod.pyc")
+        pyc_path = os.path.join(tmpdir, os.path.basename(member))
         probe = os.path.join(tmpdir, "_probe.py")
         with open(probe, "w", encoding="utf-8") as f:
             f.write(
                 "import os,sys,zipfile,importlib.util\n"
+                "os.environ['WW_P29_DISABLE_AUTORUN']='1'\n"
                 "os.environ['WW_P29A_DISABLE_AUTORUN']='1'\n"
                 "z=zipfile.ZipFile(%r)\n"
                 "open(%r,'wb').write(z.read(%r))\n"
-                "spec=importlib.util.spec_from_file_location('ww_p29a_mod_probe',%r)\n"
+                "spec=importlib.util.spec_from_file_location(%r,%r)\n"
                 "m=importlib.util.module_from_spec(spec)\n"
-                "sys.modules['ww_p29a_mod_probe']=m\n"
+                "sys.modules[%r]=m\n"
                 "spec.loader.exec_module(m)\n"
-                "assert hasattr(m,'_hook_factory')\n"
+                "assert hasattr(m,%r)\n"
                 "print('PROBE_IMPORT=OK')\n"
-                % (str(out_ts4), pyc_path, ZIP_MEMBER, pyc_path)
+                % (str(out_ts4), pyc_path, member, probe_mod, pyc_path,
+                   probe_mod, probe_attr)
             )
         r = subprocess.run([_sys.executable, probe], capture_output=True,
                            text=True)
@@ -69,8 +75,9 @@ def verify_pack(out_ts4, src_py):
     return True
 
 
-def build(src_py, out_ts4):
+def build(src_py, out_ts4, member=None):
     """Compile src_py with THIS interpreter into a ts4script zip."""
+    member = member or ZIP_MEMBER
     fd, cfile = tempfile.mkstemp(suffix=".pyc")
     os.close(fd)
     tmp_pyc = Path(cfile)
@@ -92,7 +99,7 @@ def build(src_py, out_ts4):
     out = Path(out_ts4)
     out.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(str(out), "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr(ZIP_MEMBER, data)
+        z.writestr(member, data)
     return out
 
 
@@ -107,8 +114,14 @@ def _fail(code_line, exc=None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--src", required=True, help="path to ww_p29a_mod.py")
+    ap.add_argument("--src", required=True, help="path to the mod .py")
     ap.add_argument("--out", required=True, help="path to output .ts4script")
+    ap.add_argument("--member", default=ZIP_MEMBER,
+                    help="zip member name for the .pyc (module name + .pyc)")
+    ap.add_argument("--probe-attr", default="_hook_factory",
+                    help="attribute to assert exists after probe import")
+    ap.add_argument("--probe-mod", default="ww_p29_mod_probe",
+                    help="module name to import the member under for the probe")
     a = ap.parse_args()
 
     src = Path(a.src)
@@ -116,7 +129,7 @@ def main():
         print("P29A_BUILD=FAIL_SRC_MISSING")
         return 1
     try:
-        out = build(src, a.out)
+        out = build(src, a.out, member=a.member)
     except SystemExit as e:
         _fail("P29A_BUILD=FAIL_COMPILE %r" % (e,))
         return 1
@@ -125,14 +138,15 @@ def main():
         return 1
 
     try:
-        verify_pack(out, src)
+        verify_pack(out, src, member=a.member, probe_attr=a.probe_attr,
+                    probe_mod=a.probe_mod)
     except Exception as e:
         _fail("P29A_BUILD=FAIL_PACK_VERIFY %r" % (e,), exc=e)
         return 2
 
     print("P29A_BUILD=OK")
     print("OUT=%s" % out)
-    print("MEMBER=%s" % ZIP_MEMBER)
+    print("MEMBER=%s" % a.member)
     print("BYTES=%d" % out.stat().st_size)
     return 0
 
