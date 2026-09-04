@@ -115,7 +115,13 @@ offset 高位/相邻字段有关联, 需根据核实后的布局填上 size。
 
 ---
 
-## P28B-0 (IMPLEMENTED + TESTED 2026-09-04, 待 Dorothy 真机跑; 勿让用户在真机跑 P28B-1)
+## P28B-0 (真机 DONE 2026-09-04: LOADS_OK, Nevely 正常存在; 已由 Dorothy 实测并回滚。下面脚本为历史留存, 不再部署)
+P28B-1 (zero-XML single-resource override) 真机亦 LOADS_OK 并已 ROLLBACK_OK。
+由此真机链路证明: Priority 600>500 / duplicate full package / single-resource same-TGI override /
+build_package() 0 修改 XML 均可被 Sims4+WW 接受。剩余问题集中在 P27 修改 XML 后的资源 -> 转移 P28C。
+
+历史脚本(不跑):
+  scripts/ww_p28b0_full_clone.py / _report_check.py / _tgi_check.py / _cfg_audit.py / _deploy.ps1 / _rollback.ps1 / _static_check.py / _wintest.py
 
 P28B-0 = 完全禁止 build_package 的"整包 byte-identical clone" control:
   - 真实源包 bytes -> output clone (整个文件 byte-for-byte copy, 不 parse/不 rebuild/不改 header/index/resource)
@@ -143,4 +149,51 @@ P28B-0 = 完全禁止 build_package 的"整包 byte-identical clone" control:
 
 安全: 源包只读/只写 output/只写 P28B0 clone/Resource.cfg 必须备份/localthumbcache 可删/rollback 恢复 cfg SHA/不启 P24/不自动开游戏。
 保留 fa6da01(P28B-1), 不废弃; 仅 P28B-0 LOADS_OK 后执行。
+
+---
+
+## P28C (IMPLEMENTED + TESTED 2026-09-04) FIXED mem_size + ASCII single-field canary
+
+背景: P27 ww_animation_xml_displayname_override.py:207 复用 source 旧 field7 (P27 mem_size re-regression)。
+P28B 真机链路已证 build_package() 在 0 修改 XML 下可用; 剩余问题集中在 P27 修改 XML 后的资源 ->
+怀疑修改后 field7 != 新 payload 真实解压长导致 XML 资源损坏。P28C = 只改 ordinal 299 -> TEST299 (ASCII),
+修复 mem_size = 新解压实际长, 独立验证。
+
+期望机验:
+  SOURCE_MEM_SIZE=... / NEW_XML_DECOMPRESSED_SIZE=... / WRITTEN_MEM_SIZE=...
+  MEM_SIZE_MATCH_NEW_XML=YES  (WRITTEN == NEW_XML_DECOMPRESSED_SIZE)
+  TARGET_ORDINAL=299 / TARGET_NEW_RAW=TEST299 / TARGETS_CHANGED=1/1 / NON_TARGET_XML_DIFF=0
+  P27_MEM_SIZE_REGRESSION_FIXED=YES
+
+generator 修复点 (区别于 P27 坏行 m0.get("mem_size", len(new_plain))):
+  new_xml_decompressed_size = len(decompress_maybe(new_body))
+  written_mem_size = new_xml_decompressed_size; meta mem_size = written_mem_size (绝不沿用 source field7)
+  沙箱实证: 源旧 field7=56898, 改 299 后新解压长=56819(mem 已变), 写入 WRITTEN=56819==56819 (若 P27 会写 56898 错误)。
+
+产物: output/ww_p28c/WW_P28C_TEST299_Override.package + ww_p28c_report.txt + mapping.csv
+
+已实现 (8 files):
+  scripts/ww_p28c_ascii_canary.py      (生成器; 只改 ordinal299->TEST299; 修 mem_size=新解压长; 机验 NON_TARGET_XML_DIFF=0)
+  scripts/ww_p28c_report_check.py      (独立重读 report + 对真实包 bytes 独立复核 mem_size/TGI/TEST299)
+  scripts/ww_p28c_tgi_check.py         (独立 raw-index 普查: source 多条目 vs override 单 WW_XML, TGI 一致)
+  scripts/ww_p28c_cfg_audit.py         (P28C 专属 cfg 审计; 输出 P28C_OVERRIDE_EFFECTIVE_PRIORITY)
+  scripts/ww_p28c_deploy.ps1           (部署: report_check+tgi_check+MEM_SIZE+299 通过 -> 备份->append->post-write re-audit(override600>src500)->copy)
+  scripts/ww_p28c_rollback.ps1         (回滚: 只删 P28C_Overrides + backup 恢复 cfg + 校验 SHA)
+  scripts/ww_p28c_static_check.py      (28 项静态不变式 PASS)
+  scripts/ww_p28c_wintest.py           (38 项全链路沙箱测试 PASS, 含 mem_size re-regression 证明 + 负向)
+  P27 mem_size fix 未改动 P27 本文件(保持可对比); P28C 为新独立生成器。
+
+真机命令 (交给 Dorothy):
+  git pull
+  生成: python D:\projects\sims4_trans\scripts\ww_p28c_ascii_canary.py --source "C:\Users\thela\Documents\Electronic Arts\The Sims 4\Mods\2026.7.20\WW_Nevely42_Animations.package" --force
+  部署: powershell -ExecutionPolicy Bypass -File .\scripts\ww_p28c_deploy.ps1
+  回滚: powershell -ExecutionPolicy Bypass -File .\scripts\ww_p28c_rollback.ps1
+
+game 结果解释:
+  A. Nevely 正常 + ordinal 299 显示 TEST299 -> ASCII_DISPLAY_OVERRIDE_WORKS (mem_size fix 生效, 中文可复推)
+  B. Nevely 正常 + 299 仍英文           -> RESOURCE_LOADS_BUT_DISPLAY_STALE (display 缓存/WW 语义, 非 mem_size)
+  C. Nevely 整组消失                     -> MODIFIED_XML_BREAKS_LOAD (改 mem_size 后仍加载失败, 更深问题)
+
+安全: 源只读/只写 output/只写 P28C_Overrides/Resource.cfg 备份/rollback 恢复 SHA/不中文/不 P24/不 479 批量/不自动部署/不启动游戏。
+
 
