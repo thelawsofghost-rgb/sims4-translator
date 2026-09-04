@@ -937,3 +937,33 @@ Derived P29C_RESULT in read_log (strict scan of the log text):
   imported but no HOOK_INSTALLED=YES   -> HOOK_NOT_INSTALLED
   installed, 0 P29C_TARGET_CALL_BEGIN   -> TARGET_GET_DISPLAY_NAME_NOT_CALLED
   installed, >=1 target block          -> TARGET_CALLER_TRACE_CAPTURED
+
+## P29-C FIX: pre-build LOGIC gate must run under the magic-matched CPython (2026-09-05)
+
+REAL-MACHINE ROOT_CAUSE (Dorothy evidence, NOT sandbox-reproducible: sandbox python is
+3.10 and the logic test PASSes there too; the game-relevant split is 3.14-FAIL vs
+3.7-PASS):
+  C:\Python314\python.exe scripts/ww_p29c_logic_test.py -> P29C_LOGIC_VERDICT=FAIL exit 1
+  C:\...Python37-32\python.exe scripts/ww_p29c_logic_test.py -> PASS exit 0
+  WW target pyc magic 420d0d0a == CPython 3.7.
+  -> ww_p29c_deploy.ps1 pre-build LOGIC GATE ran `python` (host default = 3.14) which
+     does NOT match the game's 3.7; the runtime assertion pass/fail depends on the
+     interpreter.  The BUILD step already resolved 3.7.9 correctly, but the gate did
+     not reuse that selection.
+
+FIX in ww_p29c_deploy.ps1 (payload/static/TEST300/P28C/WW-source all UNTOUCHED):
+  1a. Resolve the magic-matched compiler ONCE, before ANY gate, with the SAME read-only
+      helpers the build uses (ww_p29a_game_py.py magic-from-pyc --locate-mod <Mods> ->
+      TARGET_PYC_MAGIC; then match --target <hex> [--prefer]) -> returns $GATE_PY.
+  1b. Run the P29-C LOGIC test UNDER $GATE_PY (the 3.7 whose magic == 420d0d0a).
+      PS1 structure + P29-C static gates stay under host `python` (version-independent
+      source checks -- unchanged per constraint).
+  prints: P29C_LOGIC_PYTHON= / P29C_LOGIC_PYTHON_VERSION= / P29C_LOGIC_PYTHON_MAGIC= /
+          TARGET_PYC_MAGIC=420d0d0a / P29C_LOGIC_MAGIC_MATCH=YES / P29C_LOGIC=PASS.
+  If magic mismatch or no match -> fail-closed BEFORE any Mods write.
+  2. BUILD re-uses the SAME resolved compiler: passes -GamePython $GATE_PY to
+     ww_p29a_build_on_win.ps1 (which re-verifies pyc magic == target, fail-closed) so
+     selection never drifts between gate and build.
+  8. On logic-test failure the deploy now prints BOTH stdout tail and stderr
+     (PY_STDOUT=... / PY_STDERR=...) instead of only stderr, so an empty PY_STDERR no
+     longer hides the real verdict.
