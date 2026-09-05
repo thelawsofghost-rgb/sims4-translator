@@ -1068,3 +1068,69 @@ NEXT (this branch):
 
 NO RUNTIME HOOK / NO TEST300 / NO stage_name / NO XML / NO WW edits.  Hold any P29-D
   hook design until a real concrete-instance row builder is located by this scan.
+
+## P29-D STEP-3: REVERSE trace from generic sink (real v185k result, 2026-09-05)
+
+REAL WHOLE-PACKAGE RESULT (Dorothy ran step-2 ww_p29d_rowbuilder_scan):
+  pyc_members=1133 functions_parsed=12931 instance_accessor_readers=172
+  ROW_BUILDER_CANDIDATES=0  GET_DISPLAY_NAME_ROW_CALLS=0
+  GET_STAGE_NAME_ROW_CALLS=0  ANIMATION_INSTANCE_ROW_CALLS=0
+  BUT found generic sink: turbolib2.ui.object_picker_dialog._build_dialog_picker_rows
+  @ L297 + other generic dialog builders.
+
+UPDATED CONCLUSION (Dorothy): NOT "no row builder".  The forward 2-hop
+"instance-accessor + row-text sink" heuristic does not fit the real architecture.
+Real shape is NOT SexAnimationInstance -> row builder -> UI; it is:
+    SexAnimationInstance -> intermediate DTO / tuple / callback / picker-row
+                            descriptor
+                        -> TurboObjectPickerDialog generic builder -> UI
+The screen string is materialized in an intermediate helper that fills an opaque
+descriptor, which then crosses (many hops / callbacks) before the generic sink turns
+it into an ObjectPickerRow.  => STOP widening keyword search; reverse-trace from the
+known sink.  NO runtime hook / NO TEST300 / stage_name / XML edits (still binding).
+
+ww_p29d_reverse_trace.py (this step, READ-ONLY) -- reverse dataflow/call-graph from
+the REAL sink back to the first SexAnimationInstance text materialization:
+  - Anchor resolution (version-robust): module turbolib2.ui.object_picker_dialog
+    matched by dotted-tail against .pyc members; functions by co_name (not line, so
+    v185k line drift does not matter).  Falls back to ALSO reading any other .ts4script
+    under --dir that actually contains the anchor module (separately-packaged turbolib
+    safe), each function tagged with its source package.
+  - Task1: full disassembly of the whole object_picker_dialog module (all funcs:
+    TurboObjectPickerDialog / create_picker_row / _build_dialog_picker_rows /
+    add_entry / display / show / ...).
+  - Task2: create_picker_row SIGNATURE from co_varnames + body -> outputs
+      ROW_POSITIONAL_PARAMS / ROW_PAYLOAD_CANDIDATE_PARAMS / PARAM_USED_AS_ROW_TITLE /
+      ROW_TITLE_ARGUMENT / ROW_DATA_TYPE (version-robust, from real pyc not guess).
+  - Task3/4/5: REVERSE BFS over REAL callers (coarse: A calls B if B in A's
+    LOAD_METHOD/LOAD_GLOBAL), UNBOUNDED (safety 200), from every sink root name
+    (create_picker_row AND _build_dialog_picker_rows AND display/show/build/...).
+    PLUS downward materializer discovery: a chain node's own text-bearing CALLEES
+    (helper that reads get_stage_name/get_display_name to fill a DTO field) are
+    reported as text-helpers, since the true screen-string function is downstream of
+    the sink-caller, not an ancestor of it.  Materials prioritized by tier:
+      1 = stage_name/get_stage_name, 2 = display_name/get_display_name, 3 = other.
+  - Task6: DYNAMIC_BOUNDARY -- if a materializer chain node has NO statically-known
+    caller by name, we cannot climb further (entrypoint or object passed into a
+    callback/closure/factory).  Output names that boundary module/function/line and
+    sets STATIC_CONFIDENCE=PARTIAL -> the ONLY place a single P29-D observation hook
+    would be legal to design (still NO hook shipped this step).
+  - Compact txt only (CSV not a blocker).  Fail-closed exit 2/3/4/5/6/7.  ASCII-only,
+    3.7-syntax clean, deterministic after sanitizing interpreter addresses in disasm.
+
+Offline validation on an architectural fixture reproducing the CORRECTED shape
+(SexAnimationInstance -> _render_animation_title (reads get_display_name,get_stage_name)
+ -> _PickerEntry DTO -> dialog._build_dialog_picker_rows -> create_picker_row):
+  resolved both sinks; signature row_data/row_id/title/subtitle ->
+  ROW_TITLE_ARGUMENT=title ROW_DATA_TYPE=row_data; reverse chain surfaced the WW
+  concrete picker open_animation_picker; downward text-helper found
+  _render_animation_title (materialization; TIER=1 because stage_name read present,
+  matching the P29-C screen-text direction); DYNAMIC_BOUNDARY on the entrypoint.
+
+Still OPEN (real machine): Dorothy git pull, run
+  python scripts\ww_p29d_reverse_trace.py "<WWsource.package>" --dir "C:\...\Mods"
+and return output\ww_p29d\ww_p29d_reverse_trace.txt.  From its real sink disasm we
+name ROW_TITLE_ARGUMENT / ROW_DATA_TYPE / the concrete animation-picker entrypoint and
+the FIRST_TEXT_MATERIALIZATION_FUNCTION; if STATIC_CONFIDENCE=PARTIAL we then design
+exactly ONE observation hook on the named DYNAMIC_BOUNDARY (never before we have that
+real evidence).  P29-D hook is STILL not designed yet.
