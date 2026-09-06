@@ -20,7 +20,11 @@ What it extracts (read-only) for the SINGLE target ordinal (default 318)
   * source package sha256 + the WW_ANIM_XML instance (fail-closed gates, as P29F)
   * raw animation_raw_display_name           -> display_name       (T n=...)
   * animation_author                          -> author
-  * animation_category / animation_tags / animation_locations / custom locations
+  * animation_category / animation_tags
+  * LOCATIONS via schema introspection (NOT a single hardcoded field name): we
+    read whatever node the real ordinal's xml actually carries for location (its
+    @n may be animation_locations / locations / custom_locations / ... , and its
+    shape anything carrying leaf tokens), so no guessing, no fabrication.
   * animation_actors_list <L n="actors">     -> per-actor <U>:
          actor_id , animation_clip_name , animation_type ,
          animation_genders                    -> per-actor gender + clip
@@ -135,18 +139,59 @@ def _single_text(entry_el, names, tag="T"):
     return ""
 
 
-def _list_text(entry_el, name):
-    """<L n=name> -> join of descendant <T> texts (location / tag references)."""
-    ls = _name_nodes(entry_el, name, "L")
-    if not ls:
-        return ""
-    parts = []
-    for t in ls[0].iter():
-        if _el_tag(t) == "T":
-            v = _text(t).strip()
+def _location_probe(entry_el):
+    """Read-only scan of every entry-descendant node whose @n mentions location,
+    returning (key, tag, leaf_text) tuples in doc order.  This is the GROUND-TRUTH
+    schema probe: it does NOT assume any single field name, so the real WW XML's
+    actual location node (whatever its spelling / tag / shape) is surfaced on the
+    Windows run instead of guessed."""
+    probe = []
+    for nd in entry_el.iter():
+        nm = _name(nd)
+        if nd is entry_el or not nm:
+            continue
+        low = nm.lower()
+        if "locat" not in low:
+            continue
+        # collect leaf text tokens from this node (regardless of whether it is a
+        # <L>/<U> container or a scalar <T>/<E>)
+        tokens = []
+        if _el_tag(nd) == "L":
+            for t in nd.iter():
+                if _el_tag(t) in ("T", "E") and _text(t).strip():
+                    tokens.append(_text(t).strip())
+        else:
+            v = _text(nd).strip()
             if v:
-                parts.append(v)
-    return "|".join(parts)
+                tokens.append(v)
+        probe.append({"key": nm, "tag": _el_tag(nd), "text": "|".join(tokens)})
+    return probe
+
+
+def _extract_locations(entry_el):
+    """Extract the ordinal location literal(s) WITHOUT hardcoding a single field
+    name or the runtime value.  Uses the doc-order location-named probe and picks
+    the FIRST node that yields >=1 non-empty leaf token (this is the real source's
+    location field, whatever its spelling).  Scalar text may be a joined list
+    (| , ;) -> split.  Returns (tokens_list, hit_key, hit_tag, probe).  Empty
+    tokens -> hit_key None (location absent/unresolvable) -- do NOT invent."""
+    probe = _location_probe(entry_el)
+    for p in probe:
+        toks = _split_tokens(p["text"])
+        if toks:
+            return toks, p["key"], p["tag"], probe
+    return [], None, None, probe
+
+
+def _split_tokens(text):
+    out = []
+    for sep in ("|", ",", ";"):
+        text = text.replace(sep, "|")
+    for t in text.split("|"):
+        t = t.strip()
+        if t:
+            out.append(t)
+    return out
 
 
 def _actors(entry_el):
@@ -237,9 +282,10 @@ def extract_ordinal(pkg: Path, ordinal=TARGET_ORDINAL):
     author = _single_text(entry, AUTHOR_FIELDS)
     category = _single_text(entry, ("animation_category", "category"))
     tags = _single_text(entry, ("animation_tags", "tags"))
-    locations = _list_text(entry, "animation_locations")
-    if not locations:
-        locations = _list_text(entry, "animation_custom_locations")
+    # locations: introspection-driven -- read whatever node the REAL xml actually
+    # carries for location (no single hardcoded field name, no runtime value).
+    loc_tokens, loc_key, loc_tag, loc_probe = _extract_locations(entry)
+    locations = "|".join(loc_tokens)
     actors = _actors(entry)
 
     actor_rows = []
@@ -266,6 +312,9 @@ def extract_ordinal(pkg: Path, ordinal=TARGET_ORDINAL):
         "sex_category": category.upper() if category else "",
         "tags": tags,
         "location_literals": locations,
+        "location_hit_key": loc_key,
+        "location_hit_tag": loc_tag,
+        "location_probe": loc_probe,
         "actor_count": len(actor_rows),
         "actors": actor_rows,
         # runtime-only note-fields (NOT literal in tuning XML; never fabricated)
@@ -296,6 +345,9 @@ def render_report(d):
     L.append("sex_category(upper)      : %r" % d["sex_category"])
     L.append("tags                     : %r" % d["tags"])
     L.append("location_literals        : %r" % d["location_literals"])
+    L.append("location_hit_key         : %r" % d.get("location_hit_key"))
+    L.append("location_hit_tag         : %r" % d.get("location_hit_tag"))
+    L.append("location_probe           : %s" % (d.get("location_probe") or []))
     L.append("actor_count              : %d" % d["actor_count"])
     for a in d["actors"]:
         L.append("  actor[%s] id=%r clip=%r type=%r gender_raw=%r gender_runtime=%s"
@@ -327,12 +379,17 @@ def source_to_reconstruct_fields(d):
             "facing_position_offset": 0.0,
         })
     loc = (d.get("location_literals") or "").split("|") if d.get("location_literals") else []
+    locations = [x for x in loc if x]
+    if not locations:
+        return None, "identity-required location_literals empty (ordinal %s) -- " \
+                     "cannot resolve identifier, refusing (no fabrication)" \
+                     % d.get("target_ordinal", "?")
     return {
         "display_name": d.get("display_name", ""),
         "author": d.get("author", ""),
         "sex_category": (d.get("sex_category") or "").upper(),
         "actors": actors,
-        "locations": [x for x in loc if x],
+        "locations": locations,
         "object_animation_clip_name": "",
         "object_geometry_state": None,
         "object_material_state": None,
@@ -397,6 +454,19 @@ def main(argv=None):
             print("EXC_DIAG_START", file=sys.stderr)
             print(_tb, file=sys.stderr)
             print("EXC_DIAG_END", file=sys.stderr)
+        return 3
+
+    # Requirement #6 (identity gate): for the golden ordinal 318, an identity-
+    # required location must resolve from the REAL xml.  If the probe found no
+    # non-empty location token, this is NOT a PASS -- fail closed with the schema
+    # probe so the human sees exactly which location node the real source carries
+    # (never hardcode DOUBLE_BED, never fabricate).
+    if a.ordinal == TARGET_ORDINAL and not (d.get("location_literals") or "").strip():
+        print("FATAL=LOCATION_UNRESOLVED ordinal %d: identity-required location not "
+              "found in real xml (location_probe=%s)"
+              % (a.ordinal, d.get("location_probe") or []), file=sys.stderr)
+        print("FATAL=NO SOURCE_FIXTURE=PASS until a non-empty location literal is "
+              "extracted from the real ordinal-%d source xml." % a.ordinal, file=sys.stderr)
         return 3
 
     out_dir = Path(a.out_dir)

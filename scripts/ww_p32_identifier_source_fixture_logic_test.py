@@ -82,6 +82,40 @@ def _loc_block_locations(locs):
     return '<L n="animation_locations">%s</L>' % parts
 
 
+def _blob_scalar_loc(i, container_name, actor_clips, genders):
+    """ordinal-318 row variant that stores its location as an UN-prefixed scalar
+    <T n="locations">DOUBLE_BED</T> (mirroring the runtime self.locations attr),
+    NOT an <L n="animation_locations"> of <T>.  Used to prove the parser is not
+    pinned to the guessed field name."""
+    actors = "".join(_actor_row(clip, g, cid=str(k + 1))
+                     for k, (clip, g) in enumerate(zip(actor_clips, genders)))
+    if i != ORD:
+        return _blob(i, container_name, actor_clips, genders)
+    fields = ['<U n="anm%d">' % (300 + i),
+              '<T n="animation_raw_display_name">NOT Caught Cheating 2</T>',
+              '<T n="animation_author">Nevely42</T>',
+              '<T n="animation_category">VAGINAL</T>',
+              '<T n="locations">DOUBLE_BED</T>' if i == ORD else '',
+              '<L n="%s">%s</L>' % (container_name, actors),
+              '</U>']
+    return "".join(fields)
+
+
+def _blob_ord_no_loc(i, container_name, actor_clips, genders):
+    """ordinal-318 row with NO location node at all (not even an empty list) --
+    used to assert the identity gate FAILS CLOSED when location cannot resolve."""
+    actors = "".join(_actor_row(clip, g, cid=str(k + 1))
+                     for k, (clip, g) in enumerate(zip(actor_clips, genders)))
+    fields = ['<U n="anm%d">' % (300 + i),
+              '<T n="animation_raw_display_name">NOT Caught Cheating 2</T>',
+              '<T n="animation_author">Nevely42</T>',
+              '<T n="animation_category">VAGINAL</T>',
+              '<L n="%s">%s</L>' % (container_name, actors),
+              '</U>']
+    return "".join(fields)
+
+
+
 def _blob(i, container_name, actor_clips, genders, has_locations=True):
     actors = "".join(_actor_row(clip, g, cid=str(k + 1))
                      for k, (clip, g) in enumerate(zip(actor_clips, genders)))
@@ -292,6 +326,69 @@ def main():
         ok_bad, _r, _s, det_bad = sf2.golden_check(bad)
         check("S9-golden-UNKNOWN-refuses", (not ok_bad) and "UNKNOWN" in det_bad,
               "det=%s" % det_bad)
+
+        # ---- S10: REAL-VOCABULARY location key: parser must not be pinned to the
+        # guessed 'animation_locations' single name.  Encode ordinal 318's location
+        # as an UN-prefixed scalar <T n="locations">DOUBLE_BED</T> (the runtime attr
+        # is self.locations).  The introspection-based parser must still resolve it
+        # and golden_check must PASS end-to-end through the real xml -> sha path.
+        parts10 = ['<I n="WickedWhimsAnimationPackage"><L n="animations_list">']
+        for i in range(ORD + 1):
+            if i == ORD:
+                parts10.append(_blob_scalar_loc(i, "actors",
+                                                ["nevely42_cheat2_a0",
+                                                 "nevely42_cheat2_a1"],
+                                                ["MALE", "FEMALE"]))
+            else:
+                parts10.append(_blob(i, "actors", ["clip_%d" % i], ["MALE"]))
+        parts10.append("</L></I>")
+        xml10 = "".join(parts10).encode("utf-8")
+        p10 = Path(tmp) / "p10_scalar_loc.package"
+        build_package([(WW_ANIM_XML, WW_GROUP, WW_INST, xml10,
+                        {"comp_state": False, "comp_type": 0,
+                         "mem_size": len(xml10), "offset_high_bit": 0,
+                         "size_high_bit": 0})], p10)
+        r10, od10 = run_extractor(p10, out_dir=Path(tmp) / "od10")
+        d10 = _read_json(od10) if r10.returncode == 0 else None
+        check("S10-exit0", r10.returncode == 0, "rc=%d %s"
+              % (r10.returncode, (r10.stdout + r10.stderr)[:160]))
+        check("S10-location-from-real-key", d10 and d10.get("location_literals") == "DOUBLE_BED"
+              and d10.get("location_hit_key") == "locations",
+              "loc=%r key=%r" % (d10 and d10.get("location_literals"),
+                                  d10 and d10.get("location_hit_key")))
+        ok10c, _r10, sha10, det10 = sf2.golden_check(d10)
+        check("S10-golden-PASS-via-scalar-locations", ok10c and sha10 == sf2.GOLDEN_SHA1_318,
+              "sha=%s det=%s" % (sha10, det10))
+
+        # ---- S11: ordinal-318 with NO location node must FAIL CLOSED (never PASS),
+        # so SOURCE_FIXTURE=PASS / golden can never fire on an unresolved identity
+        # location.  Use a target row that omits any location node entirely.
+        parts11 = ['<I n="WickedWhimsAnimationPackage"><L n="animations_list">']
+        for i in range(ORD + 1):
+            if i == ORD:
+                parts11.append(_blob_ord_no_loc(i, "actors",
+                                                ["nevely42_cheat2_a0",
+                                                 "nevely42_cheat2_a1"],
+                                                ["MALE", "FEMALE"]))
+            else:
+                parts11.append(_blob(i, "actors", ["clip_%d" % i], ["MALE"]))
+        parts11.append("</L></I>")
+        xml11 = "".join(parts11).encode("utf-8")
+        p11 = Path(tmp) / "p11_noloc.package"
+        build_package([(WW_ANIM_XML, WW_GROUP, WW_INST, xml11,
+                        {"comp_state": False, "comp_type": 0,
+                         "mem_size": len(xml11), "offset_high_bit": 0,
+                         "size_high_bit": 0})], p11)
+        r11, od11 = run_extractor(p11, out_dir=Path(tmp) / "od11")
+        check("S11-no-location-failclosed", r11.returncode != 0
+              and "LOCATION_UNRESOLVED" in (r11.stdout + r11.stderr),
+              "rc=%d out=%s" % (r11.returncode,
+                                 (r11.stdout + r11.stderr)[:200]))
+        _pass_lines = [ln for ln in (r11.stdout + r11.stderr).splitlines()
+                       if ln.startswith("SOURCE_FIXTURE=PASS")]
+        check("S11-source-fixture-not-pass", not _pass_lines
+              and "FATAL=NO SOURCE_FIXTURE=PASS" in (r11.stdout + r11.stderr),
+              "emitted PASS lines=%d" % len(_pass_lines))
 
     finally:
         import shutil
