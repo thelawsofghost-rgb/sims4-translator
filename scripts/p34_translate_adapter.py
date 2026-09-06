@@ -17,7 +17,12 @@ Pipeline (per operator spec):
                                       emits TRANSLATED rows with NO model call.
   Stage 2  LLM resolver             -- ONLY unresolved rows go to
                                       P34Translator(OllamaTranslator) ->
-                                      ni-fei:latest @ 127.0.0.1:11434.
+                                      ni-fei:latest.  Endpoint precedence:
+                                      --url CLI > env P34_OLLAMA_URL >
+                                      http://127.0.0.1:11434.  Reuses a REMOTE
+                                      Ollama (e.g. the Windows box's existing
+                                      Ollama+ni-fei); do NOT deploy Ollama on
+                                      this ECS.
                         LLM failure  -> status=REVIEW (fail-closed, NEVER guess).
 
 Reuse boundary (confirmed against phase2b_translate.py internals): the parent
@@ -61,6 +66,19 @@ import sys
 _SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPTS not in sys.path:
     sys.path.insert(0, _SCRIPTS)
+
+def _ollama_url():
+    """Effective Ollama endpoint.
+
+    Reuse the Windows-side Ollama + ni-fei:latest (remote endpoint support); do
+    NOT deploy Ollama on this ECS.  Overridable per env var:
+
+        P34_OLLAMA_URL=http://<Windows_IP>:11434
+
+    Default falls back to the historical local endpoint.  Resolved at call time
+    (not import time) so an operator can set the env var for a given run.
+    """
+    return os.environ.get("P34_OLLAMA_URL", "http://127.0.0.1:11434").strip().rstrip("/")
 try:
     import phase2b_translate as P
     _OLLAMA_BASE = P.OllamaTranslator
@@ -437,7 +455,7 @@ def read_ctx(path):
 # Orchestration: Stage 1 (deterministic) -> Stage 2 (LLM) -> outputs.
 # =========================================================================== #
 def run_pipeline(rows, out_dir, dry_run=False, concurrency=8, per_call=8,
-                 max_retry=3, llm_on=True):
+                 max_retry=3, llm_on=True, llm_url=None):
     """Stage 1 (deterministic) then Stage 2 (LLM for the unresolved remainder),
     then writes the three output files.  Every row's status is decided exactly
     once here; a row is never guessed by the adapter.
@@ -473,16 +491,19 @@ def run_pipeline(rows, out_dir, dry_run=False, concurrency=8, per_call=8,
     if unresolved and not dry_run and llm_on:
         if _IMPORT_ERR:
             raise _Fail("phase2b import failed (%s)" % _IMPORT_ERR)
-        eng = P34Translator()
+        eng = P34Translator(base_url=llm_url or _ollama_url())
         try:
             eng.client.get("/api/version").raise_for_status()
         except Exception:
             # fail-closed: refusing to run means we cannot mark unresolved w/o a
-            # guess; surface as a gate error rather than silently REVIEW them.
+            # guess; surface as a gate error rather than silently REVIEW them
+            # at a DOWN endpoint.
             raise _Fail("Ollama unreachable at %s (ni-fei:latest?) -- "
                         "%d unresolved rows would be LEFT UNRESOLVED; refusing. "
-                        "(use --dry-run to get a REVIEW list instead)"
-                        % (eng.base_url, len(unresolved)))
+                        "(start `ollama serve` on the host so %s/api/version "
+                        "is reachable, set P34_OLLAMA_URL if remote, or use "
+                        "--dry-run to get a REVIEW list instead)"
+                        % (eng.base_url, len(unresolved), eng.base_url))
         items = [(rid, row) for rid, row in unresolved]
         raw_map = eng.translate_batch(items, concurrency=concurrency,
                                       per_call=per_call, max_retry=max_retry)
@@ -543,6 +564,10 @@ def main(argv):
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--per-call", type=int, default=8)
     ap.add_argument("--max-retry", type=int, default=3)
+    ap.add_argument("--url", dest="llm_url", default=None,
+                    help="Ollama endpoint override.  Precedence: --url > "
+                         "env P34_OLLAMA_URL > http://127.0.0.1:11434.  e.g. "
+                         "--url http://<Windows_IP>:11434")
     a = ap.parse_args(argv)
 
     if not os.path.isfile(a.csv):
@@ -558,7 +583,7 @@ def main(argv):
     try:
         mapping = run_pipeline(rows, a.out, dry_run=a.dry_run,
                                concurrency=a.concurrency, per_call=a.per_call,
-                               max_retry=a.max_retry)
+                               max_retry=a.max_retry, llm_url=a.llm_url)
     except _Fail as e:
         print("VERDICT=FAIL", file=sys.stderr)
         print("REASON=%s" % e, file=sys.stderr)
