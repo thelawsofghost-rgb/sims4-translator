@@ -178,6 +178,7 @@ def main(argv=None):
 
     add("")
     add("############ DIFF SUMMARY ############")
+    r31 = r35 = None
     if results["P31"][0] == "ok" and results["P35"][0] == "ok":
         r31 = results["P31"][1]; r35 = results["P35"][1]
         add("resource counts: P31=%d  P35=%d" % (len(r31), len(r35)))
@@ -186,30 +187,115 @@ def main(argv=None):
         add("TGI-only-in-P31 : %s" % (["0x%08X/0x%08X/0x%016X" % t for t in sorted(s31 - s35)] or "(none)"))
         add("TGI-only-in-P35 : %s" % (["0x%08X/0x%08X/0x%016X" % t for t in sorted(s35 - s31)] or "(none)"))
         add("TGI-in-both     : %s" % (["0x%08X/0x%08X/0x%016X" % t for t in sorted(s31 & s35)] or "(none)"))
-        # type inventory
         def inv(rs):
             d = {}
             for r in rs:
-                d.setdefault(r["type"], 0)
-                d[r["type"]] += 1
-            return {fmt_type(t): n for t, n in sorted(d.items())}
-        add("P31 type-inventory : %s" % inv(r31))
-        add("P35 type-inventory : %s" % inv(r35))
-        # locale detection on STBL-bearing types (high byte of instance = locale)
-        for lab, rs in (("P31", r31), ("P35", r35)):
+                d.setdefault(r["type"], []).append(r["inst"])
+            return {fmt_type(t): (len(v), sorted(str(x) for x in v)) for t, v in sorted(d.items())}
+        iv31 = inv(r31); iv35 = inv(r35)
+        add("P31 type-inventory : %s" % {k: (n) for k, (n, _) in iv31.items()})
+        add("P35 type-inventory : %s" % {k: (n) for k, (n, _) in iv35.items()})
+        def stbl_lines(rs, lab):
             for r in rs:
                 if r["type"] == STBL and r["inst"] is not None:
                     loc = (r["inst"] >> 32) & 0xFF
                     add("%s STBL inst=0x%016X  locale_highbyte=0x%02X(%s)"
                         % (lab, r["inst"], loc, LOCALES.get(loc, "?")))
-        # any resource whose instance differs only by locale/flag linkage
-    else:
-        add("(one side failed to parse; see per-side section)")
+        stbl_lines(r31, "P31")
+        stbl_lines(r35, "P35")
 
+    # ---------------- machine-readable CONTRACT + VERDICT ----------------
     add("")
-    add("ZERO_WRITE_TO_MODS=YES  ZERO_WRITE_TO_SAVES=YES  (read-only diff; "
-        "no package/STBL written)")
+    add("===== MACHINE READABLE CONTRACT =====")
+    def _fmt_tgi_list(s):
+        if not s:
+            return "NONE"
+        return ";".join("0x%08X/0x%08X/0x%016X" % t for t in sorted(s))
+    def _type_inv_str(iv):
+        if iv is None:
+            return "(err or n/a)"
+        parts = []
+        for k, (n, insts) in iv.items():
+            st = k.split("/")[0]
+            parts.append("%s(count=%d)" % (st, n))
+        return ";".join(parts) if parts else "(empty)"
 
+    p31_stbl = r31 is not None and any(x["type"] == STBL for x in r31)
+    p35_stbl = r35 is not None and any(x["type"] == STBL for x in r35)
+    s31t = {tk(x) for x in r31} if r31 else set()
+    s35t = {tk(x) for x in r35} if r35 else set()
+    common = s31t & s35t
+    add("P31_TYPE_INVENTORY=" + _type_inv_str(inv(r31) if r31 else None))
+    add("P35_TYPE_INVENTORY=" + _type_inv_str(inv(r35) if r35 else None))
+    add("P31_HAS_STBL=" + str(p31_stbl))
+    add("P35_HAS_STBL=" + str(p35_stbl))
+    add("COMMON_TGI=" + _fmt_tgi_list(common))
+
+    # XML compare when BOTH carry WW_ANIM_XML on an identical TGI
+    def _xml_rec(r):
+        return r
+    xml31 = [x for x in (r31 or []) if x["type"] == TYPE_XML]
+    xml35 = [x for x in (r35 or []) if x["type"] == TYPE_XML]
+    common_xml = [c for c in common if c[0] == TYPE_XML]
+    xml_lines = []
+    if common_xml:
+        for (ty, gr, ii) in sorted(common_xml):
+            m31 = next((r for r in r31 if (r["type"], r["group"], r["inst"]) == (ty, gr, ii)), None)
+            m35 = next((r for r in r35 if (r["type"], r["group"], r["inst"]) == (ty, gr, ii)), None)
+            def _fields(r):
+                f31n = set(r.get("fields") or [])
+                name_fields = {f for f in f31n if any(k in f.lower() for k in
+                              ("name", "localiz", "display", "hash", "text", "str", "key"))}
+                return name_fields, r.get("node_types")
+            f31, nt31 = _fields(m31) if m31 else (set(), None)
+            f35, nt35 = _fields(m35) if m35 else (set(), None)
+            xml_lines.append("  TGI=%s  P31_fields=%s | P35_fields=%s"
+                % (":".join("0x%X" % i for i in (ty, gr)) + "/0x%016X" % ii,
+                   sorted(f31), sorted(f35)))
+            xml_lines.append("      P31 node_types=%s | P35 node_types=%s | entry_count_guess P31-items=%s"
+                % (nt31, nt35, (m31.get("node_types") if m31 else None)))
+    xml_compare = xml_lines if common_xml else \
+        (["(only-P35 XML, no common)"] if xml35 and not xml31 else
+         (["(only-P31 XML, no common)"] if xml31 and not xml35 else "(no WW_ANIM_XML either side)"))
+    add("XML_COMPARE=" + ("\n".join(xml_compare) if isinstance(xml_compare, list) else str(xml_compare)))
+
+    # ---------------- VERDICT (A/B/C or None) ----------------
+    verdict = "(cannot decide)"
+    diff_lines = []
+    if r31 is not None and r35 is not None:
+        p31_other = [x for x in r31 if x["type"] != TYPE_XML]
+        if p31_stbl:
+            verdict = "A: P31 carries STBL (0x220557DA) -> UI likely reads localized string, not P35 XML text"
+            diff_lines.append("A1: P31 has STBL, P35 has none.")
+        elif p31_other:
+            verdict = "B: P31 carries non-WW_ANIM_XML resource(s) (%s) missing in P35" \
+                % ",".join("0x%08X" % x["type"] for x in p31_other)
+            diff_lines.append("B1: P31 includes extra resource types not present in P35.")
+        elif common_xml:
+            # both single XML on same TGI -> compare field structure
+            m31 = next(x for x in r31 if (x["type"], x["group"], x["inst"]) == common_xml[0])
+            m35 = next(x for x in r35 if (x["type"], x["group"], x["inst"]) == common_xml[0])
+            f31n = set(m31.get("fields") or []); f35n = set(m35.get("fields") or [])
+            name_only_31 = {f for f in f31n if any(k in f.lower() for k in
+                ("name", "localiz", "display", "hash", "text", "str", "key"))}
+            name_only_35 = {f for f in f35n if any(k in f.lower() for k in
+                ("name", "localiz", "display", "hash", "text", "str", "key"))}
+            if len(xml31) != len(xml35):
+                verdict = "C: both XML but P31 xml-count=%d != P35 xml-count=%d" % (len(xml31), len(xml35))
+            elif name_only_31 != name_only_35:
+                verdict = "C: both XML + same TGI but differing name/localize field set (P31=%s P35=%s)" \
+                    % (sorted(name_only_31), sorted(name_only_35))
+            else:
+                verdict = "C(weak): both look like same-shape WW_ANIM_XML; structural field set identical -> " \
+                          "difference must be in non-name fields or packaging/flags not captured; " \
+                          "see per-entry header/flags above"
+            diff_lines.append("C: same WW_ANIM_XML TGI; structural field-set equality checked.")
+        else:
+            verdict = "(no shared XML, single side only)"
+    add("DIFFERENCE_SUMMARY=" + "; ".join(diff_lines) if diff_lines else "DIFFERENCE_SUMMARY=(none recorded)")
+    add("VERDICT=" + verdict)
+    add("")
+    add("ZERO_WRITE_TO_MODS=YES  ZERO_WRITE_TO_SAVES=YES  (read-only diff) ")
     report = "\n".join(L)
     rep.write_text(report, encoding="utf-8")
     print(report)
