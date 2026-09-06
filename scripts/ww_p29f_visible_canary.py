@@ -40,7 +40,9 @@ Fail-closed gates (ANY mismatch -> immediate exit, NO package written)
   G3  ordinal 318 exists (>= 319 <U> entries enumerated)
   G4  ordinal 318 before-display is exactly "NOT Caught Cheating 2"
   G5  ordinal 318 author field is exactly "Nevely42"
-  G6  ordinal 318 clip name contains BOTH nevely42_cheat2_a0 AND nevely42_cheat2_a1
+  G6  ordinal 318 clips (census-equivalent deep extraction over the whole entry
+      subtree, joined with '|', same as ww_animation_display_census) contain BOTH
+      nevely42_cheat2_a0 AND nevely42_cheat2_a1 as distinct collected clips
   G7  only ONE entry changed (reopen round-trip: 478 unchanged, ordinal 318 == new)
   G8  mem_size written == actual new decompressed length
 
@@ -119,6 +121,33 @@ def _child_text(child_el, field):
     return None
 
 
+def _deep_texts(subtree_el, names, join="|"):
+    """Census-equivalent deep clip extraction.
+
+    ww_animation_display_census._entry_fields collects, over the WHOLE entry
+    subtree (ET root.iter(), any depth), every element whose n==<name> into a tmap,
+    then clip_name = join('|') of all texts under the first matching field name in
+    (animation_clip_name, dancer_animation_clip_name, clip_name).
+
+    In real WW XML the per-actor clips live NESTED under per-actor <U> elements
+    inside <L n="animation_actors_list"> (not as flat direct children of the
+    entry <U>), so a direct-child read returns None.  This helper reproduces the
+    census semantics: walk every descendant, collect all <T>/<I>/<E> whose n is in
+    names, return join('|') of every text under the first matching name group.
+    """
+    tmap = {}
+    for el in subtree_el.iter():
+        n = el.get("n")
+        lt = el.tag.rsplit("}", 1)[-1] if isinstance(el.tag, str) else el.tag
+        if n is None or lt not in ("T", "I", "E"):
+            continue
+        tmap.setdefault(n, []).append((el.text or "").strip())
+    for nm in names:
+        if nm in tmap and tmap[nm]:
+            return join.join(tmap[nm])
+    return None
+
+
 def _find_list(root):
     for el in root.iter():
         if el.tag.rsplit("}", 1)[-1] == "L" and el.get("n") == ANIM_LIST_FIELD:
@@ -127,9 +156,9 @@ def _find_list(root):
 
 
 def _record_fields(child_el):
-    """Capture author + clip (guarded) for gate checks; display handled at ordinal."""
+    """capture author (direct child) + clip (census-equivalent deep subtree)."""
     author = _child_text(child_el, AUTHOR_FIELD)
-    clip = _child_text(child_el, CLIP_FIELD)
+    clip = _deep_texts(child_el, (CLIP_FIELD, "dancer_animation_clip_name", "clip_name"))
     return {"author": author, "clip": clip}
 
 
@@ -239,16 +268,30 @@ def main():
         gates["BEFORE_DISPLAY"] = (target_raw == TARGET_OLD_RAW)
         # ---- G5 author exact ----
         gates["AUTHOR"] = (target_author == TARGET_AUTHOR)
-        # ---- G6 clip contains a0 AND a1 ----
-        clip_ok = False
-        if target_clip:
-            clip_ok = all(tok in target_clip for tok in CLIP_MUST_CONTAIN)
-        gates["CLIP"] = clip_ok
+        # ---- G6 clip contains a0 AND a1 (census-equivalent: each a distinct
+        #      actor animation_clip_name collected across the entry subtree). ----
+        clip_found = target_clip or ""
+        clips = [c.strip() for c in clip_found.split("|") if c.strip()]
+        a0 = "nevely42_cheat2_a0"; a1 = "nevely42_cheat2_a1"
+        if clips:
+            # census-equivalent: each a DISTINCT collected actor clip entry
+            a0_present = any(c == a0 or c.endswith("/" + a0) or c.endswith("\\" + a0) for c in clips)
+            a1_present = any(c == a1 or c.endswith("/" + a1) or c.endswith("\\" + a1) for c in clips)
+        else:  # flat string (no '|' split) -> substring fallback only
+            a0_present = a0 in target_clip
+            a1_present = a1 in target_clip
+        gates["CLIP"] = (a0_present and a1_present)
+        gates["TARGET_CLIPS_FOUND"] = repr(clips)
+        gates["CLIP_A0_PRESENT"] = bool(a0_present)
+        gates["CLIP_A1_PRESENT"] = bool(a1_present)
     else:
         gates["ORDINAL_318_PRESENT"] = False
         gates["BEFORE_DISPLAY"] = False
         gates["AUTHOR"] = False
         gates["CLIP"] = False
+        gates["TARGET_CLIPS_FOUND"] = repr(None)
+        gates["CLIP_A0_PRESENT"] = False
+        gates["CLIP_A1_PRESENT"] = False
 
     structural_gates = [
         gates.get("SOURCE_SHA256", False),
@@ -267,7 +310,9 @@ def main():
         print(f"  TARGET_ORDINAL={TARGET_ORDINAL}")
         print(f"  TARGET_BEFORE_DISPLAY={target_raw!r}")
         print(f"  TARGET_AUTHOR_FOUND={target_author!r}")
-        print(f"  TARGET_CLIP_FOUND={target_clip!r}")
+        print(f"  TARGET_CLIPS_FOUND={gates.get('TARGET_CLIPS_FOUND')}")
+        print(f"  CLIP_A0_PRESENT={gates.get('CLIP_A0_PRESENT')}")
+        print(f"  CLIP_A1_PRESENT={gates.get('CLIP_A1_PRESENT')}")
         print("ZERO_WRITE_TO_MODS=YES")
         return 3
 
@@ -432,6 +477,9 @@ def main():
     report.append(f"TARGET_AUTHOR={TARGET_AUTHOR}")
     report.append(f"AUTHOR_GATE={'YES' if gates['AUTHOR'] else 'NO'}")
     report.append(f"CLIP_GATE={'YES' if gates['CLIP'] else 'NO'}")
+    report.append(f"TARGET_CLIPS_FOUND={gates.get('TARGET_CLIPS_FOUND', repr([]))}")
+    report.append(f"CLIP_A0_PRESENT={'YES' if gates.get('CLIP_A0_PRESENT') else 'NO'}")
+    report.append(f"CLIP_A1_PRESENT={'YES' if gates.get('CLIP_A1_PRESENT') else 'NO'}")
     report.append(f"ORDINAL_GATE={'YES' if gates['ORDINAL_318_PRESENT'] else 'NO'}")
     report.append(f"BEFORE_DISPLAY_GATE={'YES' if gates['BEFORE_DISPLAY'] else 'NO'}")
     report.append(f"AFTER_DISPLAY_GATE={'YES' if gates['AFTER_DISPLAY'] else 'NO'}")

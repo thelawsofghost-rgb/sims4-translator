@@ -16,13 +16,18 @@ FAITHFULLY reproduces the authoritative census contract:
   ordinal 318 : raw display "NOT Caught Cheating 2", author "Nevely42",
                 clip containing nevely42_cheat2_a0 AND nevely42_cheat2_a1
 
-We then run the builder (subprocess) against that synthetic source.  Because the
-synthetic file has a different SHA, it would fail the real SOURCE_SHA256 pin by
-design; the test therefore sets WW_P29F_TEST_ACCEPT_ANY_SOURCE_SHA=1 (test-only
-off-by-default hook, never used on the live Windows command) so that every OTHER
-gate (instance / ordinal 318 / before-display / author / clip / only-one-entry /
-mem_size / protected-fields / source-unchanged / round-trip) is genuinely
-exercised against the full build path.
+The built WW XML models the REAL nesting: each entry's clips live under per-actor
+<U> elements inside <L n="animation_actors_list">, NOT as flat direct children --
+so the fixture genuinely exercises the census-equivalent deep clip extraction
+(an old direct-child read returns None here, exactly the real-source failure).
+
+We run the builder (subprocess) against each fixture.  A synthetic file's SHA
+differs from the authoritative pin, so the test sets the test-only
+WW_P29F_TEST_ACCEPT_ANY_SOURCE_SHA=1 hook (OFF by default; the live Windows command
+never sets it) purely so the OTHER gates -- instance / ordinal 318 / display /
+author / clip-missing negatives / only-one-entry / mem_size / protected-fields /
+source-unchanged / round-trip -- are genuinely exercised against the full build path.
+The no-hook wrong-SHA negative (W9) proves the authoritative pin still fail-closes.
 
 Gates asserted
 --------------
@@ -35,6 +40,9 @@ Gates asserted
   W7  SOURCE_UNCHANGED_AFTER_BUILD (we only read source)
   W8  ZERO_WRITE_TO_MODS + PRIORITY=600 in report
   W9  NEGATIVE: a source whose SHA is wrong and NOT overridden -> exit 3, no artifact
+  W10 clip diagnostics present: TARGET_CLIPS_FOUND / CLIP_A0_PRESENT / CLIP_A1_PRESENT
+  W11 NEGATIVE a0-only -> CLIP fails (no artifact); also a1-only -> CLIP fails
+  W12 no gate relaxation: builder CLIP gate cannot be bypassed by env/test hook
 Outputs nothing to the repo output/ tree by default (fixtures + artifacts under /tmp).
 
 Exit: 0=PASS, 1=FAIL.
@@ -67,33 +75,62 @@ def _display(i):
 
 
 def _clip(i):
-    if i == TARGET_ORD:
-        return "nevely42_cheat2_a0 nevely42_cheat2_a1 extra_variant"
-    if i == FORBIDDEN_ORD:
-        return "nevely42_cheat2_b0 nevely42_cheat2_b1"
-    return "nevely42_gen_%d_a0" % i
+    # decorative per-entry clip name (unused in real-gate path when actor clips used)
+    return "anm_%d_meta" % i
 
 
-def _blob(i):
+def _actor_row(clip_token):
+    # A single actor <U> nested inside animation_actors_list carrying exactly one
+    # animation_clip_name node -- mirrors real WW XML where each actor holds a clip.
+    return ('<U n="actor">'
+            '<T n="actor_id">1</T>'
+            '<T n="animation_clip_name">%s</T>'
+            '</U>') % clip_token
+
+
+def _blob(i, actor_clips=None):
+    # display / author / stage stay DIRECT children of the entry (this is what the
+    # real source satisfies for BEFORE_DISPLAY and AUTHOR).  clips are NOT direct
+    # children here: they are NESTED under per-actor <U> inside animation_actors_list,
+    # which is exactly why the old flat direct-child clip read returned None on the
+    # real package and the census-equivalent deep read fixes it.
+    if actor_clips is None:
+        actor_clips = ["nevely42_cheat2_a0", "nevely42_cheat2_a1"] if i == TARGET_ORD else [_clip(i)]
+    actors = "".join(_actor_row(c) for c in actor_clips)
     rows = [
         f'<T n="animation_raw_display_name">{_display(i)}</T>',
-        f'<T n="animation_author">Nevely42</T>' if (i in (TARGET_ORD, FORBIDDEN_ORD)) else '<T n="animation_author">OtherMod</T>',
+        (f'<T n="animation_author">Nevely42</T>' if (i in (TARGET_ORD, FORBIDDEN_ORD))
+         else '<T n="animation_author">OtherMod</T>'),
         '<T n="animation_stage_name">stage_1</T>',
-        f'<T n="animation_clip_name">{_clip(i)}</T>',
         '<T n="animation_next_stage_name">stage_2</T>',
         '<T n="animation_tags">tag_a|tag_b</T>',
         '<T n="animation_category">cheating</T>',
+        ('<L n="animation_actors_list">%s</L>' % actors),
     ]
     return "".join(rows)
 
 
-def make_pkg(out: Path):
-    """Build a DBPF with exactly one WW_ANIM_XML (the synthetic animations XML)."""
+def template_xml(actor_clips_for_318):
+    """Return the full animations-list XML text; ordinal-318 uses actor_clips_for_318.
+
+    Every OTHER ordinal (incl. forbidden 300) gets its actors from _blob defaults so
+    only the target's actor-clip set varies between fixtures.
+    """
     parts = ['<I n="WickedWhimsAnimationPackage"><L n="animations_list">']
     for i in range(TOTAL):
-        parts.append(f'<U n="anm{300 + i}">{_blob(i)}</U>')
+        if i == TARGET_ORD:
+            parts.append(f'<U n="anm{300 + i}">{_blob(i, actor_clips_for_318)}</U>')
+        else:
+            parts.append(f'<U n="anm{300 + i}">{_blob(i)}</U>')
     parts.append("</L></I>")
-    xml = ("".join(parts)).encode("utf-8")
+    return "".join(parts)
+
+
+def make_pkg(out: Path, actor_clips_for_318=None):
+    """Build a DBPF with exactly one WW_ANIM_XML (the synthetic animations XML)."""
+    if actor_clips_for_318 is None:
+        actor_clips_for_318 = ["nevely42_cheat2_a0", "nevely42_cheat2_a1"]
+    xml = template_xml(actor_clips_for_318).encode("utf-8")
     body = xml
     items = [(WW_ANIM_XML, WW_GROUP, WW_INST, body,
               {"comp_state": False, "comp_type": 0, "mem_size": len(xml),
@@ -259,23 +296,48 @@ def main():
     if (out_dir2 / "ww_p29f" / "WW_P29F_VISIBLE_318_Override.package").exists():
         fails.append("negative-artifact-written")
 
-    # ---- NEGATIVE 2: non-Nevely author at 318 -> author gate fails -> no artifact
-    # (robustness: modify fixture clone so author != Nevely42 but display matches)
-    tmp2 = Path(tempfile.mkdtemp(prefix="p29f_neg2_"))
-    try:
-        src_bytes = src.read_bytes()
-        # easier: rebuild a clone with author mismatch via small textual change is not
-        # byte-safe to splice on DBPF; instead assert the author gate token fires by
-        # inspecting that a fixture whose author differs is rejected. Build second pkg:
-        import shutil
-        shutil.copy(src, tmp2 / "WW_Nevely42_Animations.package")
-        clone = tmp2 / "WW_Nevely42_Animations.package"
-        # parse + rewrite ordinal 318 author to "Someone" — but authors all OtherMod
-        # except 300/318; simplest: we already prove author==Nevely42 gate on POSITIVE.
-        # Here we only confirm the token PATH exists by checking positive report has AUTHOR.
-        print("(neg2 positive-author already exercised; author gate token present)")
-    except Exception as ex:
-        fails.append("neg2-setup-error: %r" % ex)
+    # ---- NEGATIVE 1: wrong SHA pin WITHOUT test override -> exit 3, no artifact ----
+    out_dir2 = tmp / "out_neg"
+    r2 = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parent / "ww_p29f_visible_canary.py"),
+         "--source", str(src), "--out-dir", str(out_dir2), "--force"],
+        capture_output=True, text=True,
+        env={k: v for k, v in os.environ.items() if k != "WW_P29F_TEST_ACCEPT_ANY_SOURCE_SHA"})
+    print("=== NEGATIVE (no SHA override) rc=%d ===" % r2.returncode)
+    print(r2.stdout)
+    print(r2.stderr)
+    if r2.returncode == 0:
+        fails.append("negative-wrong-sha-returned-0")
+    if (out_dir2 / "ww_p29f" / "WW_P29F_VISIBLE_318_Override.package").exists():
+        fails.append("negative-artifact-written")
+
+    # ---- positive clip diagnostic tokens ----
+    if tok.get("TARGET_CLIPS_FOUND") is None:
+        fails.append("target-clips-found-missing")
+    if tok.get("CLIP_A0_PRESENT") != "YES":
+        fails.append("positive-clip-a0-not-yes: %r" % tok.get("CLIP_A0_PRESENT"))
+    if tok.get("CLIP_A1_PRESENT") != "YES":
+        fails.append("positive-clip-a1-not-yes: %r" % tok.get("CLIP_A1_PRESENT"))
+
+    # ---- NEGATIVE clip fixtures: only a0 / only a1 must each fail, no artifact ----
+    for label, clips in (("a0-only", ["nevely42_cheat2_a0"]),
+                         ("a1-only", ["nevely42_cheat2_a1"])):
+        ndir = tmp / ("out_" + label.replace("-", "_"))
+        nsrc = ndir / "WW_Nevely42_Animations.package"
+        ndir.mkdir(parents=True, exist_ok=True)
+        make_pkg(nsrc, actor_clips_for_318=clips)
+        nn = run_builder(nsrc, ndir)
+        art = ndir / "ww_p29f" / "WW_P29F_VISIBLE_318_Override.package"
+        print("=== NEGATIVE-clip %s rc=%d artifact=%s ===" % (label, nn.returncode, art.exists()))
+        print(nn.stdout)
+        if nn.returncode == 0:
+            fails.append("clip-%s-returned-0" % label)
+        if art.exists():
+            fails.append("clip-%s-artifact-written" % label)
+        ntok = {}
+        rpt = ndir / "ww_p29f" / "ww_p29f_report.txt"
+        if rpt.exists():  # structural-fail path never writes report; assert none expected
+            fails.append("clip-%s-report-should-not-exist" % label)
 
     print("=== P29F LOGIC VERDICT ===")
     if fails:
