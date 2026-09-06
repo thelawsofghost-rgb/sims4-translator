@@ -597,7 +597,7 @@ def main(argv):
 def _write_outputs(mapping, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     map_p = os.path.join(out_dir, "p34_translation_mapping.csv")
-    with open(map_p, "w", newline="", encoding="utf-8") as fh:
+    with open(map_p, "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.DictWriter(fh, fieldnames=MAP_COLS, extrasaction="ignore",
                            lineterminator="\n")
         w.writeheader()

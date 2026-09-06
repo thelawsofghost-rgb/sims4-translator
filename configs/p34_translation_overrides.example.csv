@@ -1,0 +1,3 @@
+identifier,translated_name,reason,note
+EXAMPLE_<REAL_S00317_MEMBER1_ID>,<PICK_ONE_canonical_stem_全系列统一>,S00317 INV5 unify stem,REPLACE EXAMPLE_ identifiers with the REAL mapping identifiers from normalized2.csv
+EXAMPLE_<REAL_S00317_MEMBER2_ID>,<PICK_ONE_canonical_stem_全系列统一>,S00317 INV5 unify stem,REPLACE EXAMPLE_ identifiers with the REAL mapping identifiers from normalized2.csv

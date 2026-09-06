@@ -27,6 +27,10 @@ Invariants
                                          trailing/doubled whitespace).
   8. sampled output rows                 print a representative sample (ordinal,
                                          raw, zh, series) for human spot-check.
+  9. encoding                           the mapping FILE itself must be UTF-8
+                                         with BOM and free of GBK-mojibake /
+                                         replacement chars (checked on the raw
+                                         bytes, not the decoded rows). P34.3.
 
 Series recovery (#5) requires the REAL P33 context CSV (the mapping file itself
 does not carry series_key).  Both the series check (#5) and the byte-for-byte
@@ -73,6 +77,13 @@ try:
     import ww_p34_suffix_table as _suffix_mod
 except Exception:                       # pragma: no cover - optional dep
     _suffix_mod = None
+
+# optional import of the P34 encoding gate for invariant #9 (ENCODING).  Absent
+# -> ENCODING reported SKIPPED rather than guessed.
+try:
+    import ww_p34_encoding_gate as _enc_gate
+except Exception:                       # pragma: no cover - optional dep
+    _enc_gate = None
 
 # historical fallback (only 高潮) used when the shared table is not importable;
 # keeps this QA module self-sufficient and drift-free either way.
@@ -286,6 +297,24 @@ def spotcheck(rows, expect_rows=EXPECT_ROWS_DEFAULT, series_map=None,
     return failures, sample, notes
 
 
+
+# --------------------------------------------------------------------------- #
+# ENCODING invariant (#9) ------------------------------------------------------ #
+# --------------------------------------------------------------------------- #
+def audit_encoding(path):
+    """Encoding invariant #9 against the ACTUAL mapping file bytes: it must be
+    UTF-8 **with BOM** and free of GBK-mojibake / replacement chars (P34.3 #1).
+    Returns (ok:bool, notes:list[str]) -- used by main() to fold an ENCODING
+    failure into the overall VERDICT (spotcheck() itself has no file path)."""
+    if _enc_gate is None:
+        return True, ["ENCODING: SKIPPED (ww_p34_encoding_gate not importable)"]
+    status, problems, meta = _enc_gate.audit_file(path)
+    if status == "PASS":
+        return True, ["ENCODING: PASS (UTF-8 with BOM, no GBK-mojibake)"]
+    detail = "; ".join(problems[:4])
+    return False, ["ENCODING: FAIL -> %s" % detail]
+
+
 def _pick_sample(rows, series_map=None, target=24):
     """Deterministic representative sample: evenly spaced across ordinal, plus
     any multi-member series heads.  Never random (machine-reproducible)."""
@@ -386,6 +415,12 @@ def main(argv=None):
     failures, sample, notes = spotcheck(
         rows, expect_rows=a.expect_rows,
         series_map=series_map, src_map=src_map)
+
+    # ---- invariant #9 (ENCODING) against the actual file bytes -----------
+    enc_ok, enc_notes = audit_encoding(a.mapping)
+    if not enc_ok:
+        failures.append("INV9 " + enc_notes[0].replace("ENCODING: ", ""))
+    notes.extend(enc_notes)
 
     # ---- report ----------------------------------------------------------
     n = len(rows)

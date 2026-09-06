@@ -285,7 +285,7 @@ def cleanup(rows, ctx_idx):
 # Writer ------------------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
 def write_mapping(path, rows):
-    with open(path, "w", encoding="utf-8", newline="") as fh:
+    with open(path, "w", encoding="utf-8-sig", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=MAP_COLS, extrasaction="ignore",
                            lineterminator="\n")
         w.writeheader()
