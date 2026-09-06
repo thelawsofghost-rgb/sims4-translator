@@ -24,12 +24,14 @@
 # Run (Windows):
 #   powershell -ExecutionPolicy Bypass -File .\scripts\ww_p32_loader_origin_probe.ps1
 #   optional: -Mods <dir> -Py37 <exe> -OutDir <dir> -Source <path.package>
+#             -WW_TS4Script <exact wickedwhims archive path>
 [CmdletBinding()]
 param(
     [string]$Mods = "C:\Users\thela\Documents\Electronic Arts\The Sims 4\Mods",
     [string]$Py37 = "C:\Users\thela\AppData\Local\Programs\Python\Python37-32\python.exe",
     [string]$OutDir = "D:\projects\sims4_trans\output\p32",
-    [string]$Source = ""
+    [string]$Source = "",
+    [string]$WW_TS4Script = ""
 )
 
 Set-StrictMode -Version Latest
@@ -54,34 +56,56 @@ if ($Source -ne "") {
 $EX = Join-Path $WORKSPACE "scripts\ww_p32_loader_origin_probe.py"
 if (-not (Test-Path -LiteralPath $EX)) { Fail "PROBE_MISSING=$EX" }
 
+$TUNING_MEMBER = "wickedwhims/sex/animations/_ts4_animations_tuning.pyc"  # WW tuning member (exact)
+
+# ---- REQUIRED real WW archive: NO glob / newest / first-*.ts4script guessing ----
+# The default WW archive is the one true, only archive that owns WW tuning.
+# NEVER auto-pick ww_p29c_display_caller_trace.ts4script or any other ts4script:
+# those are test/sidecar scripts and do not carry wickedwhims/sex/animations
+# tuning.  -WW_TS4Script overrides if it lives elsewhere.
+if ($WW_TS4Script -eq "") {
+    $WW_TS4Script = Join-Path $Mods "WickedWhimsMod\TURBODRIVER_WickedWhims_Scripts.ts4script"
+}
+if (-not (Test-Path -LiteralPath $WW_TS4Script)) { Fail "WW_TS4SCRIPT_NOT_FOUND=$WW_TS4Script" }
+
+Write-Output "WW_TS4SCRIPT=$WW_TS4Script"
+# SHA-256 of the exact archive (ASCII-safe .NET hash).
+Add-Type -AssemblyName System.Security.Cryptography | Out-Null
+$shaBytes = [System.Security.Cryptography.SHA256]::Create().ComputeHash(
+    [System.IO.File]::OpenRead($WW_TS4Script))
+$sb = New-Object System.Text.StringBuilder
+foreach ($b in $shaBytes) { [void]$sb.Append($b.ToString("x2")) }
+Write-Output ("WW_TS4SCRIPT_SHA256=" + $sb.ToString())
+Write-Output "TUNING_MEMBER=$TUNING_MEMBER"
+
 Write-Output "SOURCE=$srcPath"
 Write-Output "PY37=$Py37"
 Write-Output "--- P32 EXACT loader-origin (origin CLOSED) + TUNING_DEFAULT_SEMANTICS gate ---"
 
-# Locate the real .ts4script (for _ts4_animations_tuning.pyc default evidence).
+# Extract tuning member by EXACT archive path; missing -> FATAL stop (no gate NO as
+# if it were a semantic conclusion).  CPython 3.7.9 decodes the real .pyc later.
 $tuningPyc = ""
-$ts4 = Get-ChildItem -LiteralPath $Mods -Recurse -Filter "*.ts4script" -File -ErrorAction SilentlyContinue
-if ($ts4) {
-    $tuningMember = $null
-    Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
-    $zip = [System.IO.Compression.ZipFile]::OpenRead($ts4[0].FullName)
-    try {
-        foreach ($e in $zip.Entries) {
-            if ($e.Name -like "_ts4_animations_tuning.pyc") { $tuningMember = $e; break }
-        }
-    } finally { $zip.Dispose() }
-    if ($tuningMember) {
-        $tuningPyc = Join-Path $env:TEMP ("p32_tuning_" + [System.Guid]::NewGuid().ToString("N") + ".pyc")
-        $zip = [System.IO.Compression.ZipFile]::OpenRead($ts4[0].FullName)
-        try {
-            $src = $zip.GetEntry($tuningMember.FullName)
-            $outF = [System.IO.File]::Create($tuningPyc)
-            try { $src.Open().CopyTo($outF) } finally { $outF.Dispose() }
-        } finally { $zip.Dispose() }
-        Write-Output "TUNING_PYC=$tuningPyc (member $($tuningMember.FullName))"
-    } else {
-        Write-Output "TUNING_PYC=NONE (_ts4_animations_tuning.pyc not found in $($ts4[0].Name)); defaults gate will FAIL CLOSED"
+Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+$memberFound = $false
+$zip = [System.IO.Compression.ZipFile]::OpenRead($WW_TS4Script)
+try {
+    foreach ($e in $zip.Entries) {
+        if ($e.FullName -eq $TUNING_MEMBER) { $memberFound = $true; break }
     }
+} finally { $zip.Dispose() }
+
+if ($memberFound) {
+    $tuningPyc = Join-Path $env:TEMP ("p32_tuning_" + [System.Guid]::NewGuid().ToString("N") + ".pyc")
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($WW_TS4Script)
+    try {
+        $src = $zip.GetEntry($TUNING_MEMBER)
+        $outF = [System.IO.File]::Create($tuningPyc)
+        try { $src.Open().CopyTo($outF) } finally { $outF.Dispose() }
+    } finally { $zip.Dispose() }
+    Write-Output "TUNING_PYC=$tuningPyc (extracted from WW archive)"
+} else {
+    Write-Output "FATAL=TUNING_MEMBER_NOT_FOUND (member $TUNING_MEMBER absent from $WW_TS4Script)"
+    Fail "TUNING_MEMBER_NOT_FOUND"
 }
 
 $argList = @($srcPath, "--out-dir", $OutDir)

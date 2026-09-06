@@ -236,6 +236,45 @@ def main():
         rep_good.set_default(k, 0, "0", "test literal evidence")
     check("A10-all-proven-yes", rep_good.all_proven(), "all 11 proven")
 
+    # ---- D-section: production runner (ps1) archive selection is EXACT ----
+    # Regression for the wrong-archive root cause: the previous runner globbed
+    # *.ts4script and took the first hit (ww_p29c_display_caller_trace.ts4script),
+    # which does not own wickedwhims/sex/animations tuning.  The runner must pin
+    # the real WW archive, never guess.
+    _ps1 = (HERE / "ww_p32_loader_origin_probe.ps1").read_text(encoding="utf-8")
+    check("D-provided", len(_ps1) > 500, "ps1 bytes=%d" % len(_ps1))
+    # D1: no auto glob / first-hit selection remains
+    check("D1-no-glob", '-Filter "*.ts4script"' not in _ps1, "no *.ts4script glob")
+    check("D1-no-firsthit", "$ts4[0]" not in _ps1
+          and '-Filter "*.ts4script"' not in _ps1, "no first-archive glob pick")
+    # D2: exact real WW archive authoritative path
+    check("D2-exact-ww-archive",
+          "WickedWhimsMod\\TURBODRIVER_WickedWhims_Scripts.ts4script" in _ps1,
+          "real WW archive pinned")
+    check("D2-override-param", "-WW_TS4Script" in _ps1 and "[string]$WW_TS4Script" in _ps1,
+          "-WW_TS4Script override param")
+    # D3: member matched by EXACT full path, not bare .Name
+    check("D3-member-exact-path",
+          '$e.FullName -eq $TUNING_MEMBER' in _ps1
+          and "_ts4_animations_tuning.pyc" in _ps1,
+          "member compare on FullName")
+    # D4: exact tuning member constant
+    check("D4-tuning-member-const",
+          "wickedwhims/sex/animations/_ts4_animations_tuning.pyc" in _ps1
+          and "$TUNING_MEMBER = " in _ps1, "tuning member exact")
+    # D5: missing member -> FATAL fail-closed, no DEFAULT_UNKNOWN_COUNT conclusion
+    check("D5-fatal-guard", "FATAL=TUNING_MEMBER_NOT_FOUND" in _ps1
+          and "Fail \"TUNING_MEMBER_NOT_FOUND\"" in _ps1,
+          "member-missing FATAL stop")
+    # D6: startup prints exact archive + digest + member
+    for token in ("WW_TS4SCRIPT=", "WW_TS4SCRIPT_SHA256=", "TUNING_MEMBER="):
+        check("D6-token-" + token, token in _ps1, token)
+    check("D6-sha256", "SHA256" in _ps1 and "ToString(\"x2\")" in _ps1, "sha512 digest printed")
+    # D7: tuned pyc handed to CPython decode
+    check("D7-tunes-to-py", "--tuning-pyc\", $tuningPyc" in _ps1
+          or "@(\"--tuning-pyc\", $tuningPyc)" in _ps1.replace(chr(10), " "),
+          "cpython decode path fed pyc")
+
     failed = [n for n, passed in ok if not passed]
     print("PASS_COUNT=%d FAIL_COUNT=%d" % (len(ok) - len(failed), len(failed)))
     if failed:
