@@ -399,10 +399,13 @@ def decode_defaults(tuning_pyc_path=None, get_opcode_mod=None, XBytecode=None):
     fabricates a default: decode_defaults only records a default when it reads a
     real literal + evidence from the .pyc via the focused extractor module
     ww_p32_loader_origin_defaults (Windows-only; it cannot be weakened here).
-    See `--tuning-pyc` on the Windows invocation."""
+    See `--tuning-pyc` on the Windows invocation.
+
+    Disassembly is driven by populate_defaults(), which self-resolves the xdis
+    6.x modern recipe; the legacy get_opcode_mod/XBytecode args are accepted only
+    for API-compatibility and are not required."""
     rep = DefaultSemanticsReport()
-    if tuning_pyc_path is not None and tuning_pyc_path.is_file() and \
-            get_opcode_mod is not None and XBytecode is not None:
+    if tuning_pyc_path is not None and tuning_pyc_path.is_file():
         try:
             import ww_p32_loader_origin_defaults as _globals_mod
             _globals_mod.populate_defaults(rep, str(tuning_pyc_path),
@@ -588,21 +591,10 @@ def main(argv=None):
     origin_rows = origin_rows_from_schema(carrier_counts, n)
 
     # ---- default recovery fails closed without Windows bytecode evidence ----
+    # populate_defaults() self-resolves the xdis 6.x MODERN recipe (get_opcode +
+    # Bytecode iteration) against the real pyc; nothing legacy is pre-bound here.
     tuning_pyc = Path(a.tuning_pyc) if a.tuning_pyc else None
-    go_mod = None
-    XBytecode = None
-    if tuning_pyc is not None:
-        # xdis optional; required only to prove defaults from the tuning pyc.
-        try:
-            import xdis.disasm as _xd
-            from xdis.op_imports import get_opcode_module, PythonImplementation  # noqa
-            go_mod = get_opcode_module
-            XBytecode = _xd.Bytecode
-        except Exception:
-            go_mod = None
-            XBytecode = None
-    default_rep = decode_defaults(tuning_pyc_path=tuning_pyc,
-                                  get_opcode_mod=go_mod, XBytecode=XBytecode)
+    default_rep = decode_defaults(tuning_pyc_path=tuning_pyc)
     default_rep.load_carriers(carrier_counts)
 
     lines = render_report(origin_rows, carrier_counts, carrier_ordinals, n,

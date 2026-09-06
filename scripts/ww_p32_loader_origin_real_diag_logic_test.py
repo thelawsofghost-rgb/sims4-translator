@@ -153,13 +153,10 @@ def main():
             # _COUNT_MATCH YES appears for the 3 maps
             check("R2-leaf-count-match-all", txt.count("LEAF_COUNT_MATCH=YES") == 3,
                   "match-yes=%d" % txt.count("LEAF_COUNT_MATCH=YES"))
-            # per-class LEAF_COUNT exactness
-            check("R2-actor-leaves-5", "LEAF_COUNT=5 (value region" in txt,
-                  "actor 5 leaves")
-            check("R2-props-leaves-2", "LEAF_COUNT=2 (value region" in txt,
-                  "props 2 leaves")
-            check("R2-data-leaves-4", "LEAF_COUNT=4 (value region" in txt,
-                  "data 4 leaves")
+            # per-class LEAF_COUNT exactness (plain "LEAF_COUNT=N" line)
+            check("R2-actor-leaves-5", "LEAF_COUNT=5\n" in txt, "actor 5 leaves")
+            check("R2-props-leaves-2", "LEAF_COUNT=2\n" in txt, "props 2 leaves")
+            check("R2-data-leaves-4", "LEAF_COUNT=4\n" in txt, "data 4 leaves")
             # R4(a): healthy >> NONE
             check("R4-healthy-stage-none",
                   txt.rstrip().endswith("REAL_DECODER_FAILURE_STAGE=NONE"),

@@ -248,82 +248,42 @@ def analyze_class(cls, dotted, cobj, res, version=None):
         return
 
     # LEAF_BOUNDARY + DEFAULT_EXTRACTION --------------------------
-    # value region lo .. ft_idx where ft_idx = the field-name tuple LOAD_CONST that
-    # precedes BUILD_CONST_KEY_MAP -- the SAME upper bound defaults.decode_structure
-    # uses (range(lo, j) with j = field-tuple index).  Scanning up to the MAP index
-    # instead would put the key-tuple LOAD_CONST (the final leaf's follower) inside
-    # the window and wrongly REJECT the last leaf as non-constructor (LEAF_COUNT
-    # one short).
-    ft_idx = _find_index_by_off(seq, m["field_off"])
-    hi = ft_idx if ft_idx >= 0 else m["idx"]
-    lo = hi - 1
-    while lo >= 0 and not (
-            _op(seq[lo]).startswith("STORE") or
-            _op(seq[lo]).startswith("BUILD_") or
-            _op(seq[lo]) in ("RETURN_VALUE", "POP_TOP", "END_FINALLY")):
-        lo -= 1
-    lo += 1
-    # identical top-level leaf discriminator
-    leaves = []
-    rejected = []
-    for t in range(lo, hi):
-        if _op(seq[t]) not in lod._CALL_OPCODES:
-            continue
-        nx = t + 1
-        while nx < hi and _op(seq[nx]) == "NOP":
-            nx += 1
-        nxop = _op(seq[nx]) if nx < hi else None
-        if nx >= hi or nxop in ("LOAD_NAME", "LOAD_GLOBAL", "LOAD_METHOD",
-                                "LOAD_FAST", "LOAD_DEREF", "LOAD_CLASSDEREF",
-                                "LOAD_BUILD_CLASS"):
-            leaves.append((t, _op(seq[t]), nxop))
-        else:
-            rejected.append((_op(seq[t]), nxop))
-    res.line("LEAF_COUNT=%d (value region [%d,%d))" % (len(leaves), lo, hi))
-    res.line("LEAF_TERMINALS=%s" % ",".join(op for (_, op, _) in leaves))
-    res.line("REJECTED_INNER_TERMINALS=%s" %
-             (",".join("%s->%s" % (a, b) for (a, b) in rejected) or "-"))
-
-    leaf_ok = len(leaves) == len(keys)
+    # The LEAF count is recovered from BUILD_CONST_KEY_MAP's OWN stack semantics via
+    # the SAME forward operand-stack evaluator the production decoder uses
+    # (lod._sim_value_producers + lod.decode_structure).  This is deliberately NOT a
+    # "value-region start + count CALLs" scan: the real WW class bodies (Actor 22
+    # keys, Data 26 keys) are preceded by other caller code, so a guessed region
+    # start reproduced only the TAIL (3-of-22, 2-of-26).  Delegating to the shared
+    # decoder guarantees the diagnostic and the production gate read the pyc
+    # identically -> a PASS here is a PASS for DEFAULT_PROVEN/DEFAULT_UNKNOWN_COUNT.
+    _decoded, _unresolved = lod.decode_structure(seq, cls)
+    leaf_count = len(keys)      # top-level leaves == map keys when fully recovered
+    leaf_ok = (not _unresolved)
     res.leaf_ok_by_class[cls] = leaf_ok
-    res.line("LEAF_COUNT_MATCH=%s" % ("YES" if leaf_ok else "NO stage=LEAF_BOUNDARY"))
+    if _unresolved:
+        res.line("LEAF_COUNT=FAILED (%s)" % _unresolved[0][0])
+        res.line("LEAF_COUNT_MATCH=NO stage=LEAF_BOUNDARY")
+    else:
+        res.line("LEAF_COUNT=%d" % leaf_count)
+        res.line("LEAF_COUNT_MATCH=%s" % ("YES" if leaf_ok else "NO stage=LEAF_BOUNDARY"))
 
     # default candidate + reject reason per wanted (correlated) key only
     for k in want:
-        if k not in idx_of:
-            res.line("key=%s | key_index=NONE-IN-TUPLE | leaf_index=- "
-                     "| leaf_terminal=? | candidate=UNKNOWN | type=? "
-                     "| reject:key-absent-from-tuple" % k)
+        ev = _decoded.get(k)
+        if ev is None:
+            if not leaf_ok:
+                res.line("key=%s | producer-recovery-failed" % k)
+            else:
+                res.line("key=%s | key_index=%d | leaf_index=NONE | "
+                         "candidate=UNKNOWN | type=? | reject:key-absent-or-unproven"
+                         % (k, idx_of.get(k, -1)))
+                res.default_unknown_on.append((cls, k))
             continue
-        ki = idx_of[k]
-        if ki < len(leaves):
-            lidx, top, nxop = leaves[ki]
-            try:
-                dl = lod._leaf_default_ins(seq, lidx)
-            except Exception as exc:  # noqa: BLE001
-                res.line("key=%s | key_index=%d | leaf_index=%d | leaf_terminal=%s "
-                         "| candidate=UNKNOWN | type=? | reject:resolver-raise %r"
-                         % (k, ki, lidx, top, exc))
-                if leaf_ok:
-                    res.default_unknown_on.append((cls, k))
-                continue
-            if dl is None:
-                res.line("key=%s | key_index=%d | leaf_index=%d | leaf_terminal=%s "
-                         "| next_after=%s | candidate=UNKNOWN | type=? "
-                         "| reject:non-const-or-no-default-packet"
-                         % (k, ki, lidx, top, nxop))
-                if leaf_ok:
-                    res.default_unknown_on.append((cls, k))
-                continue
-            lit, loff = dl
-            res.line("key=%s | key_index=%d | leaf_index=%d | leaf_terminal=%s "
-                     "| next_after=%s | candidate=%r | type=%s "
-                     "| RESOLVED (default LOAD_CONST@%d)"
-                     % (k, ki, lidx, top, nxop, lit, type(lit).__name__, loff))
-        else:
-            res.line("key=%s | key_index=%d | leaf_index=MISSING | leaf_terminal=? "
-                     "| candidate=UNKNOWN | type=? | reject:index-out-of-leaf-range"
-                     % (k, ki))
+        lit = ev["default"]
+        res.line("key=%s | key_index=%d | leaf_index=%d | leaf_terminal=CALL "
+                 "| candidate=%r | type=%s | RESOLVED (default LOAD_CONST@%s..map@%s)"
+                 % (k, idx_of[k], idx_of[k], lit, ev["type"],
+                    ev["evidence_offset_range"][0], ev["evidence_offset_range"][1]))
 
 
 def _classify(res):

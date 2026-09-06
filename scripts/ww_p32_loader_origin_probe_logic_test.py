@@ -408,6 +408,84 @@ def main():
     check("C7-py37-call-layout", c7ok,
           "actor_none/0.0/1/0 + wrapper ''/0 + data ''/1 under CALL_FUNCTION")
 
+    # C8 (operator regression A): a WIDE class body whose TUNABLE map has MANY keys
+    #   (22) with the correlated keys in the MIDDLE (13-17) and other caller code
+    #   (a method def + preamble) BEFORE the map.  The old "value-region start"
+    #   heuristic reproduced only the TAIL (3-of-22).  The forward stack evaluator
+    #   must recover all 22 top-level producers in exact order, never tail-only.
+    # C9 (operator regression B): WIDER (26 keys) with target keys at 8/9/10/20 and
+    #   a trailing group of wrapper/value structures, proving not-tail-only and not
+    #   mis-counting a trailing block as the whole map.
+    _off = [0]
+
+    def _I(op, arg=None, argval=None):
+        o = _off[0]
+        _off[0] += 2
+        x = _Instr()
+        x.opname = op
+        x.arg = arg
+        x.argval = argval
+        x.offset = o
+        return x
+
+    def _wide_body(n):
+        """A class body: module preamble + one method def, then TUNABLE map of n
+        keys mixing direct-kw / wrapper / positional producers."""
+        s = [_I("LOAD_NAME"), _I("STORE_NAME"), _I("LOAD_CONST", argval="W"),
+             _I("STORE_NAME"),
+             _I("LOAD_CONST", argval="<code tag>"),
+             _I("LOAD_CONST", argval="W.tag"),
+             _I("MAKE_FUNCTION", arg=0), _I("STORE_NAME")]
+        for i in range(n):
+            if i % 5 == 0:                                   # positional _tse(1,i)
+                s += [_I("LOAD_NAME"), _I("LOAD_CONST", argval=1),
+                      _I("LOAD_CONST", argval=i + 100),
+                      _I("CALL_FUNCTION", arg=2)]
+            elif i % 5 == 1:                                 # wrapper
+                s += [_I("LOAD_NAME"), _I("LOAD_NAME"),
+                      _I("LOAD_CONST", argval=-i - 500),
+                      _I("LOAD_CONST", argval=("default",)),
+                      _I("CALL_FUNCTION_KW", arg=1),
+                      _I("LOAD_CONST", argval="int"),
+                      _I("LOAD_CONST", argval=("raw_type",)),
+                      _I("CALL_FUNCTION_KW", arg=2)]
+            else:                                            # direct kw default=V
+                v = float(i) if i % 2 else None
+                s += [_I("LOAD_NAME"), _I("LOAD_CONST", argval=v),
+                      _I("LOAD_CONST", argval=("default",)),
+                      _I("CALL_FUNCTION_KW", arg=1)]
+        s.append(_I("LOAD_CONST", argval=tuple("k%02d" % i for i in range(n))))
+        s.append(_I("BUILD_CONST_KEY_MAP", arg=n))
+        return s
+
+    def _expect_val(cls, i, n):
+        # mirror _wide_body value logic per key index
+        if i % 5 == 0:
+            return i + 100                       # positional deepest arg
+        if i % 5 == 1:
+            return -i - 500                      # wrapper inner TunableX default
+        return float(i) if i % 2 else None       # direct kw
+
+    _seqA = _wide_body(22)
+    _resA, _unA = lod.decode_structure(_seqA, "<module>.W")
+    _midA = {("k%02d" % i): _expect_val("A", i, 22) for i in (13, 14, 15, 16, 17)}
+    c8ok = (not _unA and len(_resA) == 22 and
+            all(_resA.get(k) and _resA[k]["default"] == v for k, v in (("k%02d" % i,
+                  _expect_val("A", i, 22)) for i in range(22))))
+    for (k, v) in _midA.items():
+        c8ok = c8ok and bool(_resA.get(k)) and _resA[k]["default"] == v
+    check("C8-22key-mid-targets-not-tail", c8ok,
+          "decoded=%d (need 22) mid k13..k17 correct" % len(_resA))
+
+    _seqB = _wide_body(26)
+    _resB, _unB = lod.decode_structure(_seqB, "<module>.W")
+    _tarB = {i: _expect_val("B", i, 26) for i in (8, 9, 10, 20)}
+    c9ok = (not _unB and len(_resB) == 26 and
+            all(_resB.get("k%02d" % i) and
+                _resB["k%02d" % i]["default"] == v for i, v in _tarB.items()))
+    check("C9-26key-mid-targets-not-tail", c9ok,
+          "decoded=%d (need 26) mid k08/09/10/20 correct" % len(_resB))
+
     # ---- D-section: production runner (ps1) archive selection is EXACT ----
     # Regression for the wrong-archive root cause: the previous runner globbed
     # *.ts4script and took the first hit (ww_p29c_display_caller_trace.ts4script),
