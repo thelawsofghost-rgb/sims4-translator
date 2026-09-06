@@ -307,7 +307,7 @@ def _sim_value_producers(seq, j, count, map_off, on_first_failure=None):
     stack = []
     # opcode families
     PUSH1 = ("LOAD_CONST", "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
-             "LOAD_DEREF", "LOAD_CLASSDEREF", "LOAD_ATTR", "LOAD_METHOD",
+             "LOAD_DEREF", "LOAD_CLASSDEREF", "LOAD_ATTR",
              "LOAD_BUILD_CLASS")
     CALLOP = ("CALL_FUNCTION", "CALL_FUNCTION_KW", "CALL_FUNCTION_EX",
               "CALL_METHOD", "CALL")
@@ -343,6 +343,18 @@ def _sim_value_producers(seq, j, count, map_off, on_first_failure=None):
             continue
         if op in PUSH1:
             stack.append(None)          # a plain operand (not a known producer)
+            continue
+        if op == "LOAD_METHOD":
+            # CPython 3.7 method-call protocol (the WW compiler target).  Unlike a
+            # plain LOAD_* the receiver object ON the stack is CONSUMED and replaced
+            # by TWO method-protocol slots [method|callable, self-or-NULL] so the
+            # matching CALL_METHOD can pop them.  Net effect +1 here, cancelled by
+            # CALL_METHOD's arity+2 pop so a matched pair nets 0 (no residual).
+            if not stack:
+                return _fail("STACK_UNDERFLOW", needed=1, ins=ins, t=t)
+            stack.pop()                 # consume the receiver
+            stack.append(None)          # method / callable slot
+            stack.append(None)          # self-or-NULL slot (top)
             continue
         if op == "DUP_TOP":
             if not stack:
@@ -430,6 +442,19 @@ def _sim_value_producers(seq, j, count, map_off, on_first_failure=None):
                 return _fail("STACK_UNDERFLOW", needed=need, ins=ins, t=t)
             del stack[-need:]
             stack.append(None)         # the function object result
+            continue
+        if op == "CALL_METHOD":
+            # CPython 3.7 method-call protocol (mirror of the LOAD_METHOD branch):
+            # pops `arity` argument values + the two method-protocol slots that
+            # LOAD_METHOD left (self/NULL on top, method below) = arity+2, then
+            # pushes one result.  Net -(arity+1); matched with LOAD_METHOD's +1 a
+            # pair nets 0 (no residual).  CALL_METHOD never carries a kw-name tuple.
+            arity = getattr(ins, "arg", 0) or 0
+            need = arity + 2            # values + method slot + self/NULL slot
+            if len(stack) < need:
+                return _fail("STACK_UNDERFLOW", needed=need, ins=ins, t=t)
+            del stack[-need:]
+            stack.append(t)             # this call produced exactly one value
             continue
         if op in CALLOP:
             # A CALL pops its operand group and pushes one result.  `arity` = the
@@ -598,7 +623,7 @@ def decode_structure(seq, path_name, on_first_failure=None):
 # level (child producer offsets only - never a full tree).
 def sim_residual_report(seq, j, count, map_off):
     _PUSH1 = ("LOAD_CONST", "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
-              "LOAD_DEREF", "LOAD_CLASSDEREF", "LOAD_ATTR", "LOAD_METHOD",
+              "LOAD_DEREF", "LOAD_CLASSDEREF", "LOAD_ATTR",
               "LOAD_BUILD_CLASS")
     _CALLOP = ("CALL_FUNCTION", "CALL_FUNCTION_KW", "CALL_FUNCTION_EX",
                "CALL_METHOD", "CALL")
@@ -629,7 +654,17 @@ def sim_residual_report(seq, j, count, map_off):
             if op in ("KEEP_ALIVE", "NOP", "EXTENDED_ARG"):
                 continue
             _of = _off(ins)
-            if op in _PUSH1:
+            if op == "LOAD_METHOD":
+                # CPython 3.7 protocol: consume the receiver, push two
+                # method-protocol slots (method / callable, self-or-NULL).  The
+                # receiver is always a real operand below; pop it and push 2.
+                if stack:
+                    stack.pop()
+                stack.append(_mk("name", _of, op,
+                                 argval=getattr(ins, "argval", None)))
+                stack.append(_mk("name", _of, op,
+                                 argval=getattr(ins, "argval", None)))
+            elif op in _PUSH1:
                 if op == "LOAD_CONST":
                     stack.append(_mk("const", _of, op, argval=_const(ins)))
                 else:
@@ -699,6 +734,17 @@ def sim_residual_report(seq, j, count, map_off):
                     del stack[-need:]
                     stack.append(_mk("call", _of, op, argval=op,
                                      children=[c["producer_offset"] for c in kids]))
+            elif op == "CALL_METHOD":
+                # CPython 3.7 protocol mirror: pop arity values + method slot +
+                # self/NULL slot = arity+2; matched with LOAD_METHOD net 0.
+                arity = getattr(ins, "arg", 0) or 0
+                need = arity + 2
+                take_n = need if len(stack) >= need else len(stack)
+                kids = stack[-take_n:] if take_n else []
+                if take_n:
+                    del stack[-take_n:]
+                stack.append(_mk("call", _of, op, argval=op,
+                                 children=[c["producer_offset"] for c in kids]))
             elif op in _CALLOP:
                 has_names = False
                 k = t - 1

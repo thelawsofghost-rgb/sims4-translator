@@ -399,6 +399,159 @@ def main():
     check("R3-names-dangling-loads", _r3ops == ["LOAD_NAME"],
           "surplus names the dangling LOAD (%r)" % _r3ops)
 
+    # ---- METHOD-CALL PROTOCOL (this fix) ------------------------------
+    # Real Windows evidence: Data body has exactly THREE
+    #   LOAD_METHOD TunableFactory / CALL_METHOD
+    # pairs and Data residuals were +3; Props (no method pairs) +0.  Per CPython
+    # 3.7 a matched LOAD_METHOD/CALL_METHOD pair nets 0 (LOAD_METHOD consumes the
+    # receiver + pushes two protocol slots; CALL_METHOD pops arity+2).  Previously
+    # both engines modelled LOAD_METHOD as a plain 1-push name and CALL_METHOD with
+    # the CALL_FUNCTION pop formula (arity+1) -> every pair left +1 residual.  The
+    # required regression vectors below lock the correct 3.7 discipline and prove
+    # CALL_FUNCTION / CALL_FUNCTION_KW are untouched.
+
+    # A: one LOAD_METHOD/CALL_METHOD(0) pair as the sole top-level value -> 0 residual.
+    _seq_a = [_mk("LOAD_NAME", 0, "X", 0),
+              _mk("LOAD_METHOD", 0, "meth", 2),
+              _mk("CALL_METHOD", 0, 0, 4),
+              _mk("LOAD_CONST", 0, ("k0",), 6)]
+    _dec_a, _rep_a = None, diag.lod.sim_residual_report(_seq_a, 3, 1, 8)
+    _cap_a = {}
+    _dec_a = diag.lod._sim_value_producers(
+        _seq_a, 3, 1, 8, on_first_failure=lambda md: _cap_a.update(md))
+    check("A-one-pair-residual-zero",
+          (_rep_a.get("extra_stack_count") == 0
+           and _dec_a is not None and len(_dec_a) == 1
+           and "reason" not in _cap_a),
+          "single LOAD_METHOD/CALL_METHOD(0) nets 0 residual")
+
+    # B: THREE consecutive method pairs (Data's real 3x TunableFactory) -> still
+    # 0 residual and all three value producers are CALL indices, matched to DATA.
+    _seq_b = []
+    for _pi in range(3):
+        _o = 6 * _pi
+        _seq_b += [_mk("LOAD_NAME", 0, "X", _o),
+                   _mk("LOAD_METHOD", 0, "TunableFactory", _o + 2),
+                   _mk("CALL_METHOD", 0, 0, _o + 4)]
+    _seq_b.append(_mk("LOAD_CONST", 0, ("k0", "k1", "k2"), 18))
+    _jb = len(_seq_b) - 1
+    _cap_b = {}
+    _dec_b = diag.lod._sim_value_producers(_seq_b, _jb, 3, 20,
+                                      on_first_failure=lambda md: _cap_b.update(md))
+    _rep_b = diag.lod.sim_residual_report(_seq_b, _jb, 3, 20)
+    check("B-three-pairs-residual-zero", _rep_b.get("extra_stack_count") == 0
+          and "reason" not in _cap_b,
+          "3x TunableFactory method pairs net 0 (Data +3 case now balanced)")
+    check("B-three-producers-resolved",
+          _dec_b is not None and len(_dec_b) == 3
+          and all(isinstance(x, int) for x in _dec_b) and _dec_b == list(range(2, 9, 3)),
+          "3 producers all CALL indices, source order (%r)" % (_dec_b,))
+
+    # C: method call WITH args argc=1 and argc=2 -> correct pops, still 0 residual.
+    for _argc, _nargs in ((1, 1), (2, 2)):
+        _s = [_mk("LOAD_NAME", 0, "X", 0)]
+        for _ai in range(_nargs):
+            _s.append(_mk("LOAD_CONST", 0, _ai, 2 + 2 * _ai))
+        _s += [_mk("LOAD_METHOD", 0, "meth", 2 + 2 * _nargs),
+               _mk("CALL_METHOD", _argc, _argc, 4 + 2 * _nargs)]
+        _s.append(_mk("LOAD_CONST", 0, ("k0",), 6 + 2 * _nargs))
+        _jc = len(_s) - 1
+        _cc = {}
+        _dc = diag.lod._sim_value_producers(_s, _jc, 1, 99,
+                                       on_first_failure=lambda m: _cc.update(m))
+        check("C-argc%d-residual-zero" % _argc,
+              _dc is not None and "reason" not in _cc,
+              "LOAD_METHOD/CALL_METHOD(argc=%d) nets 0" % _argc)
+
+    # D: CALL_FUNCTION / CALL_FUNCTION_KW original pop behaviour UNCHANGED.
+    # positional, no preceding kw-name tuple -> need arity+1.
+    _seq_d1 = [_mk("LOAD_NAME", 0, "f", 0),
+               _mk("LOAD_CONST", 0, 1, 2),
+               _mk("CALL_FUNCTION", 1, 1, 4),
+               _mk("LOAD_CONST", 0, ("k0",), 6)]
+    _rep_d1 = diag.lod.sim_residual_report(_seq_d1, 3, 1, 8)
+    check("D-call-function-pos-hit", _rep_d1.get("extra_stack_count") == 0)
+    # modern CALL_FUNCTION_KW (kw-name tuple precedes) -> need arity+2.
+    _seq_d2 = [_mk("LOAD_NAME", 0, "f", 0), _mk("LOAD_CONST", 0, 1, 2),
+               _mk("LOAD_CONST", 0, ("a",), 4),
+               _mk("CALL_FUNCTION_KW", 1, 1, 6),
+               _mk("LOAD_CONST", 0, ("k0",), 8)]
+    _rep_d2 = diag.lod.sim_residual_report(_seq_d2, 4, 1, 10)
+    check("D-call-function-kw-hit", _rep_d2.get("extra_stack_count") == 0)
+    # CPython 3.7 kw call: plain CALL_FUNCTION with preceding kw-name tuple.
+    _seq_d3 = [_mk("LOAD_NAME", 0, "f", 0), _mk("LOAD_CONST", 0, 1, 2),
+               _mk("LOAD_CONST", 0, ("a",), 4),
+               _mk("CALL_FUNCTION", 1, 1, 6),
+               _mk("LOAD_CONST", 0, ("k0",), 8)]
+    _rep_d3 = diag.lod.sim_residual_report(_seq_d3, 4, 1, 10)
+    check("D-call-function-37kw-hit", _rep_d3.get("extra_stack_count") == 0)
+
+    # E: nested -- LOAD_NAME X / LOAD_METHOD TunableFactory / CALL_METHOD 0 /
+    # BUILD_LIST ... / CALL_FUNCTION_KW must read as ONE top-level value expr
+    # with NO leftover method/self slot.
+    _seq_e = [_mk("LOAD_NAME", 0, "X", 0),
+              _mk("LOAD_METHOD", 0, "TunableFactory", 2),
+              _mk("CALL_METHOD", 0, 0, 4),
+              _mk("LOAD_NAME", 0, "Actor", 20),
+              _mk("BUILD_LIST", 1, 1, 22),
+              _mk("LOAD_CONST", 0, ("raw_type",), 24),
+              _mk("CALL_FUNCTION_KW", 1, 1, 26),
+              _mk("LOAD_CONST", 0, ("k0",), 30)]
+    _ce = {}
+    _de = diag.lod._sim_value_producers(_seq_e, 7, 1, 32,
+                                    on_first_failure=lambda m: _ce.update(m))
+    _re = diag.lod.sim_residual_report(_seq_e, 7, 1, 32)
+    check("E-nested-expr-no-self-residual",
+          _re.get("extra_stack_count") == 0
+          and _de is not None and _de == [6] and "reason" not in _ce,
+          "nested method -> kw-call reads as ONE value, no method/self residual")
+
+    # M: END-TO-END against a REAL-COMPILED (not hand-built) method-call owner.
+    # The unit vectors above are synthetic; this compiles a genuine body whose
+    # per-key RHS are pure-positional method calls, so the .pyc REALLY contains
+    # LOAD_METHOD/CALL_METHOD.  decode_structure must resolve every key with 0
+    # unresolved and sim_residual_report must report EXTRA 0 over the whole body.
+    _mcomp = None
+    try:
+        import io as _mio
+        import py_compile as _mpc
+        _mc = _compile_to_pyc(
+            "class _Holder(object):\n"
+            "    class _F(object):\n"
+            "        def m(self, a, b):\n"
+            "            return a\n"
+            "class _WickedW(object):\n"
+            "    TUNABLE_STRUCTURE = {\n"
+            "        \"a_prop\": _Holder._F().m(7, 8),\n"
+            "        \"b_prop\": _Holder._F().m(3, 4),\n"
+            "    }\n", "mcomp")
+        from xdis.load import load_module_from_file_object  # noqa: F401
+        _cpath = _mc
+        if _cpath is not None:
+            _rh = load_module_from_file_object(
+                _mio.BytesIO(open(_cpath, "rb").read()), filename=_cpath)
+            _cdm = diag.discover_classes(_rh[3])
+            _wp = [x for x in _cdm if x.endswith("_WickedW")]
+            if _wp:
+                _wseq = diag.iter_xdis_instructions(_cdm[_wp[0]], version=_rh[0])
+                _methodops = [
+                    (diag._off(i), diag._op(i))
+                    for i in _wseq
+                    if diag._op(i) in ("LOAD_METHOD", "CALL_METHOD")]
+                check("M-compiled-body-has-method-ops", len(_methodops) >= 4,
+                      "real compiled body contains LOAD_METHOD/CALL_METHOD (%r)"
+                      % _methodops)
+                if len(_methodops) >= 4:
+                    _mdec, _mun = diag.lod.decode_structure(_wseq, _wp[0])
+                    # decode resolving ALL keys with 0 unresolved IS the per-map
+                    # balance gate: any lingering method/self residual would make the
+                    # sim fail-closed -> that map would be UNRESOLVED here.
+                    check("M-compiled-resolves-all",
+                          _mun == [] and sorted(_mdec) == ["a_prop", "b_prop"],
+                          "compiled method-call body resolves all keys, no unresolved")
+    except Exception as _ecomp:  # noqa: BLE001
+        check("M-compiled-no-raise", False, "compiled method fixture raised: %r" % (_ecomp,))
+
     failed = [n for n, p in ok if not p]
     print("PASS_COUNT=%d FAIL_COUNT=%d" % (len(ok) - len(failed), len(failed)))
     if failed:
