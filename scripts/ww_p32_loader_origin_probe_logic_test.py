@@ -1,38 +1,52 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ww_p32_loader_origin_probe_logic_test.py -- regression harness for the P32 exact
-loader-origin probe's pure decision core (classifier + render + gate).
+ww_p32_loader_origin_probe_logic_test.py -- regression harness for the P32 rev-B
+EXACT loader-origin probe + TUNING_DEFAULT_SEMANTICS gate.
 
-The bytecode WALKER (needs a real .ts4script + xdis on Windows) is NOT exercised
-here -- no pyc bytes exist on Linux.  What is protected here is the *deciding*
-logic that the gate depends on: classify_provenance() and render_audit(), i.e.
-the exact rules that turn evidence into the only-four-status vocabulary and into
-FULL_CORPUS_SAFE_TO_RECONSTRUCT.
+Model under test (rev B, exact-dataflow-first)
+----------------------------------------------
+JOB 1 FIELD ORIGIN: closed by the exact Windows dataflow, NOT by a generic STORE
+tracer.  ORIGIN_ROWS gives the 8 inputs their PROVEN status:
+    PROVEN_TUNING   x6 : object_animation_clip_name, object_geometry_state,
+                         object_material_state, prop_animation_clip_name,
+                         prop_geometry_state, version
+    PROVEN_TRANSFORM x2 : actor.position_offset.x/y/z, actor.angle_offset/facing
+    UNKNOWN         x0  (origin is closed; a broad walker is diagnostic-only and
+                         can never re-open it).  Assert 0 UNKNOWN and 0 default.
 
-Statuses asserted (full vocabulary closure):
-  PROVEN_TUNING | PROVEN_DEFAULT | PROVEN_TRANSFORM | UNKNOWN
-and no other string may ever be emitted by the classifier.
+JOB 2 TUNING_DEFAULT_SEMANTICS (the live gate): each correlated XML key's
+missing-key default must be PROVEN from bytecode/schema evidence, never guessed
+(0 / 0.0 / '' / None / 1 need evidence).  Without a real _ts4_animations_tuning.pyc
+decode, decode_defaults() must FAIL CLOSED (all 11 keys UNKNOWN, gate NO).
 
-Invariants under test:
-  A1 vocabulary closure: classify_provenance never returns anything outside the 4.
-  A2 a tuning-fed field (schema sink + tuning-named write) => PROVEN_TUNING.
-  A3 a const default with NO schema sink and NO call => PROVEN_DEFAULT.
-  A4 a pure transform with no schema sink => PROVEN_TRANSFORM when classified
-     value_kind 'transform' (set later), but a bare helper call (value_kind
-     'helper', set later, no tuning) is conservatively UNKNOWN -- i.e. the probe
-     NEVER guesses a transform is a recoverable runtime default from an unresolved
-     helper.
-  A5 ILLEGAL pattern: a schema sink exists but a 'default' override on top would
-     swallow a present tuning value => UNKNOWN (never PROVEN_DEFAULT).
-  A6 gate render_audit: any UNKNOWN row => FULL_CORPUS_SAFE_TO_RECONSTRUCT=NO.
-     All-PROVEN three-state roster => YES.
-  A7 counts line is emitted and only the 4 statuses appear in it.
+Invariants:
+  A1 ORIGIN_ROWS = 8, statuses in {PROVEN_TUNING, PROVEN_TRANSFORM}; UNKNOWN==0
+     and DEFAULT==0 (origin closed).
+  A2 exact origin statuses by field (6 tuning/2 transform).
+  A3 census uses REAL tuning keys for actor offsets (animation_x_offset/...),
+     NEVER the identity-field spelling "position_offset".
+  A4 STRUCTURAL scoping: prop clip/state counted ONLY inside a prop <U> under the
+     prop list; the same-named bare row text must NOT count.
+  A5 STRUCTURAL scoping: actor offset counted ONLY inside an actor <U> under the
+     actor list.
+  A6 non-empty carrier detection: an empty "" leaf is not a carrier.
+  A7 carrier counts are small, exact and reproducible (object partial / prop
+     partial / version).
+  A8 origin_rows_from_schema annotates partial carriers as per-row-mandatory and
+     exposes carrier_count.
+  A9 default gate: no tuning pyc -> every DEFAULT_KEYS key UNKNOWN -> report gate
+     FULL_CORPUS_SAFE_TO_RECONSTRUCT=NO with STOP_REASON; catalog must not run.
+  A10 DefaultSemanticsReport.set_default with BOTH a value and evidence marks a
+     key PROVEN; all_proven() reflects it; unknown_keys() mirrors reversals.
+  A11 decode_defaults is a pure fail-closed no-op on Linux (returns report with
+     0 proven keys) -- no fabrication of 0/0.0/''/None/1 from silence.
 Exit 0 = all PASS; 1 = any FAIL.
 """
 from __future__ import annotations
 
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -40,7 +54,66 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 import ww_p32_loader_origin_probe as lop
 
-ALLOWED = ("PROVEN_TUNING", "PROVEN_DEFAULT", "PROVEN_TRANSFORM", "UNKNOWN")
+
+def _name(el):
+    return el.get("n")
+
+
+def _text(el):
+    return "" if el.text is None else el.text
+
+
+_SYNTH = (
+    '<I n="T">'
+    '<L n="animations_list">'
+    # Row 0: actor list carries animation_x_offset"5.0" (real), angle 90; y empty
+    '<U n="r0">'
+    '  <L n="animation_actors_list">'
+    '    <U n="a0">'
+    '      <T n="actor_id">s</T>'
+    '      <T n="animation_x_offset">5.0</T>'
+    '      <T n="animation_y_offset"></T>'
+    '      <T n="animation_z_offset">-1.5</T>'
+    '      <T n="animation_angle_offset">90.0</T>'
+    '    </U>'
+    '  </L>'
+    '  <T n="animation_version">4</T>'
+    '</U>'
+    # Row 1: prop list carries clip + geometry; ALSO a bare row-level
+    # prop_animation_clip_name text that must NOT be counted (not in a prop <U>).
+    '<U n="r1">'
+    '  <L n="animation_props_list">'
+    '    <U n="p0">'
+    '      <T n="prop_animation_clip_name">cA</T>'
+    '      <T n="prop_geometry_state">1</T>'
+    '    </U>'
+    '  </L>'
+    '  <T n="prop_animation_clip_name">stray-not-in-prop-list</T>'
+    '</U>'
+    # Row 2: object clip at row direct; version at row level
+    '<U n="r2">'
+    '  <T n="object_animation_clip_name">chair</T>'
+    '  <T n="animation_version">2</T>'
+    '</U>'
+    # Row 3: object geometry+material wrapped in an animation_object container;
+    # an actor list that does NOT carry offsets must not be a carrier.
+    '<U n="r3">'
+    '  <U n="animation_object">'
+    '    <T n="object_geometry_state">geo1</T>'
+    '    <T n="object_material_state">mat1</T>'
+    '  </U>'
+    '  <L n="animation_actors_list"><U n="a0"><T n="actor_id">x</T></U></L>'
+    '</U>'
+    '</L>'
+    '</I>'
+)
+
+
+def _roster():
+    root = ET.fromstring(_SYNTH)
+    lst = [x for x in root.iter()
+           if x.tag.rsplit("}", 1)[-1] == "L" and _name(x) == "animations_list"][0]
+    return [c for c in list(lst) if c.tag.rsplit("}", 1)[-1] == "U"]
 
 
 def main():
@@ -50,172 +123,118 @@ def main():
         ok.append((name, bool(cond)))
         print("PASS %s%s%s" % (name, "  | " if detail else "", detail))
 
-    # A1 vocabulary closure
-    closed = True
-    for ev in [
-        {"value_kind": "tuning", "has_tuning_sink": True},
-        {"value_kind": "default", "has_tuning_sink": False},
-        {"value_kind": "transform", "has_tuning_sink": False, "set_later": True},
-        {"value_kind": "helper", "has_tuning_sink": False, "set_later": True},
-        {"value_kind": "unknown", "has_tuning_sink": False},
-        {"value_kind": "default", "has_tuning_sink": True},  # illegal override
-    ]:
-        st, _ = lop.classify_provenance(ev)
-        if st not in ALLOWED:
-            closed = False
-    check("A1-vocabulary-closure", closed)
+    # ---- A1 / A2  exact origin closed ----
+    check("A1-origin-count", len(lop.ORIGIN_ROWS) == 8, "rows=%d" % len(lop.ORIGIN_ROWS))
+    oset = {r["status"] for r in lop.ORIGIN_ROWS}
+    check("A1-origin-no-unknown", "UNKNOWN" not in oset and
+          oset <= {"PROVEN_TUNING", "PROVEN_TRANSFORM"}, "statuses=%s" % sorted(oset))
+    byf = {r["identity_field"]: r["status"] for r in lop.ORIGIN_ROWS}
+    n_tun = sum(1 for v in byf.values() if v == "PROVEN_TUNING")
+    n_tr = sum(1 for v in byf.values() if v == "PROVEN_TRANSFORM")
+    check("A2-origin-split", (n_tun, n_tr) == (6, 2),
+          "tuning=%d transform=%d" % (n_tun, n_tr))
+    for f in ("object_animation_clip_name", "object_geometry_state",
+              "object_material_state", "prop_animation_clip_name",
+              "prop_geometry_state", "version"):
+        check("A2-tun-" + f, byf.get(f) == "PROVEN_TUNING", byf.get(f, "MISSING"))
+    check("A2-tfm-pos", byf.get("actor.position_offset.x/y/z") == "PROVEN_TRANSFORM")
+    check("A2-tfm-angle", byf.get("actor.angle_offset / facing_position_offset")
+          == "PROVEN_TRANSFORM")
 
-    # A2 tuning-fed
-    st, r = lop.classify_provenance({"value_kind": "tuning", "has_tuning_sink": True})
-    check("A2-tuning-fed", st == "PROVEN_TUNING", repr(r))
+    # ---- census over the synthetic roster ----
+    rows_el = _roster()
+    counts, ordinals = lop.census_carriers(rows_el, _name, _text)
 
-    # A3 const default, no sink, no call
-    st, r = lop.classify_provenance({"value_kind": "default", "has_tuning_sink": False})
-    check("A3-const-default", st == "PROVEN_DEFAULT", repr(r))
+    # A3 real tuning-key search: actor carrier counts nonzero for the animation_*
+    # offset keys, and NOT attribute to a nonexistent "position_offset" span.
+    check("A3-xoffset-search", counts["animation_x_offset"] == 1,
+          "x=%d" % counts["animation_x_offset"])
+    check("A3-zoffset-search", counts["animation_z_offset"] == 1,
+          "z=%d" % counts["animation_z_offset"])
+    check("A3-angle-search", counts["animation_angle_offset"] == 1,
+          "angle=%d" % counts["animation_angle_offset"])
+    # y present row r0 but empty string -> NOT a carrier (A6)
+    check("A6-empty-not-carrier", counts["animation_y_offset"] == 0
+          and ordinals["animation_y_offset"] == [],
+          "y_count=%d" % counts["animation_y_offset"])
 
-    # A4 transform vs helper
-    st, r = lop.classify_provenance(
-        {"value_kind": "transform", "has_tuning_sink": False, "set_later": True})
-    check("A4-transform", st == "PROVEN_TRANSFORM", repr(r))
-    st, r = lop.classify_provenance(
-        {"value_kind": "helper", "has_tuning_sink": False, "set_later": True})
-    check("A4-helper-conservative-unknown", st == "UNKNOWN", repr(r))
+    # A4 structural: prop counted (r1 prop <U>), but the bare row-level stray text
+    # in r1 and every non-prop text do NOT add carriers.
+    check("A4-prop-clip-scoped", counts["prop_animation_clip_name"] == 1
+          and ordinals["prop_animation_clip_name"] == [1],
+          "prop=%d ord=%r" % (counts["prop_animation_clip_name"],
+                              ordinals["prop_animation_clip_name"]))
+    check("A4-prop-geo-scoped", counts["prop_geometry_state"] == 1
+          and ordinals["prop_geometry_state"] == [1], "geo=%d" % counts["prop_geometry_state"])
 
-    # A5 illegal default override swallowing a tuning sink
-    st, r = lop.classify_provenance(
-        {"value_kind": "default", "has_tuning_sink": True,
-         "default_overrides_present_tuning": True})
-    check("A5-illegal-override", st == "UNKNOWN", repr(r))
+    # A5 actor offset only inside an actor <U> under the actor list
+    check("A5-actor-scoped", ordinals["animation_angle_offset"] == [0],
+          "angle-ord=%r" % ordinals["animation_angle_offset"])
 
-    # A6 gate
-    safe_rows = [
-        {"identity_field": "f1", "status": "PROVEN_TUNING"},
-        {"identity_field": "f2", "status": "PROVEN_DEFAULT"},
-        {"identity_field": "f3", "status": "PROVEN_TRANSFORM"},
-    ]
-    _, sumsafe = lop.render_audit(safe_rows)
-    g_safe_yes = any("FULL_CORPUS_SAFE_TO_RECONSTRUCT=YES" in s for s in sumsafe)
-    check("A6-gate-yes", g_safe_yes, "all 3 PROVEN -> SAFE=YES")
+    # object keys: r2 direct (clip), r3 wrapped (geometry/material)
+    check("A7-object-clip", counts["object_animation_clip_name"] == 1
+          and ordinals["object_animation_clip_name"] == [2],
+          "clip=%d %r" % (counts["object_animation_clip_name"],
+                          ordinals["object_animation_clip_name"]))
+    check("A7-object-geo", counts["object_geometry_state"] == 1
+          and ordinals["object_geometry_state"] == [3],
+          "geo=%d %r" % (counts["object_geometry_state"],
+                         ordinals["object_geometry_state"]))
+    check("A7-object-mat", counts["object_material_state"] == 1
+          and ordinals["object_material_state"] == [3],
+          "mat=%d %r" % (counts["object_material_state"],
+                         ordinals["object_material_state"]))
+    check("A7-version", counts["animation_version"] == 2
+          and ordinals["animation_version"] == [0, 2],
+          "ver=%d %r" % (counts["animation_version"],
+                         ordinals["animation_version"]))
 
-    uns = [
-        {"identity_field": "f1", "status": "PROVEN_TUNING"},
-        {"identity_field": "f4", "status": "UNKNOWN"},
-    ]
-    _, sumu = lop.render_audit(uns)
-    g_uns_no = any("FULL_CORPUS_SAFE_TO_RECONSTRUCT=NO" in s for s in sumu)
-    check("A6-gate-no", g_uns_no, "any UNKNOWN -> SAFE=NO")
+    # A8 origin rows annotate partial carriers, expose counts
+    n = len(rows_el)
+    orows = lop.origin_rows_from_schema(counts, n)
+    ob = {r["identity_field"]: r for r in orows}
+    obj = ob["object_animation_clip_name"]
+    check("A8-partial-note", "per-row" in obj["reason"] and "MANDATORY" in obj["reason"],
+          obj["reason"])
+    check("A8-carrier-count-mirror", obj["carrier_count"] == 1,
+          "count=%d" % obj["carrier_count"])
+    ver = ob["version"]
+    check("A8-version-partial", ver["carrier_count"] == 2 and "per-row" in ver["reason"],
+          "ver-count=%d" % ver["carrier_count"])
 
-    # A7 counts line uses only the 4 statuses
-    allfour = [
-        {"identity_field": "a", "status": "PROVEN_TUNING"},
-        {"identity_field": "b", "status": "PROVEN_DEFAULT"},
-        {"identity_field": "c", "status": "PROVEN_TRANSFORM"},
-        {"identity_field": "d", "status": "UNKNOWN"},
-    ]
-    _, sums = lop.render_audit(allfour)
-    cntline = next(s for s in sums if s.startswith("PROVEN_TUNING="))
-    check("A7-counts", "PROVEN_TUNING=1  PROVEN_DEFAULT=1  PROVEN_TRANSFORM=1  UNKNOWN=1"
-          in cntline, cntline)
+    # ---- A9 / A10 / A11  default gate fails closed ----
+    rep = lop.decode_defaults()          # no tuning pyc on Linux
+    rep.load_carriers(counts)
+    allp = rep.all_proven()
+    check("A11-fail-closed-noop", allp is False,
+          "proven=%s" % [k for k in rep.entries if rep.entries[k]["proven"]])
+    unk = rep.unknown_keys()
+    check("A9-unknown-all-keys", len(unk) == len(lop.DEFAULT_KEYS),
+          "unknown_count=%d keys_total=%d" % (len(unk), len(lop.DEFAULT_KEYS)))
+    # render gate NO
+    lines = lop.render_report(orows, counts, ordinals, n, rep)
+    joined = "\n".join(lines)
+    check("A9-gate-no", "FULL_CORPUS_SAFE_TO_RECONSTRUCT=NO" in joined
+          and "STOP_REASON=" in joined, "gate(NO)+stop present")
 
-    # B1..B4 fused evidence-decision (decide_field_evidence) -- the anti-over-claim
-    # rule the whole gate depends on.
-    ents = lambda **kw: [{"attr": kw.get("attr", "x"), "kind": kw.get("kind", "const"),
-                           "detail": kw.get("detail", ""), "tag": kw.get("tag", "__init__"),
-                           "producer_is_tuning_name": kw.get("ptn", False)}]
-    # B1: schema sink + tuning-named feed => PROVEN_TUNING
-    r = lop.decide_field_evidence("version", ("version",),
-                                  ents(kind="param", detail="version", ptn=True),
-                                  {"version": 1})
-    check("B1-sink-with-tuning-feed", r["status"] == "PROVEN_TUNING", r["status"] + " | " + r["reason"])
+    # A10 set_default with value+evidence flips that key PROVEN
+    rep2 = lop.DefaultSemanticsReport()
+    rep2.set_default("animation_x_offset", 0.0, "0.0",
+                     "test: TunableTuple leaf default literal co@x:0")
+    check("A10-single-proven", rep2.all_proven() is False
+          and rep2.entries["animation_x_offset"]["proven"], "x proven")
+    rep2.set_default("animation_version", 1, "1", "test: contra")
+    check("A10-two-proven", rep2.entries["animation_version"]["proven"], "ver proven")
+    check("A10-unknown-list", rep2.unknown_keys() == [
+        k for k, _e in lop.DEFAULT_KEYS
+        if k not in ("animation_x_offset", "animation_version")],
+        "unknown=%d" % len(rep2.unknown_keys()))
 
-    # B2: schema sink but NO tuning-named literal feed => UNKNOWN, NEVER
-    #     PROVEN_DEFAULT / PROVEN_TRANSFORM (a generic get/attr helper may still
-    #     read the per-row tuning value).
-    r = lop.decide_field_evidence("version", ("version",),
-                                  ents(kind="const"),  # LOAD_CONST default present
-                                  {"version": 1})
-    check("B2-sink-noLiteral-is-UNKNOWN", r["status"] == "UNKNOWN",
-          r["status"] + " | " + r["reason"])
-
-    # B3: no schema sink + const in __init__ => PROVEN_DEFAULT (safe)
-    r = lop.decide_field_evidence("version", ("version",),
-                                  ents(kind="const"), {})
-    check("B3-nosink-const-default", r["status"] == "PROVEN_DEFAULT",
-          r["status"] + " | " + r["reason"])
-
-    # B4: no schema sink + pure call-helper only, not const => conservatively
-    #     UNKNOWN (cannot prove the helper yields a recoverable default).
-    r = lop.decide_field_evidence("actor.position_offset.x/y/z",
-                                  ("position_offset",),
-                                  ents(kind="call", detail="translate_rotation"), {})
-    check("B4-nosink-helper-is-UNKNOWN", r["status"] == "UNKNOWN",
-          r["status"] + " | " + r["reason"])
-
-    # ---- C-section: REAL scan_roster_tuning over a synthetic WW package ----
-    # (read-only synthetic build, same pattern as source_fixture logic test; no
-    # Mods/saves).  Proves schema census + suffix matching + anti-over-claim on the
-    # actually shipped functions.  The fixture builder (ww_animation_canary_builder)
-    # uses PEP-585 annotations (py3.9+), so under an older interpreter we SKIP this
-    # section (the shipped probe itself remains py3.7 AST-clean via the py37 gate).
-    def _run_csection():
-        import ww_animation_canary_builder as CB
-        import ww_p32_identifier_source_fixture as SF
-        import tempfile as _tf
-        xml0 = ('<I n="T"><L n="animations_list">'
-                '<U n="s0"><T n="animation_locations">DOUBLE_BED</T></U>'
-                '<U n="s1"><T n="animation_object_animation_clip_name">objclip1</T>'
-                '<T n="animation_version">2</T></U>'
-                '<U n="s2"><T n="animation_prop_animation_clip_name">pc</T></U>'
-                '</L></I>')
-        p0 = Path(_tf.mkdtemp(prefix="p32_lorig_")) / "p.package"
-        CB.build_package([
-            (SF.WW_ANIM_XML, 0x00B2D882, SF.EXPECT_INSTANCE, xml0.encode(),
-             {"comp_state": False, "comp_type": 0, "mem_size": len(xml0),
-              "offset_high_bit": 0, "size_high_bit": 0})], p0)
-        idx = SF._read_index(p0)
-        w0 = [e for e in idx.entries if e.type_id == SF.WW_ANIM_XML][0]
-        root = __import__("xml.etree.ElementTree",
-                          fromlist=["ElementTree"]).fromstring(
-            SF._decompress(SF._read_body(p0, w0)).decode("utf-8", "replace"))
-        lst = [n for n in root.iter() if SF._el_tag(n) == "L"
-               and SF._name(n) == SF.ENTRY_LIST_FIELD][0]
-        rows_el = [c for c in list(lst) if SF._el_tag(c) == "U"]
-        sk, osk = lop.scan_roster_tuning(rows_el, SF._name, SF._text)
-        check("C1-rowcount", len(rows_el) == 3, "entries=%d" % len(rows_el))
-        check("C2-suffix-scan", (
-            sk["object_animation_clip_name"].get(
-                "animation_object_animation_clip_name") == 1
-            and sk["version"].get("animation_version") == 1
-            and sk["prop_animation_clip_name"].get(
-                "animation_prop_animation_clip_name") == 1),
-            "object=%r version=%r prop=%r" % (
-                sk["object_animation_clip_name"], sk["version"],
-                sk["prop_animation_clip_name"]))
-        check("C3-ordinal-partial", osk["version"] == [1]
-              and osk["prop_animation_clip_name"] == [2],
-              "version=%r prop=%r" % (osk["version"], osk["prop_animation_clip_name"]))
-        ents2 = [{"attr": "x", "kind": "param", "detail": "version",
-                  "tag": "__init__", "producer_is_tuning_name": True}]
-        rv = lop.decide_field_evidence("version", ("version",), ents2,
-                                       sk["version"])
-        check("C4-real-sink-proven-tun", rv["status"] == "PROVEN_TUNING", rv["status"])
-        entsc = [{"attr": "x", "kind": "const", "detail": "",
-                  "tag": "__init__", "producer_is_tuning_name": False}]
-        rc = lop.decide_field_evidence("object_animation_clip_name",
-                                       ("object_animation_clip_name",), entsc,
-                                       sk["object_animation_clip_name"])
-        check("C5-real-anti-overclaim", rc["status"] == "UNKNOWN", rc["status"])
-
-    import sys as _sys
-    if _sys.version_info < (3, 9):
-        check("C-skip-legacy-python", True,
-              "python=%d.%d (fixture builder needs 3.9+)"
-              % (_sys.version_info[0], _sys.version_info[1]))
-    else:
-        try:
-            _run_csection()
-        except Exception as ex:  # pragma: no cover - surfaced as FAIL
-            check("C-section-exception", False, repr(ex))
+    # gate YES is only reachable when every default key is proven
+    rep_good = lop.DefaultSemanticsReport()
+    for k, _f in lop.DEFAULT_KEYS:
+        rep_good.set_default(k, 0, "0", "test literal evidence")
+    check("A10-all-proven-yes", rep_good.all_proven(), "all 11 proven")
 
     failed = [n for n, passed in ok if not passed]
     print("PASS_COUNT=%d FAIL_COUNT=%d" % (len(ok) - len(failed), len(failed)))

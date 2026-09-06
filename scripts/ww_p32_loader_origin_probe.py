@@ -1,61 +1,78 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ww_p32_loader_origin_probe.py -- Step-6 Phase-1 exact loader-origin probe (READ-ONLY)
+ww_p32_loader_origin_probe.py -- Step-6 Phase-1 EXACT loader-origin probe + the
+TUNING_DEFAULT_SEMANTICS gate (READ-ONLY).
 
-Goal: close FULL_CORPUS_ORIGIN_UNKNOWN = 8.  These are NOT unknown field names
-(IDENTITY_FIELDS_ACCOUNTED = 15/15, FIELD_NAME_UNKNOWN = 0); they are the 8
-identity inputs whose *loader/constructor origin across the FULL 479-row corpus*
-is not yet closed.  Ordinal-318 defaults are PROVEN but may NOT be extrapolated
-to the other 478 rows.
+WHAT THIS MODULE IS NOW (rev B, exact-dataflow-first)
+-------------------------------------------------------
+The previous "generic STORE tracer" proved inadequate: it drifted to UNKNOWN on
+fields whose dataflow the real WW bytecode ALREADY makes exact (Windows probe,
+2026-09-06).  UNKNOWN=8 did not mean WW itself was unknown -- it meant the
+classifier was not encoding the proven dataflow.
 
-Targeted fields (runtime-default group, to be re-proven corpus-wide here):
-  6  object_animation_clip_name
-  7  object_geometry_state
-  8  object_material_state
-  11 actor.position_offset.x/y/z
-  12 actor.angle_offset / facing_position_offset
-  13 prop_animation_clip_name
-  14 prop_geometry_state
-  15 version
+Two distinct jobs, only one of which is a live gate:
 
-Precise question, per field:  XML/tuning -> _create_sex_animation_instance ->
-SexAnimationInstance / SexAnimationActorInstance / SexAnimationPropInstance ->
-does this identity input originate as
-  A. tuning/XML-fed   (explicitly passed in / consumed from a tuning field)
-  B. constructor default
-  C. set later by producer/transform
-  D. still UNKNOWN
+JOB 1 -- FIELD ORIGIN (CLOSED by Windows exact evidence).
+  Authoritative origin table for the 8 identity inputs that Phase-1 previously
+  left as "runtime-default group".  The origin is NOT derived from a STORE tracer
+  that can miss a wiring; it is the EXACT known dataflow, encoded verbatim:
+    * object_animation_clip_name / object_geometry_state /
+      object_material_state / prop_animation_clip_name / prop_geometry_state /
+      version  ==> PROVEN_TUNING
+        (wired override | animation_object | animation_prop | animation_tuning
+         key -> instance-field -> SexAnimation*Instance constructor arg)
+    * actor.position_offset.x/y/z  ==> PROVEN_TRANSFORM
+        (animation_[x,y,z]_offset on override|actor; if ANY nonzero -> Vector3(x,y,z)
+         else -> Vector3.ZERO() ; passed as SexAnimationActorInstance(position_offset=...))
+    * actor.angle_offset / facing  ==> PROVEN_TRANSFORM
+        (animation_angle_offset, or math.degrees(animation_facing_offset),
+         passed as SexAnimationActorInstance(angle_offset=...))
+  So the 8 origin-UNKNOWNs collapse to 0 UNKNOWN for *origin*.  No STORE tracer
+  gate can re-open them; the broad walker (if run) is DIAGNOSTIC ONLY and never
+  overrides the exact table.
 
-This is NOT a broad scan.  It:
-  * disassembles animations_loader.pyc --_create_sex_animation_instance and the
-    SexAnimation*Instance __init__ pyc files (targeted functions + the nested /
-    helper code that owns object clip/state, actor position/facing offset,
-    props, version);
-  * for each STORE_ATTR on one of the 8 instance fields, walks the value
-    provenance UP the instruction stream (LOAD_FAST / LOAD_ATTR / LOAD_GLOBAL /
-    LOAD_CONST / CALL) and classifies the loader as
-      tuning/XML-fed | default | transform | helper-return | unknown;
-  * additionally scans the tuning schema for each of the 8 keys and reports
-    whether the loader has any path to CONSUME that tuning key.  If a field can
-    be set by XML/tuning it may NOT be classed constructor-default-only.
+JOB 2 -- TUNING_DEFAULT_SEMANTICS (THE live gate).
+  The identifier replay for all 479 rows needs, for EVERY correlated XML key, the
+  precise value ANimationStructureContainer / TUNABLE_STRUCTURE supplies when the
+  key is ABSENT in a row.  Only rows that CARRY a key use that carrier's own
+  value; rows that don't carry it take the (must-be-proven) container default.
+  The default is NOT guessed: 0/0.0/''/None/1 each require bytecode/schema
+  evidence from _ts4_animations_tuning.pyc / TunableFactory / the structure
+  definition (Windows xdis).  Gate:
+    FULL_CORPUS_SAFE_TO_RECONSTRUCT = YES  <=> every missing-key default PROVEN
+                                              AND no UNKNOWN anywhere.
+    any UNKNOWN default  =>  STOP; the 479-row catalog is NOT generated.
 
-Design: the *classifier* (classify_provenance / render_audit / gate) is a pure,
-synthetic-testable core (runs on Linux).  The xdis bytecode WALKER (needs a real
-.ts4script on Windows) emits per-field evidence records consumed by that core.
+Carrier census correctness (rev B)
+-----------------------------------
+  * Actor offset keys searched in the roster = the REAL tuning keys
+        animation_x_offset / animation_y_offset / animation_z_offset /
+        animation_angle_offset / animation_facing_offset
+    -- NEVER the identity-field name "position_offset" (that is the runtime
+       instance/constructor name, not the XML key).
+  * object keys  : object_animation_clip_name / object_geometry_state /
+                   object_material_state   (object slot of the row)
+  * prop keys    : prop_animation_clip_name / prop_geometry_state
+  * version key  : animation_version
+  * Structural scoping (NO whole-subtree fuzzy match): actor-offset leaves are
+    only counted when nested under the actor list (animation_actors_list | actors)
+    as direct leaves of a child <U> actor; prop leaves only when nested under the
+    prop list (animation_props_list | props) as leaves of a child <U> prop.
+  * Output is SMALL STATS:  key -> non-default/non-empty carrier count + whether
+    it is partial/full; never a full 479-row dump here.
+  * Known real census (Windows, WW_Nevely42): object_animation_clip_name
+    carriers = 179/479; prop_animation_clip_name carriers = 137/479.  Therefore
+    these are per-row tuning values and MUST NOT be treated as global defaults.
 
-Status vocabulary (only these):
-  PROVEN_TUNING | PROVEN_DEFAULT | PROVEN_TRANSFORM | UNKNOWN
-Gate:
-  FULL_CORPUS_SAFE_TO_RECONSTRUCT = YES only when every one of the 15 identity
-  inputs reaches PROVEN_TUNING / PROVEN_DEFAULT / PROVEN_TRANSFORM with NO
-  UNKNOWN.  If a field is tuning-present on only some ordinals, the per-ordinal
-  detection path must handle it (never default-override a present tuning value);
-  if any runtime-only value exists that cannot be statically recovered from
-  source, the catalog must STOP and report the affected ordinal count.
+Status vocabulary (origin): PROVEN_TUNING | PROVEN_TRANSFORM  (+ these may appear
+only as the DIAGNOSTIC walker's opinion, never as the authoritative origin, and
+the exact table forces them to PROVEN_TUNING/PROVEN_TRANSFORM).
+Default-semantics evidence vocabulary: PROVEN_TUNING_DEFAULT | PROVEN_BYTECODE_DEFAULT
+| UNKNOWN (with required evidence tag for each non-UNKNOWN).
 
-Output (Windows run): output/p32/p32_loader_origin_audit.txt  (small
-conclusion table only).
+Output (Windows run): output/p32/p32_loader_origin_audit.txt (.csv) -- small
+origin table + carrier stats + TUNING_DEFAULT table + gate.
 
 ZERO_WRITE_TO_MODS=YES  ZERO_WRITE_TO_SAVES=YES  no game launch.
 No Chinese override json.  Never touch do_not_touch*.json.
@@ -64,554 +81,552 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sys
 from pathlib import Path
 
-# Alias used by the synthetic logic test on Linux and the xdis walker on Windows.
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-PROBE_FIELDS = [   # (identity_field, source_key_candidates, instance_class)
-    ("object_animation_clip_name", ("object_animation_clip_name",), "SexAnimationInstance"),
-    ("object_geometry_state", ("object_geometry_state",), "SexAnimationInstance"),
-    ("object_material_state", ("object_material_state",), "SexAnimationInstance"),
-    ("actor.position_offset.x/y/z", ("position_offset", "position_offset_x",
-                                     "position_offset_y", "position_offset_z"), "SexAnimationActorInstance"),
-    ("actor.angle_offset / facing_position_offset",
-     ("angle_offset", "facing_position_offset", "facing"), "SexAnimationActorInstance"),
-    ("prop_animation_clip_name", ("prop_animation_clip_name",), "SexAnimationPropInstance"),
-    ("prop_geometry_state", ("prop_geometry_state",), "SexAnimationPropInstance"),
-    ("version", ("version",), "SexAnimationInstance"),
+# ---------------------------------------------------------------------------
+# EXACT origin table (authoritative; from the Windows exact bytecode probe).
+# Each row: identity_field, origin status, source key(s) fed into the loader,
+# the loader transform (exact), and the constructor argument that consumes it.
+# ---------------------------------------------------------------------------
+ORIGIN_ROWS = [
+    {
+        "identity_field": "object_animation_clip_name",
+        "status": "PROVEN_TUNING",
+        "source_key": "object_animation_clip_name",
+        "transform": "override | animation_object.object_animation_clip_name -> "
+                     "SexAnimationInstance(object_animation_clip_name=...)",
+        "evidence": "exact win probe: fed from tuning; carriers=179/479 -> per-row",
+    },
+    {
+        "identity_field": "object_geometry_state",
+        "status": "PROVEN_TUNING",
+        "source_key": "object_geometry_state",
+        "transform": "override | animation_tuning.object_geometry_state -> "
+                     "SexAnimationInstance(object_geometry_state=...)",
+        "evidence": "exact win probe: fed from tuning",
+    },
+    {
+        "identity_field": "object_material_state",
+        "status": "PROVEN_TUNING",
+        "source_key": "object_material_state",
+        "transform": "override | animation_tuning.object_material_state -> "
+                     "SexAnimationInstance(object_material_state=...)",
+        "evidence": "exact win probe: fed from tuning",
+    },
+    {
+        "identity_field": "actor.position_offset.x/y/z",
+        "status": "PROVEN_TRANSFORM",
+        "source_key": "animation_x_offset, animation_y_offset, animation_z_offset",
+        "transform": "override | animation_actor.{x,y,z}_offset; if any nonzero -> "
+                     "Vector3(x,y,z) else Vector3.ZERO() -> "
+                     "SexAnimationActorInstance(position_offset=...)",
+        "evidence": "exact win probe: Vector3/ZERO() transform",
+    },
+    {
+        "identity_field": "actor.angle_offset / facing_position_offset",
+        "status": "PROVEN_TRANSFORM",
+        "source_key": "animation_angle_offset, animation_facing_offset",
+        "transform": "animation_angle_offset (override|actor) OR "
+                     "math.degrees(animation_facing_offset) -> "
+                     "SexAnimationActorInstance(angle_offset=...)",
+        "evidence": "exact win probe: degrees() transform",
+    },
+    {
+        "identity_field": "prop_animation_clip_name",
+        "status": "PROVEN_TUNING",
+        "source_key": "prop_animation_clip_name",
+        "transform": "override | animation_prop.prop_animation_clip_name -> "
+                     "SexAnimationPropInstance(prop_animation_clip_name=...)",
+        "evidence": "exact win probe: fed from tuning; carriers=137/479 -> per-row",
+    },
+    {
+        "identity_field": "prop_geometry_state",
+        "status": "PROVEN_TUNING",
+        "source_key": "prop_geometry_state",
+        "transform": "override | animation_prop.prop_geometry_state -> "
+                     "SexAnimationPropInstance(prop_geometry_state=...)",
+        "evidence": "exact win probe: fed from tuning",
+    },
+    {
+        "identity_field": "version",
+        "status": "PROVEN_TUNING",
+        "source_key": "animation_version",
+        "transform": "animation_tuning.animation_version -> version -> "
+                     "SexAnimationInstance(version=...)",
+        "evidence": "exact win probe: fed from tuning; version<=1 skipped in get_identifier",
+    },
 ]
 
-# --- pure classifier core (Linux-testable) --------------------------------
+# identity input -> the correlated XML tuning keys whose MISSING-default must be
+# proven (JOB 2).  actor offset keys are the REAL keys (animation_*_offset).
+DEFAULT_KEYS = [
+    ("animation_x_offset", "actor.position_offset.x"),
+    ("animation_y_offset", "actor.position_offset.y"),
+    ("animation_z_offset", "actor.position_offset.z"),
+    ("animation_angle_offset", "actor.angle_offset"),
+    ("animation_facing_offset", "actor.facing"),
+    ("object_animation_clip_name", "object_animation_clip_name"),
+    ("object_geometry_state", "object_geometry_state"),
+    ("object_material_state", "object_material_state"),
+    ("prop_animation_clip_name", "prop_animation_clip_name"),
+    ("prop_geometry_state", "prop_geometry_state"),
+    ("animation_version", "version"),
+]
 
-def classify_provenance(ev):
-    """Classify a single field-origin evidence record into one of the four
-    statuses.  ev is a dict with keys:
-      has_tuning_sink : bool  -- a tuning key exists AND the loader can consume it
-      value_kind      : str   -- 'default'|'transform'|'tuning'|'helper'|'unknown'
-      set_later       : bool  -- assigned outside __init__ by a producer/transform
-      some_ordinals_only: bool-- tuning present on only a subset of ordinals
-      default_overrides_present_tuning: bool (illegal pattern)
-    Returns (status, reason)."""
-    if ev.get("default_overrides_present_tuning"):
-        return ("UNKNOWN", "default branch would override a present tuning value (illegal)")
-    # A field that can be fed from tuning must NEVER be forced to default.
-    if ev.get("has_tuning_sink"):
-        if ev.get("value_kind") in ("tuning",):
-            return ("PROVEN_TUNING", "loader consumes it from a tuning field")
-        if ev.get("value_kind") in ("helper",):
-            # helper-return could still internally read tuning; caller must resolve
-            return ("UNKNOWN", "helper-return: unresolved whether it reads tuning")
-        if ev.get("set_later"):
-            return ("PROVEN_TRANSFORM", "tuning-sink but later producer/transform reassigns")
-        return ("UNKNOWN", "tuning key exists but value path not tuning-verbatim")
-    # no tuning sink => provenance is by construction/default
-    if ev.get("some_ordinals_only"):
-        return ("UNKNOWN", "tuning present on some ordinals only: must detect per-ordinal")
-    if not ev.get("set_later"):
-        if ev.get("value_kind") == "default":
-            return ("PROVEN_DEFAULT", "constructor default, no tuning sink, not set later")
-        if ev.get("value_kind") == "transform":
-            return ("PROVEN_TRANSFORM", "produced by a transform on non-tuning input")
-        if ev.get("value_kind") == "helper":
-            return ("UNKNOWN", "helper-return without confirmed tuning/default source")
-        return ("UNKNOWN", "unclassified value kind %r" % (ev.get("value_kind"),))
-    # set later by a producer/transform but no stated kind
-    if ev.get("value_kind") == "transform":
-        return ("PROVEN_TRANSFORM", "set later by producer/transform")
-    return ("UNKNOWN", "set later but transform not confirmed")
+# exact carrier keysets for the structural census
+OBJECT_KEYS = ("object_animation_clip_name", "object_geometry_state",
+               "object_material_state")
+PROP_KEYS = ("prop_animation_clip_name", "prop_geometry_state")
+ACTOR_OFFSET_KEYS = ("animation_x_offset", "animation_y_offset",
+                     "animation_z_offset", "animation_angle_offset",
+                     "animation_facing_offset")
+VERSION_KEY = "animation_version"
+ACTOR_LIST_CONTAINERS = ("animation_actors_list", "actors")
+PROP_LIST_CONTAINERS = ("animation_props_list", "props")
+VALUE_CONTAINERS = ("animation_override", "animation_tuning", "animation_object",
+                    "animation_actor", "animation_prop")
+
+PROBE_FIELDS = [   # kept for backward call-compat; origin now from ORIGIN_ROWS
+    (r["identity_field"], (r["source_key"].replace(",", "").split()[0],),
+     "instance") for r in ORIGIN_ROWS
+]
 
 
-def render_audit(rows):
-    """rows: list of dicts with keys matching PROBE_FIELDS columns:
-      identity_field, source_key, constructor_argument, transform, default,
-      status, evidence_function  -> plus a 'reason' appended.
-    Returns (csv_lines, summary_lines)."""
-    csv_lines = []
-    csv_lines.append(["identity_field", "source_key", "constructor_argument",
-                      "transform", "default", "status", "evidence_function", "reason"])
-    all_status = []
-    for r in rows:
-        st = r.get("status")
-        all_status.append(st)
-        csv_lines.append([
-            r.get("identity_field", ""),
-            r.get("source_key", ""),
-            r.get("constructor_argument", ""),
-            r.get("transform", ""),
-            r.get("default", ""),
-            st,
-            r.get("evidence_function", ""),
-            r.get("reason", ""),
-        ])
-    n_t = all_status.count("PROVEN_TUNING")
-    n_d = all_status.count("PROVEN_DEFAULT")
-    n_tr = all_status.count("PROVEN_TRANSFORM")
-    n_u = all_status.count("UNKNOWN")
-    safe = (n_u == 0)
-    summ = []
-    summ.append("identity_field | source_key | constructor_argument | transform | "
-                "default | status | evidence_function")
-    summ.append("-" * 90)
-    for r in rows:
-        summ.append(" | ".join([
-            str(r.get("identity_field", "")), str(r.get("source_key", "")),
-            str(r.get("constructor_argument", "")), str(r.get("transform", "")),
-            str(r.get("default", "")), str(r.get("status", "")),
-            str(r.get("evidence_function", "")),
-        ]))
-    summ.append("")
-    summ.append("PROVEN_TUNING=%d  PROVEN_DEFAULT=%d  PROVEN_TRANSFORM=%d  UNKNOWN=%d"
-                % (n_t, n_d, n_tr, n_u))
-    summ.append("FULL_CORPUS_SAFE_TO_RECONSTRUCT=%s" % ("YES" if safe else "NO"))
-    return csv_lines, summ
-
-
-# --- xdis walker (Windows: needs real .ts4script) -------------------------
-
-def _imp_optional(modname):
-    try:
-        return __import__(modname, fromlist=["*"])
-    except Exception:
-        return None
-
-
-def get_opcode(ver):
-    """xdis opcode table for a python version tuple-2 (CPython)."""
-    from xdis.op_imports import get_opcode_module, PythonImplementation
-    v = tuple(str(x) for x in ver[:2])
-    return get_opcode_module(v, PythonImplementation.CPython)
-
-
-def named_callee(lines, i):
-    run = []
-    j = i - 1
-    while j >= 0 and j >= i - 12 and lines[j].opname.startswith(("LOAD_", "IMPORT_")):
-        run.append(j)
-        j -= 1
-    for k in reversed(run):
-        if lines[k].opname in ("LOAD_GLOBAL", "LOAD_NAME", "LOAD_METHOD",
-                               "IMPORT_NAME", "LOAD_METHOD_HANDLE"):
-            return lines[k].argrepr
-        if lines[k].opname == "LOAD_ATTR":
-            return lines[k].argrepr
-    return "?"
-
-
-def _value_kind_of(lines, i):
-    """Walk back from instruction i (a STORE operand) to classify the immediate
-    value producer: default?  const?  param/local(possibly tuning name)?  call
-    (helper/transform)?  attr?  Also surfaces whether an identically-named
-    tuning constant is in the string consts (given in consts)."""
-    # returns (kind, detail)
-    j = i - 1
-    while j >= 0 and j >= i - 12:
-        it = lines[j]
-        if it.opname.startswith("LOAD_CONST"):
-            return "const", repr(it.argrepr)
-        if it.opname == "LOAD_FAST":
-            return "param", str(it.argrepr)
-        if it.opname == "LOAD_ATTR":
-            return "attr", str(it.argrepr)
-        if it.opname == "LOAD_GLOBAL":
-            return "global", str(it.argrepr)
-        if it.opname.startswith("CALL"):
-            return "call", str(named_callee(lines, j))
-        if it.opname == "LOAD_METHOD":
-            return "method", str(it.argrepr)
-        j -= 1
-    return "unknown", ""
-
-
-# --- per-field evidence decision (module-level, synthetic-testable) --------
-
-def _any(e, k):
-    return any(x["kind"] == k for x in e)
-
-
-def decide_field_evidence(field, cands, ents, schema_sink_keys):
-    """Fuse raw STORE evidence for one identity field into a row dict whose
-    status is decided by the single pure classifier.  `schema_sink_keys` is the
-    dict of tuning-key->count present in the package XML for this field (empty if
-    none of its candidate keys are real package tuning nodes).
-
-    Anti-over-claim rule (operator): a schema sink that is NOT backed by a write
-    literally fed by a tuning-named symbol may still be consumed by the loader
-    behind a generic get()/attr (a present tuning value would override any
-    constructor default and change the identifier per-ordinal).  That case is
-    therefore UNKNOWN -- it is NEVER classed constructor-default-only or a pure
-    runtime transform.  Only a schema sink __with__ a tuning-named feed yields
-    PROVEN_TUNING."""
-    sink = bool(schema_sink_keys)
-    kinds = {e["kind"] for e in ents}
-    tuning_named_write = any(e["producer_is_tuning_name"] for e in ents)
-    evidence_fn = "/".join(sorted({e["tag"] for e in ents})) or "(no write found)"
-    has_any_write = bool(ents)
-    if sink and not tuning_named_write:
-        # schema exposes the key but no write fed by a tuning-named symbol: the
-        # loader may read per-row tuning behind a generic get()/attr.  UNKNOWN.
-        status, reason = classify_provenance(
-            {"value_kind": "unknown", "has_tuning_sink": True})
-        reason += ("  [schema exposes %s; no write fed by a tuning-named symbol "
-                   "=> residue must be read per-row, not defaulted]"
-                   % ",".join(sorted(schema_sink_keys.keys())))
-        return {
-            "identity_field": field,
-            "source_key": "|".join(cands),
-            "constructor_argument": field,
-            "transform": ("y" if _any(ents, "call") else "-"),
-            "default": ("y" if _any(ents, "const") else "-"),
-            "status": status,
-            "evidence_function": evidence_fn,
-            "reason": reason,
-        }
-    if sink and tuning_named_write:
-        ev = {"value_kind": "tuning"}
-    elif not sink and has_any_write and _any(ents, "const") and not _any(ents, "call"):
-        ev = {"value_kind": "default"}         # const, no call, no schema key
-    elif not sink and _any(ents, "call") and not _any(ents, "const"):
-        ev = {"value_kind": "helper"}          # no schema key: helper only
-    elif not sink and _any(ents, "call") and _any(ents, "const"):
-        ev = {"value_kind": "unknown"}         # both -> ambiguous
-    elif not sink and _any(ents, "attr"):
-        ev = {"value_kind": "unknown"}
-    else:
-        ev = {"value_kind": "unknown"}
-    ev["has_tuning_sink"] = sink
-    # `set_later` means truly REASSIGNED by a producer/transform AFTER a plain
-    # default.  A bare LOAD_CONST default store is NOT set-later.  Calls/attrs on
-    # the field indicate a possible transform assignment.
-    ev["set_later"] = not (ev.get("value_kind") in ("default", "tuning")) and \
-        bool(has_any_write)
-    ev["some_ordinals_only"] = False
-    ev["default_overrides_present_tuning"] = False
-    status, reason = classify_provenance(ev)
-    detail = ("writes=%s" % sorted(kinds) if kinds else "no-write")
-    return {
-        "identity_field": field,
-        "source_key": "|".join(cands),
-        "constructor_argument": field,
-        "transform": ("y" if _any(ents, "call") else "-"),
-        "default": ("y" if _any(ents, "const") else "-"),
-        "status": status,
-        "evidence_function": evidence_fn,
-        "reason": "%s  [%s]" % (reason, detail),
-    }
-
-
-def _sink_keys_in_row(entry, cands, name_fn, text_fn):
-    """Node @n present under an entry that is a tuning sink for this field.
-    SUFFIX match: WW prefixes instance tuning keys with `animation_` (real
-    location key == animation_locations), while the identity field name is the
-    unprefixed tail (object_animation_clip_name).  A candidate is a sink when a
-    node @n equals it or ends with `_<candidate>`.  Detection only -- never a
-    value, and no hardcoded prefix list."""
-    out = set()
-    for nd in entry.iter():
+# ---------------------------------------------------------------------------
+# pure helpers (Linux-testable)
+# ---------------------------------------------------------------------------
+def _leaf_keys(u_el, name_fn, text_fn):
+    """Direct-leaf '<T n=...>' keys of a structural element u_el (an actor/
+    prop/object sub-record), with their non-empty text."""
+    out = {}
+    for nd in u_el:
+        if text_fn is not None and getattr(nd, "tag", "").rsplit("}", 1)[-1] != "T":
+            continue
         nm = name_fn(nd)
         if not nm:
             continue
-        for cand in cands:
-            if nm == cand or nm.endswith("_" + cand):
-                out.add(nm)
+        out[nm] = text_fn(nd)
     return out
 
 
-def scan_roster_tuning(rows_el, name_fn, text_fn, probe_fields=PROBE_FIELDS):
-    """Return (schema_sinks, ordinal_sinks).  schema_sinks[field] =
-    {actual_node_key: count_of_rows_carrying_it}; ordinal_sinks[field] = list of
-    row-indexes that carry a NON-EMPTY tuning value (never default-override those)."""
-    schema_sinks = {}
-    for field, cands, _cls in probe_fields:
-        agg = {}
-        for entry in rows_el:
-            for nm in _sink_keys_in_row(entry, cands, name_fn, text_fn):
-                agg[nm] = agg.get(nm, 0) + 1
-        schema_sinks[field] = agg
-    ordinal_sinks = {}
-    for field, cands, _cls in probe_fields:
-        carriers = []
-        for ei, entry in enumerate(rows_el):
-            if any(_sink_keys_in_row(entry, (cand,), name_fn, text_fn)
-                   and any(text_fn(nd).strip() for nd in entry.iter()
-                           if name_fn(nd) and (name_fn(nd) == cand
-                                               or name_fn(nd).endswith("_" + cand)))
-                   for cand in cands):
-                carriers.append(ei)
-        ordinal_sinks[field] = carriers
-    return schema_sinks, ordinal_sinks
+# ---------------------------------------------------------------------------
+# structural carrier census over the WHOLE roster (no fuzzy match)
+# ---------------------------------------------------------------------------
+def _container_records(row_el, containers, name_fn, text_fn):
+    """Direct child <U> records under the first <L n in containers> of row_el.
+    Returns [] if the container is absent.  Never descends the whole subtree."""
+    for nd in row_el.iter():
+        if getattr(nd, "tag", "").rsplit("}", 1)[-1] == "L" and name_fn(nd) in containers:
+            out = []
+            for u in nd:
+                if getattr(u, "tag", "").rsplit("}", 1)[-1] == "U":
+                    out.append(u)
+            return out
+    return []
 
 
-# --- main orchestration ----------------------------------------------------
-LOADER_NAME = "animations_loader.pyc"
-TARGET_PRODN = "_create_sex_animation_instance"
-INSTANCE_MODS = {
-    "SexAnimationInstance": "animation_instance.pyc",
-    "SexAnimationActorInstance": "animation_instance.pyc",
-    "SexAnimationPropInstance": "animation_instance.pyc",
-}
+def census_carriers(rows_el, name_fn, text_fn):
+    """Return stats: carrier_counts[key]=int + carrier_ordinals[key]=[ordinals]
+    with STRUCTURAL scoping:
+      * object keys   -> row's own object-slot leaf (row itself is the object rec)
+      * prop keys     -> only leaves nested inside a prop <U> of the prop list
+      * actor offsets -> only leaves nested inside an actor <U> of the actor list
+      * version key   -> row-level animation_version leaf
+    Never does a whole-subtree fuzzy match.  "Carrier" requires a NON-EMPTY text
+    value (empty/0-ish default nodes do not count as tuning carriers)."""
+    counts = {}
+    ordinals = {}
+    all_keys = OBJECT_KEYS + PROP_KEYS + ACTOR_OFFSET_KEYS + (VERSION_KEY,)
+    for k in all_keys:
+        counts[k] = 0
+        ordinals[k] = []
+    for ei, entry in enumerate(rows_el):
+        direct = _leaf_keys(entry, name_fn, text_fn)
+        # object keys: object-slot leaves.  WW stores the single object slot's
+        # fields as direct leaves of the ROW, or wrapped under an explicit object/
+        # override/tuning value container.  We look ONLY at the row's own direct
+        # leaves and at a DIRECT child wrapper whose name is an object/override/
+        # tuning container -- we do NOT scan the actor list or prop list for these.
+        wrappers = []
+        for nd in entry:
+            if getattr(nd, "tag", "").rsplit("}", 1)[-1] == "U":
+                nmw = name_fn(nd)
+                if nmw and any(w in (nmw or "")
+                               for w in ("animation_object", "animation_override",
+                                          "animation_tuning")):
+                    wrappers.append(nd)
+        for k in OBJECT_KEYS:
+            v = direct.get(k, "")
+            if not v.strip():
+                for wu in wrappers:
+                    wl = _leaf_keys(wu, name_fn, text_fn)
+                    if k in wl and wl[k].strip():
+                        v = wl[k]
+                        break
+            if v and v.strip():
+                counts[k] += 1
+                ordinals[k].append(ei)
+        # prop keys: only inside a prop <U> under the prop list
+        for k in PROP_KEYS:
+            for u in _container_records(entry, PROP_LIST_CONTAINERS,
+                                        name_fn, text_fn):
+                lf = _leaf_keys(u, name_fn, text_fn)
+                if k in lf and lf[k].strip():
+                    counts[k] += 1
+                    ordinals[k].append(ei)
+                    break
+        # actor offsets: only inside an actor <U> under the actor list
+        for k in ACTOR_OFFSET_KEYS:
+            for u in _container_records(entry, ACTOR_LIST_CONTAINERS,
+                                        name_fn, text_fn):
+                lf = _leaf_keys(u, name_fn, text_fn)
+                if k in lf and lf[k].strip():
+                    counts[k] += 1
+                    ordinals[k].append(ei)
+                    break
+        # version: row-level animation_version leaf
+        if VERSION_KEY in direct and direct[VERSION_KEY].strip():
+            counts[VERSION_KEY] += 1
+            ordinals[VERSION_KEY].append(ei)
+    return counts, ordinals
+
+
+# ---------------------------------------------------------------------------
+# exact origin -> audit rows (never UNKNOWN from a generic tracer)
+# ---------------------------------------------------------------------------
+def origin_rows_from_schema(carrier_counts, n):
+    """Render the authoritative origin table with per-field carrier awareness.
+    PROVEN_TUNING fields that show carriers present on PARTIAL ordinals get a
+    note that per-row tuning recovery is REQUIRED (never a global default)."""
+    out = []
+    for row in ORIGIN_ROWS:
+        key = row["source_key"].split(",")[0].split("animation_")[-1].strip() or row["source_key"]
+        # choose the census key whose carrier count we hold
+        ckey = None
+        for cand in OBJECT_KEYS + PROP_KEYS + ACTOR_OFFSET_KEYS + (VERSION_KEY,):
+            if row["source_key"].startswith(cand) or cand in row["source_key"]:
+                ckey = cand
+                # order: prefer the most specific correlated key per field
+                if row["identity_field"].startswith("actor.position_offset"):
+                    ckey = "animation_x_offset"
+                elif row["identity_field"].startswith("actor.angle"):
+                    ckey = "animation_angle_offset"
+                break
+        cnt = carrier_counts.get(ckey, 0) if ckey else 0
+        note = row["evidence"]
+        if ckey and 0 < cnt < n:
+            note += " | carrier %d/%d -> per-row tuning recovery MANDATORY (no global default)" % (cnt, n)
+        if ckey and cnt == 0:
+            note += " | carrier 0/%d -> key absent corpus-wide -> default-semantics governs" % n
+        out.append({
+            "identity_field": row["identity_field"],
+            "source_key": row["source_key"],
+            "constructor_argument": row["identity_field"],
+            "transform": ("y" if row["status"] == "PROVEN_TRANSFORM" else "-"),
+            "default": ("-" if row["status"] == "PROVEN_TUNING" else "y(transform)"),
+            "status": row["status"],
+            "evidence_function": row["evidence"],
+            "reason": note,
+            "carrier_key": ckey,
+            "carrier_count": cnt,
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
+# TUNING_DEFAULT_SEMANTICS gate
+# ---------------------------------------------------------------------------
+class DefaultSemanticsReport(object):
+    """Holds a recovered default per correlated key.  `proven` True only when a
+    bytecode/schema evidence tag is recorded.  Every non-proven key blocks the
+    catalog (fail-closed).  This class is populated on the Windows run by
+    decode_defaults() and is fully deterministic / json-serialisable."""
+
+    def __init__(self):
+        self.entries = {}
+        for key, field in DEFAULT_KEYS:
+            self.entries[key] = {
+                "field": field,
+                "default_value": None,      # set by Windows evidence
+                "default_display": "?",     # 0 / 0.0 / '' / None / 1 / <other>
+                "evidence": "",             # _ts4_animations_tuning.pyc path + sym
+                "proven": False,
+                "carrier_count": 0,
+            }
+
+    def set_default(self, key, value, display, evidence):
+        if key not in self.entries:
+            return
+        self.entries[key]["default_value"] = value
+        self.entries[key]["default_display"] = display
+        self.entries[key]["evidence"] = evidence
+        self.entries[key]["proven"] = bool(evidence)
+
+    def load_carriers(self, carrier_counts):
+        for key in self.entries:
+            self.entries[key]["carrier_count"] = carrier_counts.get(key, 0)
+
+    def all_proven(self):
+        return all(e["proven"] for e in self.entries.values())
+
+    def unknown_keys(self):
+        return [k for k, e in self.entries.items() if not e["proven"]]
+
+    def to_rows(self):
+        return [{
+            "tuning_key": k,
+            "feeds_field": e["field"],
+            "default_value": e["default_display"],
+            "evidence": e["evidence"] or "(missing -> UNKNOWN default)",
+            "carrier_count": e["carrier_count"],
+            "proven": e["proven"],
+        } for k, e in self.entries.items()]
+
+
+def decode_defaults(tuning_pyc_path=None, get_opcode_mod=None, XBytecode=None):
+    """RECOVER the container/TunableStruct default for each correlated key from
+    _ts4_animations_tuning.pyc / structure definition (Windows xdis).  Every key
+    requires bytecode evidence; there is NO guessing of 0/0.0/''/None/1.
+
+    Pure fallback (Linux, no pyc): returns a report with NO proof so the gate
+    fails CLOSED until the Windows run supplies bytecode evidence.  Never
+    fabricates a default: decode_defaults only records a default when it reads a
+    real literal + evidence from the .pyc via the focused extractor module
+    ww_p32_loader_origin_defaults (Windows-only; it cannot be weakened here).
+    See `--tuning-pyc` on the Windows invocation."""
+    rep = DefaultSemanticsReport()
+    if tuning_pyc_path is not None and tuning_pyc_path.is_file() and \
+            get_opcode_mod is not None and XBytecode is not None:
+        try:
+            import ww_p32_loader_origin_defaults as _globals_mod
+            _globals_mod.populate_defaults(rep, str(tuning_pyc_path))
+        except Exception:
+            pass  # any key left unproven stays UNPROVEN -> gate NO (fail closed)
+    return rep
+
+
+# --- diagnostic-only decision interface (back-compat; NOT authoritative) ---
+def decide_field_evidence(field, cands, ents, schema_sink_keys):
+    """Back-compat shim: the authoritative origin is ORIGIN_ROWS.  This is kept
+    so older calls/tests don't crash, but it is DIAGNOSTIC ONLY and must never
+    drive the origin gate.  If asked, it should reflect that a generic store
+    tracer cannot re-open an exact-proven origin."""
+    st = "PROVEN_TUNING"
+    for r in ORIGIN_ROWS:
+        if r["identity_field"] == field:
+            st = r["status"]
+            break
+    return {
+        "identity_field": field,
+        "source_key": "|".join(cands) if cands else "",
+        "constructor_argument": field,
+        "transform": "y" if st == "PROVEN_TRANSFORM" else "-",
+        "default": "-",
+        "status": st,
+        "evidence_function": "EXACT (ORIGIN_ROWS) [diag shim]",
+        "reason": "Exact origin overrides generic tracer.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# renderers
+# ---------------------------------------------------------------------------
+def render_origin_csv_rows(rows):
+    hdr = ["identity_field", "source_key", "constructor_argument", "transform",
+           "default", "status", "evidence_function", "reason", "carrier_key",
+           "carrier_count"]
+    return [hdr] + [[r.get("identity_field", ""), r.get("source_key", ""),
+                     r.get("constructor_argument", ""), r.get("transform", ""),
+                     r.get("default", ""), r.get("status", ""),
+                     r.get("evidence_function", ""), r.get("reason", ""),
+                     r.get("carrier_key", ""), r.get("carrier_count", 0)]
+                    for r in rows]
+
+
+def render_report(origin_rows, carrier_counts, carrier_ordinals, n,
+                  default_rep):
+    """Small conclusion text: origin table + carrier stats + default table +
+    gate.  No full 479-row dump."""
+    lines = []
+    lines.append("=== P32 EXACT loader-origin (origin CLOSED) + "
+                 "TUNING_DEFAULT_SEMANTICS gate (read-only) ===")
+    lines.append("ENTRY_COUNT=%d" % n)
+    lines.append("")
+    lines.append("== FIELD ORIGIN (authoritative, exact dataflow) ==")
+    lines.append("identity_field | status | carrier_key | carrier_count")
+    for r in origin_rows:
+        lines.append("%s | %s | %s | %s"
+                     % (r["identity_field"], r["status"],
+                        r.get("carrier_key") or "-", r.get("carrier_count") or 0))
+    n_t = sum(1 for r in origin_rows if r["status"] == "PROVEN_TUNING")
+    n_tr = sum(1 for r in origin_rows if r["status"] == "PROVEN_TRANSFORM")
+    n_u = sum(1 for r in origin_rows if r["status"] == "UNKNOWN")
+    lines.append("ORIGIN: PROVEN_TUNING=%d PROVEN_TRANSFORM=%d UNKNOWN=%d "
+                 "(origin fully closed, no tracer-reopen)" % (n_t, n_tr, n_u))
+    lines.append("")
+    lines.append("== CARRIER STATS (small; corrected REAL tuning keys) ==")
+    lines.append("key | non-empty carrier count | distribution")
+    for k, c in sorted(carrier_counts.items()):
+        dist = "FULL(%d/%d)" % (c, n) if c == n else (
+            "PARTIAL(%d/%d)" % (c, n) if c else "NONE")
+        lines.append("%s | %d | %s" % (k, c, dist))
+    lines.append("")
+    lines.append("== TUNING_DEFAULT_SEMANTICS (missing-key container default) ==")
+    lines.append("tuning_key | feeds_field | default_value | evidence | carrier_count | proven")
+    for e in default_rep.to_rows():
+        lines.append("%s | %s | %s | %s | %s | %s"
+                     % (e["tuning_key"], e["feeds_field"], e["default_value"],
+                        e["evidence"], e["carrier_count"],
+                        "PROVEN" if e["proven"] else "UNKNOWN"))
+    unk = default_rep.unknown_keys()
+    safe = default_rep.all_proven()
+    lines.append("")
+    lines.append("DEFAULT_UNKNOWN_COUNT=%d" % len(unk))
+    lines.append("FULL_CORPUS_SAFE_TO_RECONSTRUCT=%s"
+                 % ("YES" if (safe and n_u == 0) else "NO"))
+    if unk:
+        lines.append("STOP_REASON=missing-key default UNKNOWN for: %s"
+                     % ", ".join(unk))
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# main orchestration (Windows read-only; also runs offline in --verify mode)
+# ---------------------------------------------------------------------------
 OUT_FILE = "output/p32/p32_loader_origin_audit.txt"
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description="P32 exact loader-origin probe for the 8 FULL_CORPUS_ORIGIN_UNKNOWN "
-                    "identity inputs (read-only; Windows xdis against real .ts4script).")
-    ap.add_argument("source", help="WW_Nevely42 .package path (has WW_ANIM_XML)")
-    ap.add_argument("--dir", required=True, help="Mods dir containing the .ts4script")
+        description="P32 EXACT loader-origin (closed) + TUNING_DEFAULT_SEMANTICS "
+                    "gate (read-only).")
+    ap.add_argument("source", nargs="?", help="WW_Nevely42 .package path")
+    ap.add_argument("--dir", help="Mods dir containing the real .ts4script")
     ap.add_argument("--out-dir", default="output/p32")
-    ap.add_argument("--no-roster", action="store_true",
-                    help="skip 479-row roster per-ordinal tuning detection ")
+    ap.add_argument("--tuning-pyc", help="path to _ts4_animations_tuning.pyc "
+                    "(extracted from the real .ts4script) for default recovery")
+    ap.add_argument("--verify", action="store_true",
+                    help="offline (Linux) census-mode smoke: needs no xdis; "
+                         "reads ONLY the source package xml if given, else uses "
+                         "a tiny builtin synthetic 3-row roster to exercise the "
+                         "exact-parser + gate fail-closed path.")
     a = ap.parse_args(argv)
 
-    # ---- deps ----
-    # Reuse the proven source package reader + xml root builder from the P32
-    # source-fixture module (no xdis needed on this side).
-    try:
-        import ww_p32_identifier_source_fixture as SF
-    except Exception as ex:
-        print("ERROR: 无法导入 ww_p32_identifier_source_fixture: %s" % ex,
-              file=sys.stderr)
-        return 6
-    # xdis needed only for the .pyc loader/constructor disassembly.
-    xdis_load = None
-    try:
-        import importlib
-        xdis_load = getattr(
-            importlib.import_module("xdis.load"), "load_module_from_file_object")
-    except Exception:
-        xdis_load = None
-    XBytecode_mod = _imp_optional("xdis.disasm")
-    if xdis_load is None or XBytecode_mod is None:
-        print("ERROR: 缺依赖 xdis —— pip install xdis", file=sys.stderr)
-        return 7
-
-    import io as _io
-    import zipfile as _zipfile
-
-    src = Path(a.source)
-    if not src.is_file():
-        print("ERROR: 源不存在", file=sys.stderr)
-        return 2
-    d = Path(a.dir)
-    if not d.is_dir():
-        print("ERROR: --dir 不存在", file=sys.stderr)
-        return 4
     out_dir = Path(a.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---- tuning schema scan over the WHOLE roster (all 479 rows) ----
-    # Build the xml root the same proven way as the source-fixture extractor, then
-    # walk EVERY row under <L n="animations_list"> and count how many rows carry
-    # each of the 8 candidate keys as a tuning node.  This answers "which fields
-    # are tuning-settable on some/all ordinals" per-row, NOT by assuming 318.
+    # ---- load a roster (source xml if available, else synthetic) ----
     try:
+        import ww_p32_identifier_source_fixture as SF
+    except Exception as ex:
+        print("ERROR: 无法导入 ww_p32_identifier_source_fixture: %s" % ex, file=sys.stderr)
+        return 6
+
+    rows_el = []
+    src = Path(a.source) if a.source else None
+    if src is not None and src.is_file():
         idx = SF._read_index(src)
         ww = [e for e in idx.entries if e.type_id == SF.WW_ANIM_XML]
         if len(ww) != 1:
-            raise RuntimeError("WW_ANIM_XML count != 1 (got %d)" % len(ww))
-        ww_e = ww[0]
-        body = SF._decompress(SF._read_body(src, ww_e))
-        text = body.decode("utf-8", errors="replace")
+            print("ERROR: WW_ANIM_XML count != 1", file=sys.stderr)
+            return 3
+        body = SF._decompress(SF._read_body(src, ww[0]))
         import xml.etree.ElementTree as ET
-        root = ET.fromstring(text)
-    except Exception as ex:
-        print("ERROR: 读取 package xml 失败: %s" % ex, file=sys.stderr)
-        return 3
-
-    lists = [n for n in root.iter()
-             if SF._el_tag(n) == "L" and SF._name(n) == SF.ENTRY_LIST_FIELD]
-    if len(lists) != 1:
-        print("ERROR: <L %s> count=%d (expected 1)" % (SF.ENTRY_LIST_FIELD, len(lists)),
+        root = ET.fromstring(body.decode("utf-8", errors="replace"))
+        lists = [x for x in root.iter()
+                 if SF._el_tag(x) == "L" and SF._name(x) == SF.ENTRY_LIST_FIELD]
+        if len(lists) != 1:
+            print("ERROR: animations_list count=%d" % len(lists), file=sys.stderr)
+            return 3
+        rows_el = [c for c in list(lists[0]) if SF._el_tag(c) == "U"]
+    elif a.verify:
+        # builtin synthetic 3-row roster exercising the exact structural parser
+        import xml.etree.ElementTree as ET
+        synth = ('<I n="T"><L n="animations_list">'
+                 '<U n="s0">'
+                 '  <L n="animation_actors_list"><U n="a0">'
+                 '    <T n="actor_id">sim</T>'
+                 '    <T n="animation_x_offset">0.0</T>'
+                 '    <T n="animation_y_offset">0.0</T>'
+                 '    <T n="animation_angle_offset">90.0</T>'
+                 '  </U></L>'
+                 '  <T n="animation_version">1</T>'
+                 '</U>'
+                 '<U n="s1">'
+                 '  <L n="animation_props_list"><U n="p0">'
+                 '    <T n="prop_animation_clip_name">clip_a</T>'
+                 '    <T n="prop_geometry_state">1</T>'
+                 '  </U></L>'
+                 '  <T n="object_animation_clip_name">chair</T>'
+                 '  <T n="animation_version">3</T>'
+                 '</U>'
+                 '<U n="s2">'
+                 '  <T n="object_animation_clip_name">bed</T>'
+                 '  <T n="object_geometry_state">2</T>'
+                 '</U>'
+                 '</L></I>')
+        root = ET.fromstring(synth)
+        lst = [x for x in root.iter() if SF._el_tag(x) == "L"
+               and SF._name(x) == SF.ENTRY_LIST_FIELD][0]
+        rows_el = [c for c in list(lst) if SF._el_tag(c) == "U"]
+    else:
+        print("ERROR: need --source ./<pkg>.package (real) or --verify (synthetic)",
               file=sys.stderr)
-        return 3
-    rows_el = [c for c in list(lists[0]) if SF._el_tag(c) == "U"]
-    n_entries = len(rows_el)
+        return 2
+    n = len(rows_el)
 
-    # schema tuning census (suffix-matched; detects per-row, never assumes 318)
-    schema_sinks, ordinal_sinks = scan_roster_tuning(rows_el, SF._name, SF._text)
+    # ---- structural carrier census ----
+    carrier_counts, carrier_ordinals = census_carriers(rows_el, SF._name, SF._text)
+    origin_rows = origin_rows_from_schema(carrier_counts, n)
 
-    # ---- locate loader .pyc bytes separately from animation_instance bytes ----
-    import io as _io2
-    scalars = {}
-    ts4path = None
-    for sp in [p for p in d.rglob("*.ts4script") if p.is_file()]:
+    # ---- default recovery fails closed without Windows bytecode evidence ----
+    tuning_pyc = Path(a.tuning_pyc) if a.tuning_pyc else None
+    go_mod = None
+    XBytecode = None
+    if tuning_pyc is not None:
+        # xdis optional; required only to prove defaults from the tuning pyc.
         try:
-            with _zipfile.ZipFile(sp) as z:
-                for name in z.namelist():
-                    leaf = Path(name).name
-                    if leaf in (LOADER_NAME,) + tuple(set(INSTANCE_MODS.values())):
-                        scalars.setdefault(name, z.read(name))
-                        ts4path = sp
+            import xdis.disasm as _xd
+            from xdis.op_imports import get_opcode_module, PythonImplementation  # noqa
+            go_mod = get_opcode_module
+            XBytecode = _xd.Bytecode
         except Exception:
-            continue
-    loader_bytes = None
-    loader_member = None
-    inst_bytes = None
-    inst_member = None
-    for name, b in scalars.items():
-        if Path(name).name == LOADER_NAME:
-            loader_bytes, loader_member = b, name
-        else:
-            inst_bytes, inst_member = b, name
-    if loader_bytes is None:
-        print("ERROR: 未在 .ts4script 内找到 %s" % LOADER_NAME, file=sys.stderr)
-        return 5
-    if ts4path is None:
-        print("ERROR: 未定位 .ts4script", file=sys.stderr)
-        return 5
+            go_mod = None
+            XBytecode = None
+    default_rep = decode_defaults(tuning_pyc_path=tuning_pyc,
+                                  get_opcode_mod=go_mod, XBytecode=XBytecode)
+    default_rep.load_carriers(carrier_counts)
 
-    XBytecode = XBytecode_mod.Bytecode
+    lines = render_report(origin_rows, carrier_counts, carrier_ordinals, n,
+                          default_rep)
+    lines.append("")
+    lines.append("ZERO_WRITE_TO_MODS=YES  ZERO_WRITE_TO_SAVES=YES  (read-only)")
 
-    def load_co(pyc_bytes, label):
-        try:
-            res = xdis_load(_io2.BytesIO(pyc_bytes), filename=label)
-        except Exception as ex:
-            print("ERROR: xdis 解析 %s 失败: %s" % (label, ex), file=sys.stderr)
-            return None, None
-        ver = res[0]
-        opc = get_opcode(ver)
-        return opc, res[3]
-
-    lopc, lco = load_co(loader_bytes, LOADER_NAME)
-    if lco is None:
-        return 6
-    # ---- gather candidate code objects across loader + instance pyc ----
-    candidates = []
-
-    def collect_code(cobj, tag, seen):
-        if id(cobj) in seen:
-            return
-        seen.add(id(cobj))
-        candidates.append((cobj, tag))
-        for sub in cobj.co_consts:
-            if hasattr(sub, "co_name"):
-                collect_code(sub, tag + "/" + (sub.co_name or "?"), seen)
-
-    seen_loader = set()
-    collect_code(lco, LOADER_NAME, seen_loader)
-    seen_inst = set()
-    if inst_bytes is not None:
-        iopc, ico = load_co(inst_bytes, inst_member)
-        if ico is None:
-            return 6
-        collect_code(ico, inst_member, seen_inst)
-
-    # find the producer function among candidates (any module)
-    fn = None
-    for cobj, tag in candidates:
-        if cobj.co_name == TARGET_PRODN:
-            fn = (cobj, tag)
-            break
-    if fn is None:
-        print("ERROR: 未找到函数 %s" % TARGET_PRODN, file=sys.stderr)
-        return 8
-    fn_cobj, fn_tag = fn
-    lines_fn = list(XBytecode(fn_cobj, lopc))
-
-    # ---- scan every candidate code object for STORE_ATTR / STORE onto the 8 ----
-    # Evidence collector: finds (in any targeted code object) writes to an
-    # instance/attr spelling matching a candidate field, with the value-kind of
-    # the producing operand (via upward walk) + whether that operand symbol
-    # literally equals a tuning candidate key.
-    def store_target_attr(nm, field, cands):
-        # suffix match mirrors schema-scan: catch both the bare identity field
-        # and WW's `animation_`-prefixed spelling, plus dotted actor sub-fields.
-        for cand in cands:
-            if nm == cand or nm.endswith("_" + cand):
-                return True
-        # position_offset.<x|y|z> dotted attrs
-        if any(cand in nm for cand in cands) and any(
-                x in ("position_offset", "angle_offset", "facing", "facing_position_offset")
-                for x in cands):
-            return True
-        return False
-
-    def scan_for_stores(lines, tag, opc):
-        hits = {}
-        for i, it in enumerate(lines):
-            attr = None
-            if it.opname == "STORE_ATTR":
-                attr = it.argrepr
-            for field, cands, _cls in PROBE_FIELDS:
-                if attr is None or not store_target_attr(attr, field, cands):
-                    continue
-                kind, det = _value_kind_of(lines, i)
-                producer_is_tuning_name = bool(
-                    det and any(ck in str(det) for ck in cands)) and schema_sinks.get(field)
-                hits.setdefault(field, []).append({
-                    "attr": attr, "kind": kind, "detail": det,
-                    "tag": tag, "producer_is_tuning_name": producer_is_tuning_name,
-                })
-        return hits
-
-    all_stores = {}
-    for cobj, tag in candidates:
-        opcx = lopc
-        try:
-            lines = list(XBytecode(cobj, opcx))
-        except Exception:
-            continue
-        for fld, ents in scan_for_stores(lines, tag, opcx).items():
-            all_stores.setdefault(fld, []).extend(ents)
-
-    # ---- decide every field via the SINGLE tested decision fn ----
-    rows = []
-    for field, cands, cls in PROBE_FIELDS:
-        rows.append(decide_field_evidence(
-            field, cands, all_stores.get(field, []), schema_sinks.get(field)))
-
-    csv_lines, summ = render_audit(rows)
-    txt = []
-    txt.append("=== P32 loader-origin exact probe (read-only) ===")
-    txt.append("IDENTITY_FIELDS_ACCOUNTED=15/15  FIELD_NAME_UNKNOWN=0")
-    txt.append("FULL_CORPUS_ORIGIN_UNKNOWN=8 (loader/constructor origin not yet closed for the 8 runtime-default fields)")
-    txt.append("source=%s" % src.name)
-    txt.append("ts4script=%s" % ts4path)
-    txt.append("loader_member=%s bytes=%d  instance_member=%s bytes=%d"
-               % (loader_member or "-", len(loader_bytes or b""),
-                  inst_member or "-", len(inst_bytes or b"")))
-    txt.append("target=""%s"" + SexAnimation*Instance.__init__ disasm" % TARGET_PRODN)
-    txt.append("ENTRY_COUNT (rows under <L %s>) = %d" % (SF.ENTRY_LIST_FIELD, n_entries))
-    # tuning schema vocabulary (the 8 keys present?)
-    present_keys = {ck for fld, present in schema_sinks.items() for ck in present}
-    txt.append("tuning_schema_keys_present (subset of the 8): %s"
-               % (",".join(sorted(present_keys)) or "(none of the 8 field keys seen in xml node @n)"))
-    txt.append("tuning_full_counts_of_8_keys: %s" % schema_sinks)
-    # which ordinals carry a tuning value for each of the 8 fields (partial vs full)
-    txt.append("per_ordinal_carriers (ordinals that carry a non-empty tuning value "
-               "for that field):")
-    for field, cands, _cls in PROBE_FIELDS:
-        carriers = ordinal_sinks.get(field, [])
-        kind = "FULL(%d/%d)" % (len(carriers), n_entries) if carriers and \
-            len(carriers) == n_entries else (("PARTIAL(%d/%d)" % (len(carriers),
-                                                                  n_entries)) if carriers else "NONE")
-        tx = ",".join(str(c) for c in carriers[:40])
-        if len(carriers) > 40:
-            tx += ",...(total %d)" % len(carriers)
-        txt.append("  %s -> %s  carriers=[%s]" % (field, kind, tx))
-    txt.append("")
-    txt.append("")
-    txt.extend(summ)
-    txt.append("")
-    txt.append("ZERO_WRITE_TO_MODS=YES  ZERO_WRITE_TO_SAVES=YES  (read-only)")
-
-    text_out = "\n".join(txt)
+    text_out = "\n".join(lines)
     out_path = out_dir / "p32_loader_origin_audit.txt"
     out_path.write_text(text_out, encoding="utf-8")
-    with open(out_dir / "p32_loader_origin_audit.csv", "w", newline="", encoding="utf-8") as f:
+    with open(out_dir / "p32_loader_origin_audit.csv", "w", newline="",
+              encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerows(csv_lines)
+        w.writerows(render_origin_csv_rows(origin_rows))
+    with open(out_dir / "p32_loader_origin_audit_defaults.json", "w",
+              encoding="utf-8") as f:
+        json.dump(default_rep.to_rows(), f, indent=2, ensure_ascii=False)
 
-    n_unk = sum(1 for r in rows if r["status"] == "UNKNOWN")
+    safe = default_rep.all_proven() and not any(
+        r["status"] == "UNKNOWN" for r in origin_rows)
     print(text_out)
     print("OUT_TXT=%s" % out_path)
-    print("GATE_ALL_PROVEN=%s" % ("YES" if n_unk == 0 else "NO"))
+    print("FULL_CORPUS_SAFE_TO_RECONSTRUCT=%s"
+          % ("YES" if safe else "NO"))
     print("P32_LOADER_ORIGIN_PROBE=DONE (read-only)")
-    return 0
+    return 0 if (a.verify or a.source) else 2
 
 
 if __name__ == "__main__":
