@@ -165,15 +165,19 @@ def main(argv=None):
                    m.get("mem_size", 0), m.get("comp_type", 0),
                    m.get("offset_comp"), m.get("size_comp"),
                    r["body_len"], r["plain_len"]))
-            if r["root"]:
+            if r.get("root"):
                 add("        root=<%s n=%r> node_types=%s"
-                    % (r["root"], r["root_name"], r["node_types"]))
+                    % (r.get("root"), r.get("root_name"), r.get("node_types")))
             if r.get("T_field_names"):
                 add("        T-fields(%d): %s" % (len(r["T_field_names"]),
                     r["T_field_names"][:25]))
-            if r["fields"]:
+            if r.get("xml_parse_err"):
+                add("        (body not XML / parse skipped: %s)" % r.get("xml_parse_err"))
+            elif r.get("fields"):
                 add("        distinct-names(%d): %s" % (len(r["fields"]),
                     describe_fields(r)[:30]))
+            else:
+                add("        distinct-names: (none / body not structurally XML)")
         results[label] = ("ok", recs)
 
     add("")
