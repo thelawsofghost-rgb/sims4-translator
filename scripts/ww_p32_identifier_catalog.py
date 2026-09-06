@@ -39,25 +39,29 @@ proof shows (preimage carries '0.0'*8, never '0'*8).  Nothing here fabricates a
 value; every runtime-group input is the reconstructor's own transform of default
 tuning, never a raw string.
 
-Per-row model (grounded, no guessing)
--------------------------------------
+Per-row model (XML -> runtime identity bridge; catalogue-side debugging target)
+-------------------------------------------------------------------------------
 For EVERY row under <L n='animations_list'> (ordinal = list index), the catalog
-  1. reads the PROVEN-TUNING identity inputs VERBATIM from that row's real xml
-     subtree: display_name(animation_raw_display_name), author(animation_author),
-     sex_category(animation_category, uppercased enum name), locations(scalar
-     animation_locations token(s), production key), per-actor gender(clip and
-     animation_genders literal -> canonical SexGenderType name, NO silent
-     coercion),
-  2. introspects the row's OWN subtree for any object/prop/geometry/material/
-     version/dancer-ish tuning key (real vocabulary, schema-agnostic) so a row
-     that genuinely carries one is SEEN (a pure actor row like ordinal 318 has
-     none and gets the runtime transform), never assumed absent,
-  3. builds the reconstructor semantic `fields`, feeding PROVEN-TUNING real only,
-     and RUNTIME group only via the reconstructor's un-placed-instance transform,
-  4. computes identifier with the authoritative reconstructor -> VALID,
-     or fail-closes a row to UNKNOWN with an exact reason when a required field
-     is missing / a row's real extra object/prop tuning cannot unambiguously map
-     into the identity semantics (never guessed, never skipped, never demoted).
+  1. reads the PROVEN-TUNING identity inputs VERBATIM from that row's real xml:
+     display_name (animation_raw_display_name), author (animation_author),
+     sex_category (animation_category -> enum NAME), per-actor clip + gender;
+  2. location:  self.locations = the loader `_parse_sex_animation_location_types`
+     of `animation_locations`.  Scalar token(s) and list-of-location-token forms
+     are both read; a MISSING key is the loader empty TunableList default -> empty
+     runtime list (legit, contributes nothing).  No custom_locations mix.
+  3. object:  the row's object-slot identity leaves -> instance object
+     clip/geometry/material; empty default is skipped (reconstructor), a NON-EMPTY
+     object clip (179 real carriers) genuinely enters the hash.
+  4. props:   `animation_props_list` children in SOURCE order -> ordered runtime
+     prop instances; only prop_animation_clip_name / prop_geometry_state are
+     identity (per runtime proof).  prop_id/type/guids never enter; the container's
+     mere presence is never a gate.
+  5. actor gender -> loader default_gender=True stored SexGenderType NAME (MALE /
+     FEMALE proven); an UNKNOWN raw token fails the row closed with the exact
+     token (no coercion).  Offsets use the reconstructor 0.0 float transform.
+  Then the identifier is computed with the AUTHORITATIVE reconstructor -> VALID,
+  or fail-closed to UNKNOWN with an exact reason.  Nothing is guessed/skipped/
+  demoted.
 
 Ran only on the Windows box (the real source package is Windows-only; Linux has
 no byte copy).  Writes ONLY under --out-dir:
@@ -65,19 +69,20 @@ no byte copy).  Writes ONLY under --out-dir:
     p32_identifier_catalog_report.txt
   ZERO write to Mods / saves / the WW ts4script / source / catalog-suppress lists.
 
-Exit: 0 ok; 2 args/io; 3 source gate / golden FAIL / FULL_CATALOG_SAFE=NO is not
-fatal here (UNKNOWN>0 still emits catalog+report as the operator requires); 4
-structural/UNKNOWN>0 gate decided by caller.
+Exit: 0 VERDICT=GO (VALID=0-unknown AND gold PASS); 2 STOP -- UNKNOWN>0 catalog +
+report still emitted; 3 FAIL -- source gate / XML / golden FAIL;
+(per E, aggregating UNKNOWN by reason category to stdout, full list in report).
 """
 import argparse
 import csv
 import hashlib
-import importlib.util
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 WW_ANIM_XML = 0x7DF2169C
 EXPECT_SOURCE_SHA_PREFIX = "cd0093f2"          # operator-pinned (must start-match)
@@ -90,13 +95,22 @@ GOLDEN_SHA1_318 = "d0528d3795ca42c60ca5a9eb6bad8658ea74e4b5"
 
 ENTRY_LIST_FIELD = "animations_list"
 ACTOR_LIST_FIELDS = ("actors", "animation_actors_list")
-PROD_LOCATION_KEYS = ("animation_locations",)
+PROP_LIST_CONTAINERS = ("animation_props_list", "props")
 DISPLAY_FIELDS = ("animation_raw_display_name", "raw_display_name")
 AUTHOR_FIELDS = ("animation_author", "author")
 CATEGORY_FIELDS = ("animation_category", "category")
+
+# authoritative loader-sourced identity-token keys (mirror ww_p32_loader_origin_*
+# exact source vocabulary; NEVER whole-subtree fuzzy bucket-matching).
 ACTOR_FIELD_KEYS = ("actor_id", "animation_clip_name", "animation_type",
-                    "animation_genders")
-KNOWN_GENDERS = {"MALE", "FEMALE", "TRANS_MALE", "TRANS_FEMALE"}
+                    "animation_genders", "animation_pref_gender")
+OBJECT_KEYS = ("object_animation_clip_name", "object_geometry_state",
+               "object_material_state")
+PROP_KEYS = ("prop_animation_clip_name", "prop_geometry_state")
+ACTOR_OFFSET_KEYS = ("animation_x_offset", "animation_y_offset",
+                     "animation_z_offset", "animation_angle_offset",
+                     "animation_facing_offset")
+VERSION_KEY = "animation_version"
 
 # column headers (operator-mandated minimum + translation-context extras)
 CSV_COLUMNS = [
@@ -112,19 +126,11 @@ _EXTRA_COLS_NO_HASH = set(CSV_COLUMNS) - {
     "validation_status", "identity_input_summary",
 }
 
-# object/prop/geometry/material/version-ish key buckets a row may carry beyond the
-# pure-actor model (introspection vocabulary; schema-agnostic low-match)
-_OBJPROP_HINTS = ("object", "prop", "geometry", "material", "dancer")
-_VER_HINTS = ("version",)
-
 # ---------------------------------------------------------------------------
-# reusable canary primitives
+# authoritative reconstructor (reused AS-IS) -- the sha1 construction is NOT
+# re-implemented; only the per-row SEMANTIC fields are derived here.
 # ---------------------------------------------------------------------------
-_spec = importlib.util.spec_from_file_location(
-    "ww_canary_builder", SCRIPT_DIR / "ww_animation_canary_builder.py")
-_wb = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_wb)
-import ww_p32_identifier_reconstruct as _rec  # authoritative rebuild reused AS-IS
+import ww_p32_identifier_reconstruct as _rec  # noqa: E402
 
 # authoritative reconstructor symbols (re-export for tests; object identity is
 # the SAME function used by the golden ordinal-318 proof)
@@ -206,30 +212,46 @@ def _uniq(seq):
 
 
 def _locations(row):
-    """REAL production location reader.  WW stores locations either as scalar
-    <T n='animation_locations'>DOUBLE_BED</T> (field-origin production reader) or
-    as an <L n='animation_locations'> of <T n='location'> children (P29-F / the
-    ordinal-318 source model).  Both are REAL source shapes; we accept either so a
-    row is read regardless of which container the actual package uses.  Tokens in
-    source order; multi-token scalars split on | / , ."""
-    # 1) scalar leaf T n=animation_locations (the exact production key); we do NOT
-    #    promote a bare 'locations' scalar as a substitute (field-origin warns it)
+    """Semantic self.locations = ordered list of location-CATEGORY NAME strings
+    exactly as the loader `_parse_sex_animation_location_types` produces them for
+    the runtime `SexAnimationInstance.locations`.  The identity only uses
+    `[location_category.name for loc in self.locations]`.
+
+    Grounding (no guessing): the authoritative loader-sourced tuning field is
+    `animation_locations` (a TunableList of LocationType).  Its XML renders as
+    either a plain scalar <T> of location-token text (ordinal-318 fixture proves
+    `DOUBLE_BED` feeds a single location), or a list container of location tokens
+    under `animation_locations`.  A MISSING `animation_locations` key is the
+    loader's empty TunableList default -> runtime self.locations == [] (verified
+    empty semantics; contributes nothing to the hash).  We do NOT fabricate
+    `custom_locations`/other container mixes into self.locations unless real
+    loader dataflow proves it -- the ground-truth census decides that.
+
+    Returns (locations_list, hit_form) where hit_form in {"scalar", "list",
+    "missing"} for the census.  Presence of a REAL token is required to yield a
+    non-empty list; empty/blob containers yield [] (form recorded)."""
+    # scalar plain token(s): exact loader-sourced scalar field
     raw = _row_field(row, "T", "animation_locations")
     if raw:
-        return _split_multi(raw)
-    # 2) list container L n=animation_locations / custom_locations / locations
-    for name in ("animation_locations", "locations", "custom_locations",
-                 "animation_custom_locations"):
-        for nd in row.iter():
-            if _el_tag(nd) != "L" or _name(nd) != name:
-                continue
+        return _split_multi(raw), "scalar"
+    # list container under the loader field
+    for nd in row.iter():
+        if _el_tag(nd) != "L" or _name(nd) != "animation_locations":
+            continue
+        children = [c for c in list(nd)]
+        struct = any(_el_tag(c) in ("U", "L") for c in children)
+        if not struct:
+            # plain list of location-name leaves directly under the container
             toks = []
-            for t in nd.iter():
-                if _el_tag(t) in ("T", "E") and _text(t).strip():
-                    toks.extend(_split_multi(_text(t).strip()))
-            if toks:
-                return toks
-    return []
+            for c in children:
+                if _el_tag(c) in ("T", "E") and _text(c).strip():
+                    toks.extend(_split_multi(_text(c).strip()))
+            return toks, "list"
+        # structured records only, no direct name leaves: cannot prove the
+        # runtime location-category names -> not empty; real-structure census
+        # must resolve (never under-read to empty).
+        return [], "unmapped-struct"
+    return [], "missing"
 
 
 def _split_multi(raw):
@@ -244,6 +266,11 @@ def _split_multi(raw):
 
 
 def _actors(row):
+    """Per-actor records in source order under the loader actor list container
+    (`animation_actors_list` | `actors`), reading ONLY each actor record's own
+    direct-tuned leaves (actor_id, clip, animation_type, animation_genders,
+    animation_pref_gender).  NO whole-subtree fuzzy match; a bare actor <U> has
+    these leaves."""
     for lname in ACTOR_LIST_FIELDS:
         for nd in row.iter():
             if _el_tag(nd) == "L" and _name(nd) == lname:
@@ -251,71 +278,138 @@ def _actors(row):
                 for u in nd:
                     if _el_tag(u) != "U":
                         continue
+                    direct = {}
+                    for t in u:
+                        if _el_tag(t) == "T" and _name(t):
+                            direct.setdefault(_name(t), _text(t).strip())
                     out.append({
-                        "actor_id": _row_field(u, "T", "actor_id"),
-                        "clip": _row_field(u, "T", "animation_clip_name"),
-                        "type": _row_field(u, "T", "animation_type"),
-                        "genders": _row_field(u, "T", "animation_genders"),
+                        "actor_id": direct.get("actor_id", ""),
+                        "clip": direct.get("animation_clip_name", ""),
+                        "type": direct.get("animation_type", ""),
+                        "genders": direct.get("animation_genders", ""),
+                        "pref_gender": direct.get("animation_pref_gender", ""),
                     })
                 if out:
                     return out
     return []
 
 
+def _props(row):
+    """Ordered runtime prop records from the loader prop-list container
+    (`animation_props_list` | `props`), source order == runtime insertion order ==
+    get_props() order.  Each runtime prop only needs prop_animation_clip_name +
+    prop_geometry_state (its OWN direct leaves).  prop_id/prop_type/prop_guids and
+    any other prop-tag decorations never enter the identifier.  Presence of an
+    (even empty) prop-list container is NORMAL and is never a risk."""
+    for lname in PROP_LIST_CONTAINERS:
+        for nd in row.iter():
+            if _el_tag(nd) == "L" and _name(nd) == lname:
+                out = []
+                for u in nd:
+                    if _el_tag(u) != "U":
+                        continue
+                    direct = {}
+                    for t in u:
+                        if _el_tag(t) == "T" and _name(t):
+                            direct.setdefault(_name(t), _text(t).strip())
+                    out.append({
+                        "ordinal": len(out),
+                        "animation_clip_name": direct.get("prop_animation_clip_name", ""),
+                        "geometry_state": direct.get("prop_geometry_state", ""),
+                    })
+                return out  # first matching prop-list container is authoritative
+    return []
+
+
+def _object_slot(row):
+    """The row's single object slot's identity tuning: object_animation_clip_name /
+    object_geometry_state / object_material_state.  Origin census treats these as
+    the ROW's own object-slot leaves (optionally wrapped under an explicit
+    object/override/tuning value container).  Missing keys -> proven default
+    (object clip '' / geometry '' / material '') which the reconstructor skips;
+    NON-EMPTY object clip (179 real carriers) genuinely enters the hash.  We read
+    only the loader-sourced object-slot scope: the row's DIRECT leaves plus the
+    direct children of an explicit object/override/tuning wrapper -- never an
+    unrelated descendant (actor/prop) record's keys."""
+    direct = {}
+    scopes = []
+    # row's direct T leaves only
+    for nd in list(row):
+        if _el_tag(nd) == "T" and _name(nd) in OBJECT_KEYS:
+            scopes.append(nd)
+    # an explicit wrapper value-container (direct child) named object/override/tuning
+    for nd in list(row):
+        if _el_tag(nd) not in ("U", "L"):
+            continue
+        nm = (_name(nd) or "").lower()
+        if any(w in nm for w in ("animation_object", "override", "tuning", "object")):
+            for t in nd:
+                if _el_tag(t) == "T" and _name(t) in OBJECT_KEYS:
+                    scopes.append(t)
+    for nd in scopes:
+        direct.setdefault(_name(nd), _text(nd).strip())
+    return {
+        "animation_clip_name": direct.get("object_animation_clip_name", ""),
+        "geometry_state": direct.get("object_geometry_state", ""),
+        "material_state": direct.get("object_material_state", ""),
+    }
+
+
+# loader-mirror: `animation_genders` name/alias -> canonical runtime SexGenderType
+# NAME.  The runtime get_identifier calls actor.get_gender_type(default_gender=True)
+# which returns the STORED self.gender_type (real evidence: MALE->MALE, FEMALE->
+# FEMALE for ordinal 318).  raw tuning literal is fed through the loader's
+# get_sex_gender_type_by_name to the enum; we resolve by exact canonical NAME and
+# clear aliases only, NEVER coercion of an unknown token.  A matched token's value
+# is the SexGenderType NAME the reconstructor renders as SexGenderType.<NAME>.
+_GENDER_NAME_TO_RUNTIME = {
+    "MALE": "MALE", "FEMALE": "FEMALE",
+    "TRANS_MALE": "TRANS_MALE", "TRANS_FEMALE": "TRANS_FEMALE",
+}
+
+
 def _runtime_gender(raw):
+    """Map one animation_genders literal -> canonical SexGenderType NAME, or
+    'UNKNOWN' when the literal has no authoritative match.  Mirrors the loader
+    get_sex_gender_type_by_name for default_gender=True (name already the enum
+    NAME).  Unknown token is returned verbatim (never guessed)."""
     if not raw:
         return "UNKNOWN"
-    up = raw.strip().upper().replace("_", " ")
-    for toks in (up.replace(",", " ").split(),):
-        for tok in toks:
-            if tok in KNOWN_GENDERS:
-                return tok
-    return "UNKNOWN" if raw.strip().upper() not in KNOWN_GENDERS else raw.strip().upper()
-
-
-def _row_extra_keys(row):
-    """Introspective census of a row's OWN node vocabulary colliding with the
-    object/prop/geometry/material/version buckets (schema-agnostic @n match).
-    Returns (objprop keys w/ first non-empty values, versionish w/ values,
-    seen_names).  NO fabrication: presence is real; a pure actor row has none."""
-    objprop = {}
-    ver = {}
-    seen = set()
-    for nd in row.iter():
-        nm = _name(nd)
-        if nm is None:
-            continue
-        low = nm.lower()
-        seen.add(nm)
-        if any(h in nm for h in _OBJPROP_HINTS):
-            val = _text(nd).strip()
-            if val or _el_tag(nd) in ("L", "U"):
-                if nm not in objprop:
-                    objprop[nm] = val if (val or _el_tag(nd) in ("T", "E")) else "<struct>"
-        elif any(h in low for h in _VER_HINTS):
-            val = _text(nd).strip()
-            if val:
-                ver.setdefault(nm, val)
-    # drop our own actor/display/location fields that merely contain a substring
-    for drop in list(objprop):
-        if drop in ACTOR_FIELD_KEYS or drop in PROD_LOCATION_KEYS \
-                or drop in DISPLAY_FIELDS or drop in AUTHOR_FIELDS:
-            objprop.pop(drop, None)
-    return objprop, ver, seen
+    up = raw.strip().upper()
+    if up in _GENDER_NAME_TO_RUNTIME:
+        return _GENDER_NAME_TO_RUNTIME[up]
+    # tolerate underscore/space/hyphen differences to a known NAME token only
+    norm = up.replace("_", " ").replace("-", " ").replace(",", " ").split()
+    if len(norm) == 1 and norm[0] in _GENDER_NAME_TO_RUNTIME:
+        return _GENDER_NAME_TO_RUNTIME[norm[0]]
+    return "UNKNOWN"
 
 
 # ---------------------------------------------------------------------------
-# per-row semantic build -> reconstructor fields
+# per-row semantic bridge -> reconstructor fields (the XML -> runtime identity
+# bridge; catalogue-side debugging target)
 # ---------------------------------------------------------------------------
 def build_row(row, ordinal):
-    """Map ONE real <U> row (ET Element, or an XML string that is parsed) ->
-    (rowrec dict).  rowrec fields: display/author/category/locations/actors
-    (verbatim), plus status/status_reason/identifier/extra_objprop/extra_ver/
-    provenance.  Never fabricates, never demotes, never skips an identity
-    component: a required PROVEN_TUNING field missing -> status UNKNOWN + exact
-    reason.  The RUNTIME group is provided ONLY through the reconstructor
-    transform (offsets 0.0 floats etc.), matching the ordinal-318 golden that
-    this catalog must reproduce."""
+    """Map ONE real <U> row (ET Element, or an XML string that is parsed) -> a
+    (rowrec) whose `fields_proven` drives the authoritative reconstructor.
+
+    Semantics follow the REAL runtime get_identifier bridge town-by-town:
+      * location:  self.locations = loader `_parse_sex_animation_location_types`
+                   of `animation_locations`; MISSING key -> empty runtime list
+                   (valid; contributes nothing).
+      * object:    the row's single object-slot leaves -> instance object keys;
+                   empty/absent defaults are skipped by the reconstructor; a
+                   NON-EMPTY object clip genuinely enters the hash (179 real
+                   carriers).
+      * props:     `animation_props_list` children in SOURCE order -> runtime
+                   prop instances (insertion order == get_props order); only
+                   prop_animation_clip_name / prop_geometry_state are identity
+                   (per runtime proof); prop_id/type/guids never enter.  The
+                   container's presence is never a gate.
+      * actor:     per-actor gender via loader default_gender=True (stored
+                   self.gender_type).  Unknown token -> UNKNOWN + exact token.
+                   Runtime offsets use the reconstructor's 0.0 float transform.
+    Never fabricates/demotes/skips an identity component."""
     if isinstance(row, str):
         row = ET.fromstring(row)
     rec = {
@@ -324,42 +418,53 @@ def build_row(row, ordinal):
         "author": "",
         "sex_category_e": "",
         "location_literals": [],
+        "location_form": "missing",
         "actor_rows": [],
+        "prop_rows": [],
+        "object_slot": {},
         "tags": "",
         "stage_name": "",
-        "extra_objprop": {},
-        "extra_ver": {},
         "status": "UNKNOWN",
         "status_reason": "",
         "fields_proven": {},
     }
-    display = _single_text(row, DISPLAY_FIELDS)
-    rec["raw_display_name"] = display
+    rec["raw_display_name"] = _single_text(row, DISPLAY_FIELDS)
     rec["author"] = _single_text(row, AUTHOR_FIELDS)
     cat_e = _single_text(row, CATEGORY_FIELDS)
     rec["sex_category_e"] = cat_e.upper() if cat_e else ""
     rec["tags"] = _single_text(row, ("animation_tags", "tags"))
     rec["stage_name"] = _single_text(row, ("animation_stage_name", "stage_name"))
-    loc = _locations(row)
+    loc, loc_form = _locations(row)
     rec["location_literals"] = loc
-    actors = _actors(row)
-    actor_rows = []
-    for i, a in enumerate(actors):
-        actor_rows.append({
+    rec["location_form"] = loc_form
+
+    # location semantics (C): a MISSING `animation_locations` is the loader empty
+    # TunableList default -> runtime self.locations == [] (legit, no hash token).
+    # A container that exists ONLY as structured records we can't map is NOT
+    # silently empty -- real-structure census must decide -> fail row closed.
+    if loc_form == "unmapped-struct":
+        rec["status"] = "UNKNOWN"
+        rec["status_reason"] = "loader_location_uninterpretable=" \
+                                "animation_locations is a structured record list " \
+                                "(no plain name token) -- real loader shape requested"
+        return rec
+
+    for i, a in enumerate(_actors(row)):
+        gr = a.get("genders", "")
+        raw_note = gr
+        rec["actor_rows"].append({
             "actor_ordinal": i,
             "actor_id": a.get("actor_id", ""),
             "clip": a.get("clip", ""),
             "type": a.get("type", ""),
-            "genders_raw": a.get("genders", ""),
-            "gender_runtime": _runtime_gender(a.get("genders", "")),
+            "pref_gender": a.get("pref_gender", ""),
+            "genders_raw": raw_note,
+            "gender_runtime": _runtime_gender(raw_note),
         })
-    rec["actor_rows"] = actor_rows
-    op, ve, seen = _row_extra_keys(row)
-    rec["extra_objprop"] = op
-    rec["extra_ver"] = ve
-    rec["extra_seen"] = seen
+    rec["prop_rows"] = _props(row)
+    rec["object_slot"] = _object_slot(row)
 
-    # ---- PROVEN-TUNING required-field gate ----
+    # ---- required core identity gate (PROVEN-TUNING, no fabrication) ----
     missing = []
     if not rec["raw_display_name"]:
         missing.append("display_name")
@@ -367,53 +472,48 @@ def build_row(row, ordinal):
         missing.append("author")
     if not rec["sex_category_e"]:
         missing.append("sex_category")
-    if not loc:
-        missing.append("locations")
-    if not actor_rows:
+    if not rec["actor_rows"]:
         missing.append("actors")
-    # actor-level: clip may be per-slot optional; gender must be UNKNOWN-free
-    for ar in actor_rows:
+    for ar in rec["actor_rows"]:
         if ar["gender_runtime"] == "UNKNOWN":
-            missing.append("actor%d.gender_runtime=UNKNOWN(no coercion)" % ar["actor_ordinal"])
+            missing.append("actor%d.gender_runtime=UNKNOWN(no coercion) token=%r"
+                           % (ar["actor_ordinal"], ar["genders_raw"]))
         if not ar["clip"]:
             missing.append("actor%d.clip=empty" % ar["actor_ordinal"])
-
-    # extra object/prop/geometry/material/version tuning that could perturb the
-    # pure-actor runtime model is surfaced; if present and we cannot prove how it
-    # feeds the identity (only ordinal-318's absent case is PROVEN), fail closed.
-    extra_warn = []
-    if op:
-        extra_warn.append("carries_object_prop_keys=%s" % sorted(op))
-    if ve:
-        extra_warn.append("carries_version_keys=%s" % sorted(ve))
+    # location: MISSING is legal -> empty; only a location row that hits an
+    # unmappable non-empty form is flagged (see placement below).
 
     if missing:
         rec["status"] = "UNKNOWN"
         rec["status_reason"] = "missing_identity_required=" + ",".join(missing)
         return rec
-    if extra_warn:
-        # A real row that carries more than the proven pure-actor/runtime model.
-        # We do NOT guess how those extra values enter get_identifier; we require
-        # semantic clarity.  If they look like non-identity decoration we still do
-        # not assume: gate to UNKNOWN so the operator adjudicates (the nearest
-        # structural varieties the operator listed are covered; extra > proven is
-        # the honest stop).
-        rec["status"] = "UNKNOWN"
-        rec["status_reason"] = "gated_extra_identity_tuning=" + ";".join(extra_warn)
-        return rec
 
-    # ---- runtime-transform group (reconstructor semantics only) ----
-    rec["fields_proven"] = _fields_for_reconstruct(rec)
+    # ---- assemble the loader-bridge fields (VALID unless non-empty loc weird) ----
+    fields, warn = _fields_for_reconstruct(rec)
+    if warn:
+        rec["status"] = "UNKNOWN"
+        rec["status_reason"] = warn
+        return rec
+    rec["fields_proven"] = fields
     rec["status"] = "VALID"
     return rec
 
 
+def _obj_bool_or_none(v):
+    """Empty string -> None (skipped by the reconstructor); else the string."""
+    v = (v or "").strip()
+    return v if v != "" else None
+
+
 def _fields_for_reconstruct(rec):
-    """Assemble the reconstructor `fields` dict.  PROVEN_TUNING verbatim; RUNTIME
-    group (offsets/facing/props/version/geom/material) via the reconstructor's own
-    un-placed runtime transform = the same representation the ordinal-318 golden
-    uses (floats 0.0 etc).  object clip/geom/material are empty/None (pure actor,
-    gated earlier if the row genuinely carried more)."""
+    """Build the reconstructor `fields` dict from a rowrec, mirroring the loader
+    -> runtime -> get_identifier bridge for the identity inputs.  Returns
+    (fields, None) on success, or (None, reason) for a genuine per-row non-empty
+    value the loader bridge cannot place (never guessed).  Actor offsets/version
+    are the reconstructor runtime transform (0.0 / version<=1), not raw tuning
+    text.  Props carry ONLY clip + geometry_state; object carries clip/geom/
+    material with empty -> None.  Locations: empty runtime list is legal and is
+    used (contributes nothing); a NON-EMPTY location list is committed verbatim."""
     actors = []
     for ar in rec["actor_rows"]:
         actors.append({
@@ -422,18 +522,36 @@ def _fields_for_reconstruct(rec):
             "position_offset": {"x": 0.0, "y": 0.0, "z": 0.0},
             "facing_position_offset": 0.0,
         })
-    return {
+
+    props = []
+    for p in rec.get("prop_rows", []):
+        clip = (p.get("animation_clip_name") or "").strip()
+        geom = (p.get("geometry_state") or "").strip()
+        if not clip and not geom:
+            # empty prop record would contribute nothing; still allow in case of
+            # structural variety but leave it as a no-op identity element.
+            props.append({"animation_clip_name": "", "geometry_state": ""})
+        else:
+            props.append({"animation_clip_name": clip, "geometry_state": geom})
+
+    obj = rec.get("object_slot") or {}
+    oclip = (obj.get("animation_clip_name") or "").strip()
+    ogeom = _obj_bool_or_none(obj.get("geometry_state"))
+    omat = _obj_bool_or_none(obj.get("material_state"))
+
+    fields = {
         "display_name": rec["raw_display_name"],
         "author": rec["author"],
         "sex_category": rec["sex_category_e"],
         "actors": actors,
         "locations": list(rec["location_literals"]),
-        "object_animation_clip_name": "",
-        "object_geometry_state": None,
-        "object_material_state": None,
-        "props": [],
+        "object_animation_clip_name": oclip,
+        "object_geometry_state": ogeom,
+        "object_material_state": omat,
+        "props": props,
         "version": 1,
     }
+    return fields, None
 
 
 def _summary(rec, fields):
@@ -507,7 +625,9 @@ def _row_csv(rec):
     g = rec.get("actor_rows", [])
     f = rec.get("fields_proven") or {}
     clips = ",".join(a["clip"] for a in g)
-    objs = (rec.get("extra_objprop") or {}).copy()
+    props = f.get("props") or []
+    prop_clip_names = ",".join(
+        (p.get("animation_clip_name") or "") for p in props)
     return {
         "source_instance": None,  # filled below (no per-row package record kept)
         "ordinal": rec["ordinal"],
@@ -525,8 +645,8 @@ def _row_csv(rec):
         "actor_genders": ",".join(a["gender_runtime"] for a in g),
         "actor_clips": clips,
         "object_animation_clip_name": (f or {}).get("object_animation_clip_name", "")
-                                      if f else "",
-        "prop_animation_clip_names": "",
+                                      or "",
+        "prop_animation_clip_names": prop_clip_names,
     }
 
 
@@ -548,6 +668,31 @@ def _dup_groups(rows):
             groups.setdefault(r["identifier"], []).append(r["ordinal"])
     dups = {h: v for h, v in groups.items() if len(v) > 1}
     return groups, dups
+
+
+def _reason_category(reason):
+    """Map a per-row UNKNOWN status_reason to a coarse category + detail bucket
+    for the top-line aggregate (E).  Deterministic; full per-row reasons stay in
+    the report's orphan list."""
+    if not reason:
+        return "none"
+    if reason.startswith("missing_identity_required="):
+        return "missing_identity_required"
+    if reason.startswith("gated_"):
+        return reason.split("=", 1)[0]
+    return reason.split("=", 1)[0]
+
+
+def _reason_categories(unknown_rows):
+    """collections.Counter-like dict of category -> [count, sample_reason]."""
+    out = {}
+    for r in unknown_rows:
+        cat = _reason_category(r.get("status_reason", ""))
+        e = out.setdefault(cat, [0, ""])
+        e[0] += 1
+        if not e[1]:
+            e[1] = r.get("status_reason", "")
+    return out
 
 
 def render_report(catalog, golden_ok=True, verdict="STOP"):
@@ -576,8 +721,17 @@ def render_report(catalog, golden_ok=True, verdict="STOP"):
                            if r["ordinal"] == o and r.get("identifier") == h), "-")
                 L.append("  ordinal=%d name=%r identifier=%s" % (o, nm, h))
         L.append("")
+    # E: reason-category aggregate on top (then full ordinal list below).
+    L.append("UNKNOWN_REASON_CATEGORIES:")
+    cats = _reason_categories(unknown)
+    if cats:
+        for cat, (cnt, sample) in sorted(cats.items(), key=lambda kv: (-kv[1][0], kv[0])):
+            L.append("  %-30s : %d   (sample: %s)" % (cat, cnt, sample))
+    else:
+        L.append("  (none)")
+    L.append("")
     if unknown:
-        L.append("AFFECTED_ORPHANS (ordinal | status_reason):")
+        L.append("AFFECTED_ORPHANS_FULL (ordinal | status_reason) -- %d rows:" % len(unknown))
         for r in unknown:
             L.append("  ordinal=%d | %s" % (r["ordinal"], r.get("status_reason", "")))
         L.append("")
@@ -603,10 +757,11 @@ def _structural_sample(catalog, count=8):
     seen_sig = set()
     for r in rows:
         gs = tuple(sorted(a["gender_runtime"] for a in r["actor_rows"][:2])) \
-            if r["actor_rows"] else ()
-        sig = (len(r["actor_rows"]), r.get("sex_category_e", ""), gs,
+            if r.get("actor_rows") else ()
+        sig = (len(r.get("actor_rows", [])), r.get("sex_category_e", ""), gs,
                len(r.get("location_literals", [])),
-               tuple(sorted((r.get("extra_objprop") or {}).keys())))
+               len(r.get("prop_rows", [])),
+               bool((r.get("object_slot") or {}).get("animation_clip_name")))
         if sig not in seen_sig:
             seen_sig.add(sig)
             buckets.append(r)
@@ -677,13 +832,15 @@ def main(argv=None):
     print("")
     print("WROTE %s" % csv_path)
     print("WROTE %s" % rpt_path)
-    # machine lines the ps1 / operator consume
+    # machine lines the ps1 / operator consume (E: aggregate, no 479-row dump)
     print("VALID_COUNT=%d" % len(valid))
     print("UNKNOWN_COUNT=%d" % len(unknown))
     if unknown:
-        print("UNKNOWN_ROW_COUNT=%d" % len(unknown))
-        for r in unknown[:60]:
-            print("UNKNOWN_ROW ordinal=%d reason=%s" % (r["ordinal"], r.get("status_reason", "")))
+        print("UNKNOWN_REASON_CATEGORIES:")
+        for cat, (cnt, sample) in sorted(
+                _reason_categories(unknown).items(),
+                key=lambda kv: (-kv[1][0], kv[0])):
+            print("  %s : %d" % (cat, cnt))
     if not g_ok:
         print("ORD318_GOLDEN=FAIL")
         print("VERDICT=STOP")

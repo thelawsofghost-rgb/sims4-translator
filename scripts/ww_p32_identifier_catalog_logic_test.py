@@ -175,19 +175,106 @@ def main():
           rec_noactor["status"] == "UNKNOWN" and "actors" in rec_noactor["status_reason"],
           rec_noactor["status_reason"])
 
-    # ---- M4: extra object/prop tuning gated to UNKNOWN (not guessed) ----
-    rec_extra = C.build_row(
-        '<U n="x"><T n="animation_raw_display_name">D</T>'
+    # ---- C: MISSING location => empty runtime list VALID; structured list => UNKNOWN
+    rec_noloc = C.build_row(
+        '<U n="x"><T n="animation_raw_display_name">NoLoc</T>'
+        '<T n="animation_author">A</T>'
+        '<T n="animation_category">VAGINAL</T>'
+        '<L n="actors">%s</L></U>' % _actor("c0", "MALE"), 12)
+    check("C-missing-location-VALID-empty", rec_noloc["status"] == "VALID"
+          and rec_noloc.get("location_literals") == []
+          and rec_noloc.get("location_form") == "missing",
+          rec_noloc["status_reason"])
+    rec_structloc = C.build_row(
+        '<U n="x"><T n="animation_raw_display_name">Struct</T>'
+        '<T n="animation_author">A</T>'
+        '<T n="animation_category">VAGINAL</T>'
+        '<L n="animation_locations"><U n="loc0"><T n="id">5</T></U></L>'
+        '<L n="actors">%s</L></U>' % _actor("c0", "MALE"), 13)
+    check("C-unmapped-struct-location-UNKNOWN",
+          rec_structloc["status"] == "UNKNOWN"
+          and "uninterpretable" in rec_structloc["status_reason"],
+          rec_structloc["status_reason"])
+
+    # ---- M4 (A): object clip carrier -> VALID + clip enters hash -----
+    # An object-clip tuning leaf must NOT gate a row; it is read as the row's
+    # object slot.  'carriers_object_prop' gating is REMOVED (rev).
+    rec_obj = C.build_row(
+        '<U n="x"><T n="animation_raw_display_name">ObjRow</T>'
         '<T n="animation_author">A</T>'
         '<T n="animation_category">VAGINAL</T>'
         '<T n="animation_locations">FLOOR</T>'
         '<L n="actors">%s</L>'
         '<T n="object_animation_clip_name">o_clip_a0</T></U>' % _actor("c0", "MALE"), 8)
-    check("M4-extra-object-gated-UNKNOWN",
-          rec_extra["status"] == "UNKNOWN"
-          and "object" in rec_extra["status_reason"]
-          and "carries_object_prop" in rec_extra["status_reason"],
-          rec_extra["status_reason"])
+    check("M4-object-carrier-VALID", rec_obj["status"] == "VALID",
+          rec_obj["status_reason"])
+    import hashlib as _hl
+    _fp = rec_obj.get("fields_proven") or {}
+    _pre = "".join(str(p) for p in C.build_identifier_parts(_fp))
+    check("M4-object-clip-in-hash",
+          _fp.get("object_animation_clip_name") == "o_clip_a0"
+          and "o_clip_a0" in _pre,
+          _fp.get("object_animation_clip_name"))
+    # object geometry/material MISSING -> skipped (None), object clip still ok
+    check("M4-object-geom-material-skipped",
+          rec_obj["fields_proven"]["object_geometry_state"] is None
+          and rec_obj["fields_proven"]["object_material_state"] is None)
+
+    # ---- M4b (A): animation_props_list PRESENT (even empty) is never a gate ----
+    # ordinal-318 case: props-list container present but no real identity prop ->
+    # valid EMPTY props contribution; only prop clip/state enter when present.
+    rec_pr = C.build_row(
+        '<U n="x"><T n="animation_raw_display_name">PropRow</T>'
+        '<T n="animation_author">A</T>'
+        '<T n="animation_category">VAGINAL</T>'
+        '<T n="animation_locations">FLOOR</T>'
+        '<L n="actors">%s</L>'
+        '<L n="animation_props_list"><U n="p0"><T n="prop_id">7</T>'
+        '<T n="prop_type">x</T><T n="prop_guids">a,b</T></U></L></U>' % _actor("c0", "MALE"), 9)
+    check("M4b-props-list-presence-not-gate", rec_pr["status"] == "VALID",
+          rec_pr["status_reason"])
+    # non-identity-only prop (id/type/guids + no clip/state) -> empty prop element
+    check("M4b-props-nonidentity-only",
+          rec_pr.get("fields_proven", {}).get("props") == []
+          or all(not (p.get("animation_clip_name") or "") and not (p.get("geometry_state") or "")
+                 for p in rec_pr.get("fields_proven", {}).get("props", [])))
+
+    # ---- M4c (A): a real prop clip enters the hash in get_props order ----
+    rec_pc = C.build_row(
+        '<U n="x"><T n="animation_raw_display_name">PropRow2</T>'
+        '<T n="animation_author">A</T>'
+        '<T n="animation_category">VAGINAL</T>'
+        '<T n="animation_locations">FLOOR</T>'
+        '<L n="actors">%s</L>'
+        '<L n="animation_props_list">'
+        '<U n="p0"><T n="prop_id">1</T><T n="prop_animation_clip_name">pa0</T></U>'
+        '<U n="p1"><T n="prop_id">2</T><T n="prop_animation_clip_name">pb1</T></U>'
+        '</L></U>' % _actor("c0", "MALE"), 10)
+    check("M4c-props-clip-VALID", rec_pc["status"] == "VALID", rec_pc["status_reason"])
+    pclips = [p.get("animation_clip_name") for p in rec_pc["fields_proven"]["props"]]
+    check("M4c-props-order-clips", pclips == ["pa0", "pb1"], repr(pclips))
+    _pre_pc = "".join(str(p) for p in C.build_identifier_parts(rec_pc["fields_proven"]))
+    check("M4c-props-in-hash", "pa0" in _pre_pc and "pb1" in _pre_pc)
+
+    # ---- M4d (D): ordinal-318 with an EMPTY animation_props_list + MALE/FEMALE
+    #                returns VALID and re-hits the golden (props EMPTY contrib) ----
+    row318 = _row(ORD, "list", extra='<L n="animation_props_list"></L>')
+    rec318 = C.build_row(row318, ORD)
+    f318 = rec318.get("fields_proven")
+    import ww_p32_identifier_reconstruct as _REC
+    g318 = _REC.reconstruct_identifier(f318)["sha1"] if f318 else ""
+    check("M4d-ord318-empty-props-container-VALID", rec318["status"] == "VALID"
+          and (rec318.get("prop_rows") or []) == []
+          and not (rec318.get("fields_proven") or {}).get("props"),
+          rec318["status_reason"])
+    check("M4d-ord318-golden", g318 == C.GOLDEN_SHA1_318, g318)
+
+    # ---- D bridge fixture: plain ordinal-318 no extra container still golden ----
+    rec318b = C.build_row(_row(ORD, "list"), ORD)
+    f318b = rec318b.get("fields_proven")
+    g318b = _REC.reconstruct_identifier(f318b)["sha1"] if f318b else ""
+    check("D-ord318-golden", rec318b["status"] == "VALID" and g318b == C.GOLDEN_SHA1_318,
+          g318b)
 
     # ---- M5: duplicates detected but NOT auto-deduped ----
     dup_rows = [_row(0, "list")] + [_row(ORD, "list")] + [_row(0, "list")]
