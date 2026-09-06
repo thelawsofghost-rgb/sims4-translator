@@ -14,11 +14,14 @@ Supplied artifacts are re-opened and machine-checked:
                      0x7DF2169C and the real runtime instance
                      0x43F3438A94EDEB2B (never the whitebox 0x4444444400000002).
   2. UNIQUENESS     : WW_ANIM_XML (0x7DF2169C) count in the package must == 1.
-  3. OVERRIDE COUNT : re-enumerate <L animations_list>; exactly 479 animation
-                      <U> entries must each be overridden (i.e. their
-                      animation_raw_display_name now holds a translated value
-                      that DIFFERS from the source raw).  English leftover =>
-                      FAIL.
+  3. OVERRIDE COUNT : re-enumerate <L animations_list>; must have exactly 479
+                      animation <U> entries (ordinal coverage 0..478), each
+                      ordinal must carry a NON-EMPTY final display_name.  A
+                      translated_name that EQUALS the source raw (KEEP/保留英文)
+                      is legal and does NOT fail; only an empty value or a
+                      missing ordinal fails.  Reports OVERRIDE_COUNT=479,
+                      CHANGED_COUNT=<text differs from raw>,
+                      KEEP_COUNT=479-CHANGED_COUNT.
   4. CHECKLIST      : human/operator deploy checklist printed to stdout plus an
                      ASCII log written next to the package
                      (P35.2_DEPLOY_CHECKLIST.txt), all-ASCII-safe for PS1
@@ -30,13 +33,12 @@ with the build artifact.  (Differs from ww_p27_tgi_check which targets the
 P27 pipeline's dbpf_fast parser.)
 
 Source package (read-only) is optional via --source; when supplied, each of the
-479 override values must differ from the corresponding source raw (proves a real
-override, not a no-op English re-write) and every source ordinal 0..478 must
-still be present.
+479 final values must be non-empty and every source ordinal 0..478 must still
+be present, and CHANGED_COUNT (text != source raw) / KEEP_COUNT are reported.
 
 Exit codes: 0 PASS / 2 missing artifact / 3 parse failure or missing source /
             4 type/instance/uniqueness violated or whitebox detected /
-            5 override count/coverage violated / 6 unexpected error.
+            5 ordinal-coverage or empty-text violated / 6 unexpected error.
 
 ZERO_WRITE_TO_MODS=YES  ZERO_WRITE_TO_SAVES=YES  (this tool never writes Mods)
 """
@@ -73,7 +75,7 @@ def _fmt_inst(i):
 
 
 def _reopen_body(pkg: Path):
-    """Return (list_of_animation_dicts keyed 0..n-1 of {raw_text, xml_el_text})"""
+    """Return (list_of_animation_dicts keyed 0..n-1 of {text}) or (None, err)."""
     idx, err = wb.safe_parse(pkg)
     if err is not None or idx is None:
         return None, f"safe_parse failed: {err}"
@@ -197,35 +199,51 @@ def main(argv=None):
             L.append(f"ENTRY_COUNT=FAIL (want {EXPECT_COUNT}, got {len(anims)})")
         else:
             L.append(f"ENTRY_COUNT=OK ({EXPECT_COUNT})")
-        overridden = []
-        leftover = []
+        nonempty = []
+        empty = []
+        changed = []
+        kept = []
         for i, ad in enumerate(anims):
             val = ad["text"]
             sr = None
             if src_anims is not None and i < len(src_anims):
                 sr = src_anims[i]["text"]
-            # overridden means non-empty AND (no source, or differs from source raw)
-            if val == "" :
-                leftover.append((i, "EMPTY"))
-            elif sr is not None and val == sr:
-                leftover.append((i, "SAME-AS-RAW"))
+            if val == "":
+                empty.append(i)
             else:
-                overridden.append(i)
-        OVERRIDE_COUNT = len(overridden)
+                nonempty.append(i)
+                if sr is not None and val != sr:
+                    changed.append(i)
+                else:
+                    kept.append(i)
+        ANIM_COUNT = len(anims)
+        text_ok = len(nonempty)
+        changed_count = len(changed)
+        keep_count = ANIM_COUNT - changed_count
+        OVERRIDE_COUNT = text_ok  # every ordinal covered with non-empty final text
         L.append(f"OVERRIDE_COUNT={OVERRIDE_COUNT}")
-        if OVERRIDE_COUNT == EXPECT_COUNT and not leftover:
-            L.append("OVERRIDE_CHECK=OK (all %d overridden)" % EXPECT_COUNT)
+        L.append(f"CHANGED_COUNT={changed_count}")
+        L.append(f"KEEP_COUNT={keep_count}")
+        cov_fail = False
+        if ANIM_COUNT != EXPECT_COUNT:
+            cov_fail = True
+            L.append(f"ENTRY_COUNT=FAIL (ordinal coverage != {EXPECT_COUNT}, got {ANIM_COUNT})")
+        if text_ok != EXPECT_COUNT:
+            cov_fail = True
+            L.append("EMPTY_TEXT=FAIL (empty final display_name present)")
+            for i in empty[:40]:
+                L.append(f"  ordinal {i:3d}: EMPTY")
+            if len(empty) > 40:
+                L.append(f"  ... and {len(empty)-40} more")
+        if not cov_fail:
+            L.append(f"OVERRIDE_CHECK=OK (all {EXPECT_COUNT} ordinals have non-empty final display_name)")
+            L.append(f"  CHANGED={changed_count}  KEEP={keep_count}  (KEEP == raw is legal)")
         else:
             ok = False
             L.append("OVERRIDE_CHECK=FAIL")
-            for i, why in leftover[:40]:
-                L.append(f"  ordinal {i:3d} not overridden: {why}")
-            if len(leftover) > 40:
-                L.append(f"  ... and {len(leftover)-40} more")
-        # attribute provenance of a few overrides (translated text present)
-        sample = [i for i in overridden][:3]
-        for i in sample:
-            L.append(f"  sample ordinal {i}: text={anims[i]['text']!r}")
+        sample = [(i, anims[i]["text"]) for i in nonempty[:3]]
+        for i, sval in sample:
+            L.append(f"  sample ordinal {i}: text={sval!r}")
 
     # ---- deploy checklist ----
     L.append("")
@@ -245,8 +263,15 @@ def main(argv=None):
     print("\n".join(L))
     if not ok:
         print("VERDICT=FAIL", file=sys.stderr)
-        return 4 if (not (len(ww) == 1 and t == WW_ANIM_XML and inst_int ==
-                          EXPECTED_REAL_INSTANCE and inst_int != WHITEBOX_INSTANCE)) else 5
+        # exit 4 if a TGI/uniqueness/whitebox violation, else 5 (coverage/empty).
+        # Recompute from e directly so a later accidental rebind of t/inst_int can
+        # never flip the classification (fail-closed hardening).
+        _tid = getattr(e, "type_id", 0)
+        _iid = getattr(e, "instance_id", None)
+        _iid = _iid if isinstance(_iid, int) else None
+        _tgi_bad = not (len(ww) == 1 and _tid == WW_ANIM_XML and
+                        _iid == EXPECTED_REAL_INSTANCE and _iid != WHITEBOX_INSTANCE)
+        return 4 if _tgi_bad else 5
     print("DEPLOY PREFLIGHT: PASS (artifact ready; not copied)")
     return 0
 

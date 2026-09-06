@@ -134,13 +134,30 @@ def main():
         lo_rows = [(i, en_raw[i] if i == 2 else zh[i]) for i in range(N)]
         p_lo = build_over(lo_rows, label="lo")
         rc, so = _run(p_lo, src, N)
-        check("sm.leftover", rc == 5 and "OVERRIDE_COUNT=%d" % (N - 1) in so,
+        check("sm.keep_legal", rc == 0 and "KEEP_COUNT=1" in so and
+              "OVERRIDE_COUNT=%d" % N in so and "CHANGED_COUNT=%d" % (N - 1) in so,
               "rc=%d" % rc)
+        check("sm.keep_pass", "OVERRIDE_CHECK=OK" in so and "VERDICT=PASS" in so,
+              "")
 
-        # BADCOUNT: body has N-1 entries
+        # MISSING ordinal: body has N-1 entries (ordinal coverage < N) -> exit 5
         p_bc = build_over([(i, zh[i]) for i in range(N - 1)], label="bc")
         rc, so = _run(p_bc, src, N)
-        check("sm.badcount", rc == 5 and "ENTRY_COUNT=FAIL" in so, "rc=%d" % rc)
+        check("sm.missing_ordinal", rc == 5 and "ENTRY_COUNT=FAIL" in so,
+              "rc=%d" % rc)
+
+        # EMPTY text: ordinal 2 has an empty final display_name -> exit 5
+        em_rows = [(i, "" if i == 2 else zh[i]) for i in range(N)]
+        p_em = build_over(em_rows, label="em")
+        rc, so = _run(p_em, src, N)
+        check("sm.empty_text", rc == 5 and "EMPTY_TEXT=FAIL" in so
+              and "OVERRIDE_COUNT=%d" % (N - 1) in so, "rc=%d" % rc)
+
+        # no --source (provenance optional): all changed vs nothing = PASS, KEEP=0
+        p_nosrc = build_over([(i, zh[i]) for i in range(N)], label="ns")
+        rc, so = _run(p_nosrc, None, N)
+        check("sm.nosrc_pass", rc == 0 and "OVERRIDE_CHECK=OK" in so
+              and "CHANGED_COUNT=0" in so and "KEEP_COUNT=%d" % N in so, "rc=%d" % rc)
 
         # MISSING artifact
         rc, so = _run(tmp / "does_not_exist.bpkg", src, N)
