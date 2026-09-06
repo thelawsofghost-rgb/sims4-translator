@@ -69,13 +69,11 @@ if ($WW_TS4Script -eq "") {
 if (-not (Test-Path -LiteralPath $WW_TS4Script)) { Fail "WW_TS4SCRIPT_NOT_FOUND=$WW_TS4Script" }
 
 Write-Output "WW_TS4SCRIPT=$WW_TS4Script"
-# SHA-256 of the exact archive (ASCII-safe .NET hash).
-Add-Type -AssemblyName System.Security.Cryptography | Out-Null
-$shaBytes = [System.Security.Cryptography.SHA256]::Create().ComputeHash(
-    [System.IO.File]::OpenRead($WW_TS4Script))
-$sb = New-Object System.Text.StringBuilder
-foreach ($b in $shaBytes) { [void]$sb.Append($b.ToString("x2")) }
-Write-Output ("WW_TS4SCRIPT_SHA256=" + $sb.ToString())
+# SHA-256 of the exact archive via PS5.1-native Get-FileHash (no manual core
+# assembly load -- Add-Type System.Security.Cryptography is NOT resolvable on
+# Windows PowerShell 5.1/.NET Framework).
+$hash = (Get-FileHash -LiteralPath $WW_TS4Script -Algorithm SHA256).Hash.ToLowerInvariant()
+Write-Output "WW_TS4SCRIPT_SHA256=$hash"
 Write-Output "TUNING_MEMBER=$TUNING_MEMBER"
 
 Write-Output "SOURCE=$srcPath"

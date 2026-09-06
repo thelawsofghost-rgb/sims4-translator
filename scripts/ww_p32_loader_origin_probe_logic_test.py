@@ -269,11 +269,24 @@ def main():
     # D6: startup prints exact archive + digest + member
     for token in ("WW_TS4SCRIPT=", "WW_TS4SCRIPT_SHA256=", "TUNING_MEMBER="):
         check("D6-token-" + token, token in _ps1, token)
-    check("D6-sha256", "SHA256" in _ps1 and "ToString(\"x2\")" in _ps1, "sha512 digest printed")
+    # D6b: SHA256 is PS5.1-native Get-FileHash (no manual crypto assembly load)
+    check("D6-sha-native-cmdlet",
+          "Get-FileHash -LiteralPath" in _ps1
+          and "-Algorithm SHA256" in _ps1
+          and ".Hash.ToLowerInvariant()" in _ps1,
+          "PS5.1-native Get-FileHash SHA256")
     # D7: tuned pyc handed to CPython decode
     check("D7-tunes-to-py", "--tuning-pyc\", $tuningPyc" in _ps1
           or "@(\"--tuning-pyc\", $tuningPyc)" in _ps1.replace(chr(10), " "),
           "cpython decode path fed pyc")
+    # D8: PS5.1 runner-compat regression -- the EXECUTED code must not
+    #     Add-Type the core crypto assembly (not resolvable on Windows
+    #     PowerShell 5.1/.NET Fx).  A comment naming it is allowable.
+    check("D8-no-addtype-crypto",
+          "-AssemblyName System.Security.Cryptography" not in _ps1,
+          "no executable Add-Type System.Security.Cryptography")
+    check("D8-no-sha256-class", "[System.Security.Cryptography.SHA256]" not in _ps1,
+          "no .NET SHA256 class call")
 
     failed = [n for n, passed in ok if not passed]
     print("PASS_COUNT=%d FAIL_COUNT=%d" % (len(ok) - len(failed), len(failed)))
