@@ -319,6 +319,51 @@ def analyze_class(cls, dotted, cobj, res, version=None):
         # concern, reported per-key, never as a SIM failure).
         res.line("SIM_STATUS=PASS")
 
+    # ---- RESIDUAL-PROVENANCE (descriptive, per class; no dump of full stack) ----
+    # On the real pyc the Actor/Data failure is NOT a leaf boundary per se: the
+    # map's BUILD_CONST_KEY_MAP reads `count` values, but the class-body preamble
+    # left EXTRA stack (Actor +2, Data +4; Props 0) by the time the field-name
+    # tuple is pushed -> STACK_RESIDUAL / WRONG_STACK_EFFECT before the map.  The
+    # field-name-tuple LOAD_CONST only DISCOVERS the already-broken invariant; it
+    # is not the offending instruction.  sim_residual_report replays the same
+    # body (decision-free) and names the surplus producers so we can check them
+    # against CPython 3.7 stack semantics -- we do NOT change any opcode yet.
+    _bj = m["idx"]
+    _jk = _bj - 1
+    while _jk >= 0 and _op(seq[_jk]) in ("NOP",):
+        _jk -= 1
+    _rep = None
+    try:
+        _rep = lod.sim_residual_report(seq, _jk, len(keys), m["off"])
+    except Exception as _e:  # noqa: BLE001 -- diagnostic only
+        _rep = {"error": True, "msg": repr(_e)}
+    if _rep is not None and not _rep.get("error") and not _rep.get("unsupported"):
+        _extra = _rep.get("extra_stack_count", 0)
+        res.line("EXPECTED_VALUE_COUNT=%d" % _rep["expected_value_count"])
+        res.line("ACTUAL_STACK_DEPTH=%d" % _rep["actual_stack_depth"])
+        res.line("EXTRA_STACK_COUNT=%d" % _extra)
+        if _extra > 0:
+            res.line("EXTRA_STACK_ITEMS:")
+            for _r_i, _r_n in enumerate(_rep.get("residual_items", [])):
+                res.line("%d | offset=%s | opname=%s | kind=%s | %s"
+                         % (_r_i, _r_n.get("producer_offset", -1),
+                            _r_n.get("producer_opname", "?"),
+                            _r_n.get("kind", "?"),
+                            _r_n.get("short_repr", "?")))
+        else:
+            res.line("EXTRA_STACK_ITEMS: none")
+        _fd = _rep.get("first_divergence")
+        if _fd:
+            res.line("FIRST_STACK_DIVERGENCE=%s:%s:%s"
+                     % (cls, _fd["offset"], _fd["opname"]))
+            res.line("EXPECTED_DEPTH=%d" % _rep["expected_value_count"])
+            res.line("ACTUAL_DEPTH=%d" % _rep["actual_stack_depth"])
+            res.line("DELTA=%d" % _extra)
+        else:
+            res.line("FIRST_STACK_DIVERGENCE=NONE")
+    else:
+        res.line("RESIDUAL_PROVENANCE=UNAVAILABLE")
+
     # default candidate + reject reason per wanted (correlated) key only
     for k in want:
         ev = _decoded.get(k)

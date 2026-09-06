@@ -312,6 +312,93 @@ def main():
                   "REAL_DECODER_FIRST_FAILURE=NONE" in txt,
                   "not-a-failure marker on healthy run")
 
+    # ---- RESIDUAL-PROVENANCE (this change) --------------------------------
+    # New diagnostic: when the real map's BALANCE is broken by EXTRA stack depth
+    # accumulated in the preamble (not by a leaf), sim_residual_report names the
+    # surplus producers.  Actor +2 / Data +4 / Props +0 come from the WINDOWS run;
+    # here we lock the mechanism: balanced -> extra 0 (decision-consistent),
+    # a preamble that leaves 2 surplus BUILD_MAP nodes -> extra 2 with the builds
+    # named + one-level child provenance, and a vector the DECISION sim rejects as
+    # residual must show report extra==1 tied to the same surplus LOADs.
+
+    # R1: healthy compiled fixture -> per-class EXTRA_STACK_COUNT=0, no dump, and
+    # the report agrees with the decision engine (decision PASS => actual==count).
+    if pyc is not None:
+        txt_full = _run_diag(pyc)
+        if txt_full is not None:
+            check("R1-healthy-extra0-actor",
+                  txt_full.count("EXTRA_STACK_COUNT=0") >= 3
+                  and "EXTRA_STACK_ITEMS: none" in txt_full
+                  and "FIRST_STACK_DIVERGENCE=NONE" in txt_full,
+                  "balanced run: 3x extra 0 + no surplus + no divergence")
+            check("R1-no-full-stack-dump", "depth_timeline" not in txt_full
+                  and "residual_items" not in txt_full
+                  and "stack_depth_at_j" not in txt_full,
+                  "no raw dump leaked into output")
+
+    # R2 (unit): REAL-style preamble -- two lone BUILD_MAP before one top-level
+    # leaf value + field tuple -> the replay must report EXTRA 2 surplus nodes,
+    # each a BUILD_MAP with its own key/value child offsets (one level only).
+    def _mk(opname, arg=None, av=None, offset=0, ar=None):
+        return _FakeIns(opname, arg, av, ar, offset)
+
+    _seq_p = [
+        _mk("LOAD_CONST", 0, "default", 2), _mk("LOAD_CONST", 0, None, 4),
+        _mk("BUILD_MAP", 1, 1, 6),
+        _mk("LOAD_CONST", 0, "default", 8), _mk("LOAD_CONST", 0, None, 10),
+        _mk("BUILD_MAP", 1, 1, 12),
+        _mk("LOAD_NAME", 0, "_tse", 14), _mk("LOAD_CONST", 0, "clip", 16),
+        _mk("LOAD_CONST", 0, ("raw_type",), 18),
+        _mk("CALL_FUNCTION_KW", 1, 1, 20),
+        _mk("LOAD_CONST", 0, ("k0",), 22),      # field tuple at index 10
+    ]
+    _rep_p = diag.lod.sim_residual_report(_seq_p, 10, 1, 24)
+    check("R2-extra-two", _rep_p.get("extra_stack_count") == 2,
+          "preamble leaves 2 surplus (Actor-style)")
+    check("R2-actual-depth", _rep_p.get("actual_stack_depth") == 3,
+          "depth 3 = tuple-1 (before tuple) with 2 extra over count 1")
+    _r2items = _rep_p.get("residual_items", [])
+    check("R2-two-residual-nodes", len(_r2items) == 2, "2 surplus nodes")
+    _kinds = [n["kind"] for n in _r2items]
+    _ops = [n["producer_opname"] for n in _r2items]
+    _offs = [n["producer_offset"] for n in _r2items]
+    check("R2-names-build-map", _ops == ["BUILD_MAP", "BUILD_MAP"],
+          "both surplus named BUILD_MAP (%r)" % _ops)
+    check("R2-carry-offsets", _offs == [6, 12],
+          "produces @6 and @12 (%r)" % _offs)
+    # one-level children recorded (the key/value operands of each map)
+    check("R2-one-level-children",
+          all(isinstance(n["children"], list) and len(n["children"]) == 2
+              and all(isinstance(c, int) for c in n["children"])
+              for n in _r2items),
+          "each build node carries 1-level child producer offsets")
+    _fd = _rep_p.get("first_divergence") or {}
+    check("R2-first-divergence-build", _fd.get("opname") == "BUILD_MAP"
+          and _fd.get("offset") == 6,
+          "FIRST_STACK_DIVERGENCE points at BUILD_MAP@6 (%r)" % (_fd,))
+
+    # R3 (unit): a vector the DECISION sim REJECTS as a residual must have its
+    # report tie the extra to the SAME surplus LOADs that broke the balance.
+    _seq_r = [
+        _mk("LOAD_NAME", 0, "a", 10), _mk("LOAD_NAME", 0, "b", 12),
+        _mk("LOAD_NAME", 0, "_tse", 14), _mk("LOAD_CONST", 0, "x", 16),
+        _mk("LOAD_CONST", 0, ("raw_type",), 18),
+        _mk("CALL_FUNCTION_KW", 1, 1, 20),
+        _mk("LOAD_CONST", 0, ("k0", "k1"), 22),   # field tuple at 6
+    ]
+    cap_r = {}
+    _dec_r = diag.lod._sim_value_producers(
+        _seq_r, 6, 2, 24, on_first_failure=lambda md: cap_r.update(md))
+    check("R3-decision-rejects-as-residual", _dec_r is None
+          and cap_r.get("reason") == "MAP_ARITY_MISMATCH",
+          "decision sim sees a RESIDUAL (arity), not a leaf default")
+    _rep_r = diag.lod.sim_residual_report(_seq_r, 6, 2, 24)
+    check("R3-report-extra-one", _rep_r.get("extra_stack_count") == 1,
+          "replay scores the same surplus (+1 over count 2)")
+    _r3ops = [n["producer_opname"] for n in _rep_r.get("residual_items", [])]
+    check("R3-names-dangling-loads", _r3ops == ["LOAD_NAME"],
+          "surplus names the dangling LOAD (%r)" % _r3ops)
+
     failed = [n for n, p in ok if not p]
     print("PASS_COUNT=%d FAIL_COUNT=%d" % (len(ok) - len(failed), len(failed)))
     if failed:

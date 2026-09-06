@@ -574,6 +574,252 @@ def decode_structure(seq, path_name, on_first_failure=None):
 
 
 # ---------------------------------------------------------------------------
+# RESIDUAL-PROVENANCE diagnostic replay (DESCRIPTIVE ONLY -- never used by
+# populate_defaults / decode / decode_code_with_instr / _sim_value_producers;
+# production parser semantics are NOT affected by its existence).
+#
+# The decision sim above (see _sim_value_producers) is the DECISION engine and is
+# left byte-for-byte untouched.  For a TUNABLE_STRUCTURE map whose BUILD_CONST_KEY_MAP
+# balance is broken NOT by a leaf-default but by REAL EXTRA stack depth accumulated
+# in the preamble (Actor +2, Data +4 while Props +0 and PASS on the real pyc), a
+# diagnostic-only replay reconstructs how every stack slot was built so it can say
+# WHICH producer's push first left a surplus and WHAT the surplus nodes are.
+#
+# Returns a dict (never raises), or None if a truly unmodellable op is met:
+#    expected_value_count   count (== len(field tuple))
+#    stack_depth_at_j       total sim depth AT j INCLUDING the field-name tuple
+#    actual_stack_depth     stack_depth_at_j - 1   (just BEFORE the tuple push)
+#    extra_stack_count      actual_stack_depth - expected_value_count   (>=0)
+#    depth_timeline         [(index, opname, offset, depth_after)]
+#    residual_items         bottom-most surplus nodes (depth < tuple count region)
+#    first_divergence       {index, opname, offset, reason} (lowest surviving producer)
+# Every node carries producer offset / opname / kind and, where the node was built
+# by an aggregating op (BUILD_MAP/BUILD_LIST/.../CALL*), a __children__ of up to one
+# level (child producer offsets only - never a full tree).
+def sim_residual_report(seq, j, count, map_off):
+    _PUSH1 = ("LOAD_CONST", "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
+              "LOAD_DEREF", "LOAD_CLASSDEREF", "LOAD_ATTR", "LOAD_METHOD",
+              "LOAD_BUILD_CLASS")
+    _CALLOP = ("CALL_FUNCTION", "CALL_FUNCTION_KW", "CALL_FUNCTION_EX",
+               "CALL_METHOD", "CALL")
+
+    def _mk(kind, off, opname, argval=None, children=None, rep=None):
+        node = {"kind": kind, "producer_offset": off, "producer_opname": opname,
+                "argval": argval, "children": list(children) if children else [],
+                "short_repr": rep if rep is not None else _short(argval, kind)}
+        return node
+
+    def _short(argval, kind):
+        try:
+            if kind == "build" or kind == "call":
+                # argval is the op name string -> a compact `BUILD_MAP(len=N)`
+                return "%s" % (argval,)
+            if kind == "const":
+                return repr(argval)
+            return str(argval)
+        except Exception:  # noqa: BLE001
+            return "?"
+
+    stack = []            # symbolic nodes (decision-free diagnostic mirror)
+    depth_timeline = []
+    try:
+        for t in range(0, j + 1):
+            ins = seq[t]
+            op = _op(ins)
+            if op in ("KEEP_ALIVE", "NOP", "EXTENDED_ARG"):
+                continue
+            _of = _off(ins)
+            if op in _PUSH1:
+                if op == "LOAD_CONST":
+                    stack.append(_mk("const", _of, op, argval=_const(ins)))
+                else:
+                    stack.append(_mk("name", _of, op,
+                                     argval=getattr(ins, "argval", None)))
+            elif op == "DUP_TOP":
+                if stack:
+                    stack.append(dict(stack[-1]))
+            elif op == "DUP_TOP_TWO":
+                if len(stack) >= 2:
+                    stack.append(dict(stack[-2])); stack.append(dict(stack[-1]))
+            elif op == "ROT_TWO":
+                if len(stack) >= 2:
+                    stack[-1], stack[-2] = stack[-2], stack[-1]
+            elif op == "ROT_THREE":
+                if len(stack) >= 3:
+                    stack[-1], stack[-3], stack[-2] = stack[-3], stack[-2], stack[-1]
+            elif op == "POP_TOP":
+                if stack:
+                    stack.pop()
+            elif op.startswith("STORE_NAME") or op in ("STORE_GLOBAL", "STORE_FAST",
+                                                        "STORE_DEREF",
+                                                        "STORE_CLASSDEREF"):
+                if stack:
+                    stack.pop()
+            elif op in ("STORE_ATTR", "STORE_SUBSCR"):
+                for _ in range(2 if op == "STORE_ATTR" else 3):
+                    if stack:
+                        stack.pop()
+            elif op.startswith("DELETE_"):
+                pass
+            elif op.startswith("UNARY_"):
+                pass                       # pop1 push1 net-neutral, keep top tag
+            elif op.startswith("BINARY_") or op in ("BINARY_SUBSCR", "COMPARE_OP",
+                                                     "INPLACE_OP", "BINARY_OP"):
+                for _ in range(2):
+                    if stack:
+                        stack.pop()
+                stack.append(_mk("name", _of, op))
+            elif op in ("BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_SLICE",
+                        "BUILD_STRING"):
+                cnt = getattr(ins, "arg", 1) or 1
+                if len(stack) >= cnt:
+                    kids = stack[-cnt:]
+                    del stack[-cnt:]
+                    stack.append(
+                        _mk("build", _of, op, argval=op,
+                            children=[c["producer_offset"] for c in kids]))
+            elif op == "BUILD_MAP":
+                cnt = getattr(ins, "arg", 0) or 0
+                need = 2 * cnt
+                if len(stack) >= need:
+                    kids = stack[-need:]
+                    del stack[-need:]
+                    stack.append(
+                        _mk("build", _of, op, argval=op,
+                            children=[c["producer_offset"] for c in kids]))
+            elif op in ("MAKE_FUNCTION", "MAKE_FUNCTION_NORGS"):
+                flags = getattr(ins, "arg", 0) or 0
+                extras = 0
+                for _bit in (0x01, 0x04, 0x08, 0x10):
+                    if flags & _bit:
+                        extras += 1
+                need = 2 + extras
+                if len(stack) >= need:
+                    kids = stack[-need:]
+                    del stack[-need:]
+                    stack.append(_mk("call", _of, op, argval=op,
+                                     children=[c["producer_offset"] for c in kids]))
+            elif op in _CALLOP:
+                has_names = False
+                k = t - 1
+                while k >= 0 and _op(seq[k]) in ("NOP", "EXTENDED_ARG", "KEEP_ALIVE"):
+                    k -= 1
+                if k >= 0 and _op(seq[k]) == "LOAD_CONST":
+                    cv = _const(seq[k])
+                    if isinstance(cv, tuple) and cv and all(
+                            isinstance(s, str) for s in cv):
+                        has_names = True
+                arity = getattr(ins, "arg", 0) or 0
+                need = arity + (2 if has_names else 1)
+                take_n = need if len(stack) >= need else len(stack)
+                kids = stack[-take_n:] if take_n else []
+                if take_n:
+                    del stack[-take_n:]
+                stack.append(_mk("call", _of, op, argval=op,
+                                 children=[c["producer_offset"] for c in kids]))
+            elif op == "RETURN_VALUE":
+                if stack:
+                    stack.pop()
+            elif op in ("BEGIN_FINALLY", "END_FINALLY", "POP_EXCEPT", "POP_BLOCK",
+                        "WITH_CLEANUP_START", "WITH_CLEANUP_FINISH", "CLEANUP_THROW",
+                        "PUSH_EXC_INFO"):
+                return {"unsupported": op, "index": t, "offset": _of}
+            else:
+                # unmodelled straight-line consumer that popped nothing we track
+                # would corrupt depth; report instead of guess.
+                if op.startswith(("JUMP", "SETUP", "IMPORT", "FORMAT")):
+                    return {"unsupported": op, "index": t, "offset": _of}
+                # tolerate small push-1/other by continuing depth bookkeeping
+                continue
+            depth_timeline.append((t, op, _of, len(stack)))
+
+        shelf = stack[:-1] if stack else []          # drop the field tuple (top)
+        actual = len(stack) - 1 if stack else 0       # depth before the tuple
+        extra = actual - count
+        residual = shelf[:extra] if extra > 0 else []
+        # FIRST_DIVERGENCE: lowest producer offset that survived un-popped to j
+        # (an unmatched surplus push); this is where net depth first stopped
+        # balancing against the map region.
+        fd = None
+        if extra > 0 and residual:
+            low = min(residual, key=lambda n: n["producer_offset"])
+            fd = {"index": None, "offset": low["producer_offset"],
+                  "opname": low["producer_opname"], "kind": low["kind"],
+                  "reason": "unmatched-surplus-push"}
+        return {"expected_value_count": count,
+                "stack_depth_at_j": len(stack),
+                "actual_stack_depth": actual,
+                "extra_stack_count": extra,
+                "residual_items": residual,
+                "depth_timeline": depth_timeline,
+                "first_divergence": fd,
+                "field_tuple_index": j, "map_offset": map_off}
+    except Exception:  # noqa: BLE001
+        return {"error": True}
+    """Given a code-object instruction list `seq`, find every TUNABLE_STRUCTURE
+    dict-literal (BUILD_CONST_KEY_MAP with a preceding const field-name tuple) and
+    return {field_key: {default, type, evidence_off_lo, evidence_off_hi, path}}.
+    Fail-closed: an element whose default is not a constant causes the whole map
+    to be skipped (returned as UNRESOLVED marker -> caller marks class UNPROVEN)."""
+    result = {}
+    unresolved = []
+    n = len(seq)
+    i = 0
+    while i < n:
+        if _op(seq[i]) != "BUILD_CONST_KEY_MAP":
+            i += 1
+            continue
+        count = getattr(seq[i], "arg", 1)
+        # the field-name tuple is the constant pushed immediately before
+        j = i - 1
+        while j >= 0 and _op(seq[j]) in ("NOP",):
+            j -= 1
+        if j < 0 or _op(seq[j]) != "LOAD_CONST":
+            i += 1
+            continue
+        fieldtuple = _const(seq[j])
+        if not (isinstance(fieldtuple, tuple) and fieldtuple and
+                all(isinstance(k, str) for k in fieldtuple)):
+            i += 1
+            continue
+        keys = list(fieldtuple)
+        if count != len(keys):
+            unresolved.append(("keytuple/count mismatch", _off(seq[i])))
+            i += 1
+            continue
+        # keys authoritative.  Recover the ordered top-level value PRODUCERS from
+        # BUILD_CONST_KEY_MAP's own stack semantics (forward symbolic evaluation).
+        call_idxs = _sim_value_producers(seq, j, len(keys), _off(seq[i]),
+                                         on_first_failure=on_first_failure)
+        if call_idxs is None:
+            unresolved.append(("stack-sim value recovery failed (unsupported/branchy "
+                              "body or arity mismatch)", _off(seq[i])))
+            i += 1
+            continue
+        ok = True
+        for idx_key in range(len(keys)):
+            key = keys[idx_key]
+            # floor = the previous top-level leaf's producing CALL so the default
+            # window for this leaf never reaches into the preceding value's packets.
+            floor = call_idxs[idx_key - 1] if idx_key > 0 else -1
+            dl = _leaf_default_ins(seq, call_idxs[idx_key], floor)
+            if dl is None:
+                ok = False
+                break
+            lit, loff = dl
+            result[key] = {
+                "default": lit,
+                "type": type(lit).__name__,
+                "evidence_offset_range": (loff, _off(seq[i])),
+                "path": path_name,
+            }
+        if not ok:
+            unresolved.append(("leaf default not a constant", _off(seq[i])))
+        i += 1
+    return result, unresolved
+
+
+# ---------------------------------------------------------------------------
 # top-level decode used by populate_defaults
 # ---------------------------------------------------------------------------
 def decode_code_with_instr(code_map, instructions_by_path, wanted_map):
