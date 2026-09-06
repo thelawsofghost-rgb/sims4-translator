@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 r"""
 P35.4B -- READ-ONLY scan of a Sims4 Mods folder to find the LIVE package(s)
-that actually carry WW_ANIM_XML / STBL / related TGIs (i.e. the real "P31 native
-override" carrier vs our P35.1 XML override).
+that carry WW_ANIM_XML with the WW_Nevely42_Animations instance 0x43F3438A94EDEB2B
+(the real "P31 native override" that works in-game), not generic XML/STBL mods.
 WHY:
   We must NOT assume the P31 package filename. The user has never deleted Mods
   files, so whatever package(s) actually affect the WW UI in-game are STILL in
@@ -52,8 +52,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--mods", required=True, help="The Sims 4 Mods root folder")
     ap.add_argument("--outdir", default=None, help="where to write report (default output/p35 in repo)")
+    ap.add_argument("--target-inst", default="0x43F3438A94EDEB2B",
+                    help="WW_ANIM_XML instance to hunt (default WW_Nevely42_Animations display XML)")
     a = ap.parse_args(argv)
     mods = Path(a.mods)
+    target_inst = getattr(a, "target_inst", None) or 0x43F3438A94EDEB2B
+    target_inst = int(str(target_inst), 0)
     if not mods.is_dir():
         print("ERROR: Mods dir not found: %s (exit 2)" % mods, file=sys.stderr)
         return 2
@@ -63,8 +67,9 @@ def main(argv=None):
     L = []
     add = L.append
 
-    add("===== P35.4B READ-ONLY Mods SCAN (WW_ANIM_XML / STBL / related TGI) =====")
+    add("===== P35.4B READ-ONLY Mods SCAN (WW_Nevely42_Animations override hunt) =====")
     add("mods root : %s" % mods)
+    add("target WW_ANIM_XML inst : 0x%016X (WW_Nevely42_Animations display XML)" % target_inst)
     add("")
 
     pkgs = sorted([p for p in mods.rglob("*.package") if p.is_file()],
@@ -74,6 +79,8 @@ def main(argv=None):
 
     hit_xml = []
     hit_stbl = []
+    hit_match = []  # packages that carry WW_ANIM_XML with the target instance
+    tgt_pkgs = []   # raw (rel, [(group,inst)]) for target-inst carriers
     n_ok = n_err = 0
     for p in pkgs:
         rel = p.relative_to(mods)
@@ -108,7 +115,11 @@ def main(argv=None):
             add("    TYPE_INV=%s" % inv_s)
             if has_xml:
                 for (g, i) in xml_insts:
-                    add("    WW_ANIM_XML=yes  group=0x%08X inst=0x%016X" % (g, i))
+                    tag = "  <== TARGET MATCH (WW_Nevely42_Animations override)" if i == target_inst else ""
+                    add("    WW_ANIM_XML=yes  group=0x%08X inst=0x%016X%s" % (g, i, tag))
+                    if i == target_inst:
+                        hit_match.append(rel)
+                        tgt_pkgs.append((rel, (g, i)))
             if has_stbl:
                 for (inst, loc) in stbl_insts:
                     add("    STBL=yes inst=0x%016X locale_highbyte=0x%02X(%s)"
@@ -119,16 +130,25 @@ def main(argv=None):
 
     add("===== SUMMARY =====")
     add("packages parsed OK : %d   errors: %d" % (n_ok, n_err))
-    add("packages containing WW_ANIM_XML (0x7DF2169C): %d" % len(hit_xml))
+    add("")
+    add("** TARGET INST 0x%016X carriers (the real WW_Nevely42_Animations " % target_inst
+        + "override(s) in Mods): %d" % len(hit_match))
+    for rel, (g, i) in tgt_pkgs:
+        add("    TARGET+ %s  (group=0x%08X inst=0x%016X)" % (rel, g, i))
+    if not hit_match:
+        add("    (none found -> P35.1 override is the only carrier when deployed)")
+    add("")
+    add("packages containing WW_ANIM_XML (0x7DF2169C) any instance: %d" % len(hit_xml))
     for rel in hit_xml:
         add("    XML+  %s" % rel)
     add("packages containing STBL (0x220557DA): %d" % len(hit_stbl))
     for rel in hit_stbl:
         add("    STBL+ %s" % rel)
     add("")
-    add("=> 'P31 native override that works' is expected to be among the XML+ / "
-        "STBL+ / listed packages above (whatever its filename); compare it against "
-        "the P35.1 override with scripts\\ww_p35_4b_diff.py --p31 <that> --p35 <P35.1>")
+    add("=> the real 'P31 native override that works' must appear above under "
+        "TARGET+ (same instance 0x%016X). Point the diff tool at THAT package, "
+        "not at generic XML mods. Compare: scripts\\ww_p35_4b_diff.py --p31 "
+        "<TARGET+ pkg> --p35 <P35.1 override>" % target_inst)
     add("ZERO_WRITE_TO_MODS=YES  ZERO_WRITE_TO_SAVES=YES  (read-only scan)")
 
     report = "\n".join(L)
