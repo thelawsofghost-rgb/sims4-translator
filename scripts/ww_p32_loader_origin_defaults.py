@@ -301,33 +301,27 @@ def decode_structure(seq, path_name):
             unresolved.append(("leaf count mismatch", _off(seq[i])))
             i += 1
             continue
-        # mark enclosing relationships by CALLABLE-LOAD: the callable of CALL u is
-        # the nearest preceding LOAD_NAME/LOAD_GLOBAL/LOAD_METHOD/LOAD_FAST/
-        # LOAD_DEREF.  A CALL t is an INNER (operand) call -- and therefore NOT a
-        # map value -- iff some LATER call u has its callable load strictly BEFORE
-        # t, so u consumes t's result as an operand:  callable_load(u) < t < u.
-        def _callable_load(t):
-            s = t - 1
-            while s >= lo:
-                op = _op(seq[s])
-                if op in ("LOAD_NAME", "LOAD_GLOBAL", "LOAD_METHOD",
-                          "LOAD_FAST", "LOAD_DEREF", "LOAD_ATTR",
-                          "LOAD_GLOBAL"):
-                    return s
-                s -= 1
-            return None
-
-        kept = []
-        for t in all_calls:
-            inner = False
-            for u in all_calls:
-                if u <= t:
-                    continue
-                cl = _callable_load(u)
-                if cl is not None and cl < t < u:
-                    inner = True
-                    break
-            if not inner:
+        # TOP-LEVEL leaf CALLs = a map value's producer.  Discriminator (ORDER
+        # based, not a name scan): a top-level leaf CALL is followed by one of
+        # (a) the field-name tuple LOAD_CONST at j (the final leaf), or (b) a fresh
+        # constructor callable LOAD_NAME/LOAD_GLOBAL/LOAD_METHOD/... that starts the
+        # NEXT top-level leaf.  An inner TunableX(...) call is instead followed by
+        # the enclosing structure-element's OWN trailing argument LOAD_CONSTs
+        # (raw_type value / kw-name packet), so it is correctly NOT counted as a
+        # leaf.  Fails closed (leaf count mismatch) if the structure differs.
+        kept = []  # list indices of top-level leaf CALLs, source order
+        for t in range(lo, j):
+            if _op(seq[t]) not in _CALL_OPCODES:
+                continue
+            nxt = t + 1
+            while nxt < j and _op(seq[nxt]) == "NOP":
+                nxt += 1
+            if nxt >= j:
+                kept.append(t)  # structurally final call before the map
+                continue
+            pnxt = _op(seq[nxt])
+            if pnxt in ("LOAD_NAME", "LOAD_GLOBAL", "LOAD_METHOD", "LOAD_FAST",
+                        "LOAD_DEREF", "LOAD_CLASSDEREF", "LOAD_BUILD_CLASS"):
                 kept.append(t)
         # kept already in source order; must equal field-tuple length
         if len(kept) != len(keys):

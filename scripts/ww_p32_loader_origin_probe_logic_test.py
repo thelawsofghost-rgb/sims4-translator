@@ -362,6 +362,52 @@ def main():
     check("C6-count-mismatch-failclosed", c6_nofabricate,
           "claims=%r" % _claims)
 
+    # C7: CPython 3.7 encoding parity.  The REAL WW archive is compiled by CPython
+    #     3.7.9, which has NO CALL_FUNCTION_KW opcode: keyword calls like
+    #     _tse(default=X) compile to CALL_FUNCTION n with the kw-name tuple passed as
+    #     the trailing positional argument.  The decoder must be CALL-opcode agnostic
+    #     (it reads only LOAD_CONST packet CONTENTS and CALL membership).  Prove it by
+    #     rewriting every leaf CALL_FUNCTION_KW/CALL_KW on the compiled fixture to
+    #     CALL_FUNCTION (3.7 stack shape: same name-tuple, same value) and asserting
+    #     the recovered defaults are IDENTICAL (incl. the wrapper inner literal and
+    #     the None/0/0.0/''/1 type mix).
+    class _Instr(object):
+        __slots__ = ("opcode", "opname", "arg", "argval", "offset")
+
+    def _to_py37_layout(co_obj):
+        """Return an instruction list whose leaf CALL_KW opcodes are renamed to
+        CALL_FUNCTION to mirror 3.7's encoding (kw-name tuple already present as a
+        trailing positional push).  Other opcodes are unchanged."""
+        out = []
+        for i in dis.get_instructions(co_obj):
+            o = _Instr()
+            o.opcode = i.opcode
+            o.arg = i.arg
+            o.argval = i.argval
+            o.offset = i.offset
+            o.opname = "CALL_FUNCTION" if i.opname == "CALL_FUNCTION_KW" else i.opname
+            out.append(o)
+        return out
+
+    res37, _cm37 = lod.extract_from_code(_build(_SRC), _to_py37_layout)
+    act37 = res37["_WickedWhimsAnimationActor"]["evidence"]
+    prop37 = res37["_WickedWhimsAnimationPropsData"]["evidence"]
+    dat37 = res37["_WickedWhimsAnimationData"]["evidence"]
+    c7ok = (
+        not res37["_WickedWhimsAnimationPropsData"]["unresolved"] and
+        act37["animation_x_offset"]["default"] is None and
+        act37["animation_y_offset"]["default"] == 0.0 and
+        act37["animation_z_offset"]["default"] == 1 and
+        act37["animation_facing_offset"]["default"] == 0 and
+        prop37["prop_animation_clip_name"]["default"] == "" and
+        prop37["prop_animation_clip_name"]["type"] == "str" and
+        prop37["prop_geometry_state"]["default"] == 0 and
+        prop37["prop_geometry_state"]["type"] == "int" and
+        dat37["object_animation_clip_name"]["default"] == "" and
+        dat37["animation_version"]["default"] == 1)
+    check("C7-py37-call-layout", c7ok,
+          "actor_none/0.0/1/0 + wrapper ''/0 + data ''/1 under CALL_FUNCTION")
+
     # ---- D-section: production runner (ps1) archive selection is EXACT ----
     # Regression for the wrong-archive root cause: the previous runner globbed
     # *.ts4script and took the first hit (ww_p29c_display_caller_trace.ts4script),
