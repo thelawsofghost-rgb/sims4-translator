@@ -6,17 +6,19 @@ Proves (WITHOUT a game) that the P29-E runtime hook, driven exactly as it will b
 on Dorothy's real machine, records the right identity evidence and respects scope:
   A  observation-only passthrough: original get_picker_row called with its args,
      its return (the row object) returned verbatim; wrapper never mutates self.
-  B  target gating: only AUTHOR=='Nevely42' AND (display=='TEST300' |
-     display=='Caught Cheating 2' | stage=='caught cheating 2') records a detailed
-     P29E_PICKER_ROW_BEGIN/END block; a missing filter opens NO detailed block.
+  B  author gate: EVERY call whose author=='Nevely42' records a detailed
+     P29E_PICKER_ROW_BEGIN/END block REGARDLESS of display_name / stage_name;
+     any non-Nevely author opens NO detailed block and is silently passed
+     through (no P29E_NON_TARGET_SKIPPED spam).
   C  block fields: PY_OBJECT_ID / ANIMATION_ID / AUTHOR / DISPLAY_NAME_ATTR /
      DISPLAY_NAME_OVERRIDE / STAGE_NAME_ATTR / IDENTIFIER / ROW_CLASS /
-     ROW_NAME_ATTR / ROW_GET_NAME all present on a gated call.
+     ROW_NAME_ATTR / ROW_GET_NAME all present on a Nevely42 call.
   D  multi-instance identity: two DISTINCT instances that share the same
      animation_id / identifier map to two DISTINCT PY_OBJECT_ID values -> the exact
      signal the runtime hypothesis (a different instance drives the UI) depends on.
   E  row .get_name passthrough is captured when callable; ABSENT handled when not.
-  F  cap: > _MAX_CALLS gated calls stop opening full blocks (P29E_LIMIT_REACHED).
+  F  cap: > _NEVELY_CAP Nevely42 calls stop opening full blocks
+     (P29E_NEVELY_LIMIT_REACHED).
 The class is stubbed under the task-stated host module in sys.modules so
 _PATCH class discovery resolves the SAME code path the deployed module uses.
 
@@ -344,27 +346,69 @@ def main():
     if not any("ROW_NAME_ATTR='TEST300'" in b for b in _blocks(text7)):
         fails.append("A-7-row-name-dropped")
 
-    # ---- F: cap - a fresh reset produces at most one more NEW block near the cap
+    # ---- F: cap - Nevely42 depth cap stops opening full blocks -------------
     _reset_class_state()
     M._patch_class()
-    M._STATE["calls"] = M._MAX_CALLS - 1   # next call exactly hits the cap boundary
+    # seed 1 shy of the Nevely cap: next call opens (idx==cap), then the
+    # following call crosses it and emits P29E_NEVELY_LIMIT_REACHED
+    M._STATE["calls"] = M._NEVELY_CAP - 1
     f_before = _emit(_LOG).count("P29E_PICKER_ROW_BEGIN")
     for i in range(6):
         Inst("Nevely42", "TEST300", animation_id=100 + i,
              identifier="cap_%d" % i).get_picker_row(i)
     text8 = _emit(_LOG)
     f_delta = text8.count("P29E_PICKER_ROW_BEGIN") - f_before
-    # two gated calls may open BEFORE the limit (idx==cap opens; the next hits it)
+    # one call may open (idx==cap) before the next hits the limit
     if f_delta > 2:
         fails.append("F-exceeded-near-cap (delta=%d)" % f_delta)
-    if "P29E_LIMIT_REACHED=YES" not in text8:
+    if "P29E_NEVELY_LIMIT_REACHED=YES" not in text8:
         fails.append("F-limit-not-emitted")
 
-    # ---- core gating: the very first block after seeded header is real, and no
-    # earlier non-gated family spammed the log (skip lines throttled) ----
+    # ---- B2 / NON-NAME: a Nevely42 whose display/stage are NOT in the old
+    # narrow set MUST still record a detailed block (P29-E2 AUTHOR-only gate).
+    _reset_class_state()
+    M._patch_class()
+    Inst("Nevely42", "NOT Caught Cheating 2", stage_name="some other stage",
+         animation_id=9, identifier="not_in_old_filter").get_picker_row(0)
+    textB2 = _emit(_LOG)
+    if not [b for b in _blocks(textB2)
+            if "DISPLAY_NAME_ATTR='NOT Caught Cheating 2'" in b]:
+        fails.append("NON-NAME-no-block-for-other-Nevely-display")
+    kvB2 = None
+    for b in _blocks(textB2):
+        if "DISPLAY_NAME_ATTR='NOT Caught Cheating 2'" in b:
+            kvB2 = _kv(b)
+            break
+    if kvB2:
+        if kvB2.get("AUTHOR") != "'Nevely42'":
+            fails.append("NON-NAME-author-wrong: %r" % kvB2.get("AUTHOR"))
+        if kvB2.get("STAGE_NAME_ATTR") != "'some other stage'":
+            fails.append("NON-NAME-stage-wrong: %r" % kvB2.get("STAGE_NAME_ATTR"))
+
+    # ---- NON-TARGET-SILENT: a non-Nevely author must NOT open a block AND must
+    # NOT spam any author/display/stage skip line (P29-E2 silent passthrough).
+    _reset_class_state()
+    M._patch_class()
+    nts_blocks_before = _emit(_LOG).count("P29E_PICKER_ROW_BEGIN")
+    nts_noise_before = _emit(_LOG).count("P29E_NON_TARGET_SKIPPED=")
+    for i in range(30):                 # many walk rows of another author
+        Inst("SomeoneElse_%d" % i, "Caught Cheating 2",
+             animation_id=i, identifier="os_%d" % i).get_picker_row(i)
+    textNTS = _emit(_LOG)
+    # no NEW detailed blocks from the 30 non-Nevely calls
+    nts_blocks_delta = (textNTS.count("P29E_PICKER_ROW_BEGIN")
+                        - nts_blocks_before)
+    if nts_blocks_delta != 0:
+        fails.append("NON-TARGET-wrote-detail-block(+%d)" % nts_blocks_delta)
+    # no NEW non-Nevely skip-noise from those calls
+    nts_noise_delta = textNTS.count("P29E_NON_TARGET_SKIPPED=") - nts_noise_before
+    if nts_noise_delta != 0:
+        fails.append("NON-TARGET-skip-spam(+%d)" % nts_noise_delta)
+
+    # ---- NARROW gate gone: no old-style per-author/display/stage skip lines ----
     skips = _emit(_LOG).count("P29E_NON_TARGET_SKIPPED=")
-    if skips > 5:
-        fails.append("skip-throttle-broken(%d)" % skips)
+    if skips:
+        fails.append("skip-still-emitted(%d)" % skips)
 
     # =========================================================================
     # NEW deterministic-log checks (added 2026-09-06):

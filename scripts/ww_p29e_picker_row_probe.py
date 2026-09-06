@@ -42,16 +42,16 @@ The hook records, PER CALL, a block:
       ROW_GET_NAME=         repr(row.get_name()) when row.get_name callable else ABSENT
     P29E_PICKER_ROW_END
 
-FILTER (gated to the target so the log does not explode over every animation):
-    AUTHOR == "Nevely42"  AND  at least one of:
-        display_name == "TEST300"
-        display_name == "Caught Cheating 2"
-        animation_stage_name == "caught cheating 2"
-    A call failing the filter records NOTHING except a single
-        P29E_NON_TARGET_SKIPPED=<author>|<display_name>|<stage_name>
-    line (throttled) so we can still confirm the hook is live without dumping the
-    whole catalog.  NOTE: stage_name is used ONLY as a locator filter, NOT as a UI
-    source assumption (P29-D excluded animation_stage_name as the UI title source).
+FILTER (P29-E2: AUTHOR-only).  Authoritative fix for the real-machine gap where the
+UI showed other Nevely42 rows but the narrow locator filter never fired.  Depth is now
+recorded for EVERY call whose author == "Nevely42" REGARDLESS of display_name or
+stage_name.  display_name / stage_name are still captured as block FIELDS but are NOT
+used to decide whether to record.  All other authors return the original result
+silently -- no P29E_NON_TARGET_SKIPPED spam, only a single monotonic non-Nevely
+counter (P29E_NON_NEVELY_SKIPPED=N) is written once, then never again.
+
+NOTE: stage_name remains only a captured FIELD, never a UI-source assumption
+(P29-D excluded animation_stage_name as the UI title source).
 
 If the SAME animation_id / identifier maps to multiple PY_OBJECT_ID values, every one
 is recorded (each is a separate gated call; identical instance id -> same block).
@@ -62,8 +62,8 @@ SAFETY CONTRACT (P29-C-proven; fail-closed, observation-only):
        with original args/kwargs; its return returned verbatim.
     3. Every attribute/method read is GUARDED; a single failure yields
        '<error-reading>' and the block continues; never crash the game.
-    4. repr bounded (500 chars).  Per-target-identity calls are capped
-       (_MAX_CALLS -> P29E_LIMIT_REACHED) to avoid unbounded growth.
+    4. repr bounded (500 chars).  Nevely42-author depth is capped
+       (_NEVELY_CAP -> P29E_NEVELY_LIMIT_REACHED) to avoid unbounded growth.
     5. Python 3.7-clean (same as game).  No 3.8+ stdlib API.
 Auto-run on import is gated by WW_P29_*_DISABLE_AUTORUN so offline logic tests can
 drive the wrapper without a game.
@@ -74,9 +74,7 @@ import time
 import traceback as _traceback
 
 _TARGET_AUTHOR = "Nevely42"
-_TARGET1 = "TEST300"
-_TARGET2 = "Caught Cheating 2"
-_STAGE_FILTER = "caught cheating 2"
+_NEVELY_CAP = 200            # depth cap for Nevely42 calls (P29-E2 widening)
 
 # Preferred host modules for the class; an ordered list.  `animation_instance` is the
 # task-stated host; the others are the P29-C-proven real hosts, used only as a
@@ -89,9 +87,7 @@ _CLS_MODULES = (
 _CLS_NAME = "SexAnimationInstance"
 _METHOD_NAME = "get_picker_row"
 
-_MAX_CALLS = 60                # per call cap guards unbounded growth on real machine
 _MAX_LOCAL_RPR = 500
-_MAX_SKIP_LINES = 200          # throttle non-target skips
 _UNSET_SENTINEL = object()
 
 _STATE = {
@@ -99,8 +95,8 @@ _STATE = {
     "patched_cls": None,
     "patched_methods": {},
     "calls": 0,
-    "skip_lines": 0,
-    "limit_reached": False,
+    "nevely_limit_reached": False,
+    "silent_non_nevely_calls": 0,
     "error": None,
     "_log_path": "",
     "retry_count": 0,
@@ -228,12 +224,11 @@ def _log_header():
     _emit("=== P29E PICKER ROW IDENTITY PROBE ===")
     _emit("HOOK_LOADED_AT=%s" % ts)
     _emit("TARGET_AUTHOR=%s" % _TARGET_AUTHOR)
-    _emit("DISPLAY_FILTERS=%s,%s" % (_TARGET1, _TARGET2))
-    _emit("STAGE_FILTER=%s" % _STAGE_FILTER)
+    _emit("AUTHOR_ONLY_FILTER=YES")
 
 
 def _instance_read(self):
-    """Guard-read all per-instance identity values used for the filter + block."""
+    """Guard-read all per-instance identity values recorded as block fields."""
     got = {}
     got["author"] = _safe_attr(self, "author")
     got["display_name"] = _safe_attr(self, "display_name")
@@ -241,29 +236,15 @@ def _instance_read(self):
     return got
 
 
-def _passes_filter(got):
-    """Gating predicate (locator only).  author then any one display/stage match."""
-    if got.get("author") != _TARGET_AUTHOR:
-        return False
-    dn = got.get("display_name")
-    st = got.get("stage_name")
-    try:
-        if dn == _TARGET1 or dn == _TARGET2:
-            return True
-    except Exception:
-        pass
-    try:
-        if st == _STAGE_FILTER:
-            return True
-    except Exception:
-        pass
-    return False
+def _is_nevely(got):
+    """P29-E2 gating: record depth for EVERY Nevely42 author call."""
+    return got.get("author") == _TARGET_AUTHOR
 
 
 def _hook_get_picker_row(orig):
     def _wrapped(self, *args, **kwargs):
         got0 = _instance_read(self)
-        target = _passes_filter(got0)
+        target = _is_nevely(got0)
         # --- observation-only passthrough (always call orig) ---
         ret = None
         try:
@@ -278,20 +259,18 @@ def _hook_get_picker_row(orig):
                 _restore_all()
             raise
         if not target:
-            # throttle a single non-target skip line so liveness is visible
-            st = _STATE
-            if st.get("skip_lines", 0) < _MAX_SKIP_LINES:
-                st["skip_lines"] = st.get("skip_lines", 0) + 1
-                _emit("P29E_NON_TARGET_SKIPPED=author=%r display=%r stage=%r" %
-                      (got0.get("author"), got0.get("display_name"),
-                       got0.get("stage_name")))
+            # P29-E2: non-Nevely authors are silent passthrough (original result
+            # returned, NO per-call skip line).  Only a monotonic counter is kept
+            # so the boot summary can show how many non-Nevely rows were walked.
+            _STATE["silent_non_nevely_calls"] = \
+                _STATE.get("silent_non_nevely_calls", 0) + 1
             return ret
         st = _STATE
         idx = st.get("calls", 0) + 1
-        if idx > _MAX_CALLS:
-            if not st.get("limit_reached"):
-                st["limit_reached"] = True
-                _emit("P29E_LIMIT_REACHED=YES")
+        if idx > _NEVELY_CAP:
+            if not st.get("nevely_limit_reached"):
+                st["nevely_limit_reached"] = True
+                _emit("P29E_NEVELY_LIMIT_REACHED=YES")
             return ret
         st["calls"] = idx
         # re-read AFTER the original for the emitted values (informational only)
@@ -543,8 +522,8 @@ def _reset_state_for_test():
     _restore_all()
     _STATE["wrapped"] = False
     _STATE["calls"] = 0
-    _STATE["skip_lines"] = 0
-    _STATE["limit_reached"] = False
+    _STATE["nevely_limit_reached"] = False
+    _STATE["silent_non_nevely_calls"] = 0
     _STATE["error"] = None
     _STATE["retry_count"] = 0
     _STATE["retry_cb_executed"] = False
@@ -579,8 +558,9 @@ def main():
             ok = True
             break
     if ok:
-        _emit("VERDICT=PROBE_ARMED (only Nevely42 + TEST300/Caught Cheating 2/"
-              "stage filter calls are recorded in depth)")
+        _emit("FILTER_MODE=AUTHOR_ONLY")
+        _emit("VERDICT=PROBE_ARMED (records every Nevely42 get_picker_row; "
+              "all other authors silent)")
         return
     armed = _register_scheduler()
     if not armed:
