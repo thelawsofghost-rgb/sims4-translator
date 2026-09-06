@@ -167,6 +167,8 @@ class DiagResult(object):
         # real default-extraction failures on classes whose leaf count matched
         self.leaf_ok_by_class = {}        # cls -> bool
         self.default_unknown_on = []      # cls where a leaf_ok class had UNKNOWN
+        # opt-in first-failure capture from the shared stack simulator
+        self.sim_failure_by_class = {}    # cls -> metadata dict or None
 
     def line(self, s):
         self.lines.append(s)
@@ -256,16 +258,66 @@ def analyze_class(cls, dotted, cobj, res, version=None):
     # start reproduced only the TAIL (3-of-22, 2-of-26).  Delegating to the shared
     # decoder guarantees the diagnostic and the production gate read the pyc
     # identically -> a PASS here is a PASS for DEFAULT_PROVEN/DEFAULT_UNKNOWN_COUNT.
-    _decoded, _unresolved = lod.decode_structure(seq, cls)
+    #
+    # An OPT-IN observer is wired here (and here only) so that when the simulator
+    # fail-closes inside the real class body the diagnostic records the EXACT FIRST
+    # failure site + reason as debug metadata.  Production never sets this observer;
+    # decode_structure/_sim_value_producers semantics are unchanged when it is None
+    # (see ww_p32_loader_origin_defaults).  We do NOT pre-judge a root cause: the
+    # metadata must first identify which real 3.7 xdis opcode diverges.
+    _cap = {}
+
+    def _on_first_failure(md):
+        _cap.update(md)          # capture ONLY the very first failure of the class
+
+    _decoded, _unresolved = lod.decode_structure(seq, cls,
+                                                  on_first_failure=_on_first_failure)
     leaf_count = len(keys)      # top-level leaves == map keys when fully recovered
     leaf_ok = (not _unresolved)
     res.leaf_ok_by_class[cls] = leaf_ok
+    res.sim_failure_by_class[cls] = (_cap or None)
     if _unresolved:
         res.line("LEAF_COUNT=FAILED (%s)" % _unresolved[0][0])
         res.line("LEAF_COUNT_MATCH=NO stage=LEAF_BOUNDARY")
     else:
         res.line("LEAF_COUNT=%d" % leaf_count)
         res.line("LEAF_COUNT_MATCH=%s" % ("YES" if leaf_ok else "NO stage=LEAF_BOUNDARY"))
+
+    # ---- FIRST-FAILURE debug metadata (only when the stack sim fail-closed) ----
+    if _unresolved and _cap:
+        res.line("SIM_STATUS=FAIL")
+        res.line("SIM_FAIL_REASON=%s" % _cap["reason"])
+        res.line("SIM_FAIL_OFFSET=%d" % _cap["off"])
+        res.line("SIM_FAIL_OPNAME=%s" % _cap["opname"])
+        res.line("SIM_FAIL_ARG=%s" % ("" if _cap["arg"] is None else _cap["arg"]))
+        res.line("SIM_FAIL_ARGVAL=%r" % (_cap["argval"],))
+        res.line("SIM_FAIL_ARGREPR=%r" % (_cap["argrepr"],))
+        res.line("STACK_DEPTH_BEFORE=%d" % _cap["avail"])
+        res.line("REQUIRED_POPS=%s" % _cap["needed"])
+        res.line("AVAILABLE_STACK=%d" % _cap["avail"])
+        # if the reason is MAP_ARITY_MISMATCH add the arity reading the user wants
+        if _cap["reason"] == "MAP_ARITY_MISMATCH":
+            res.line("MAP_KEYS=%d" % len(keys))
+        # +/-5 instruction context around the failing offset, ONE row per insn
+        res.line("SIM_CONTEXT:")
+        ft = _cap["t"]
+        if ft is not None and 0 <= ft < len(seq):
+            lo = max(0, ft - 5)
+            hi = min(len(seq), ft + 6)
+            for ridx in range(lo, hi):
+                rins = seq[ridx]
+                marker = " <<<" if ridx == ft else ""
+                res.line("  offset=%s | opname=%s | arg=%s | argval=%r | stack_depth_before=%s%s"
+                         % (_off(rins), _op(rins), getattr(rins, "arg", ""),
+                            _argsval(rins),
+                            (_cap["avail"] if ridx == ft else "?"), marker))
+    else:
+        # no first-failure was captured: the shared stack simulator did not
+        # fail-close on this class body (leaf recovery + all producers OK), so
+        # the map path is PASS.  A wanted key may still be UNKNOWN below if a
+        # leaf default is not a constant literal (that is a DEFAULT_EXTRACTION
+        # concern, reported per-key, never as a SIM failure).
+        res.line("SIM_STATUS=PASS")
 
     # default candidate + reject reason per wanted (correlated) key only
     for k in want:
@@ -360,6 +412,30 @@ def main():
     stage = _classify(res)
     res.line("")
     res.line("REAL_DECODER_FAILURE_STAGE=%s" % stage)
+
+    # single canonical FIRST FAILURE across the owner classes, in class order.
+    # Format: <class>:<offset>:<opname>:<reason>  (e.g.
+    # _WickedWhimsAnimationData:214:CALL_METHOD:STACK_UNDERFLOW).  Only set when a
+    # first failure was actually captured by the shared stack simulator.
+    _ff = ""
+    for c in _CLASSES:
+        md = res.sim_failure_by_class.get(c)
+        if md:
+            _ff = "%s:%s:%s:%s" % (c, md["off"], md["opname"] or "?",
+                                    md["reason"])
+            break
+    if _ff:
+        res.line("REAL_DECODER_FIRST_FAILURE=%s" % _ff)
+    else:
+        res.line("REAL_DECODER_FIRST_FAILURE=NONE")
+    # per-class SIM_STATUS summary (PASS/FAIL) for the three owners
+    for c in _CLASSES:
+        if not res.found.get(c):
+            res.line("SIM_STATUS_%s=N/A" % c)
+        elif res.sim_failure_by_class.get(c):
+            res.line("SIM_STATUS_%s=FAIL" % c)
+        else:
+            res.line("SIM_STATUS_%s=PASS" % c)
 
     outdir = os.path.dirname(os.path.abspath(args.out))
     try:

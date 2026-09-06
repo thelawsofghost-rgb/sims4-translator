@@ -265,7 +265,7 @@ def _is_scalar_literal(v):
     return v is None or isinstance(v, (int, float, str, bool, complex))
 
 
-def _sim_value_producers(seq, j, count, map_off):
+def _sim_value_producers(seq, j, count, map_off, on_first_failure=None):
     """Recover, in SOURCE ORDER, the indexes of the CALL instructions that produce
     the `count` TOP-LEVEL value expressions stacked just below the field-name tuple
     LOAD_CONST at index `j` (immediately before BUILD_CONST_KEY_MAP pop count).
@@ -286,7 +286,21 @@ def _sim_value_producers(seq, j, count, map_off):
         list of `count` call-indexes (oldest first = the tuple's order), OR None
     when the class body uses an unsupported/ambiguous opcode that could affect the
     target stack (fail closed), or when stack balance can't be proven at `j`
-    (underflow / unexpected depth)."""
+    (underflow / unexpected depth).
+
+    ``on_first_failure`` is an OPT-IN observer used ONLY by the read-only real-pyc
+    diagnostic (ww_p32_loader_origin_real_diag.py).  When None (production) the
+    behaviour and return values are byte-for-byte identical to a caller that never
+    passes it.  When a callable, it is invoked EXACTLY ONCE at the FIRST class-body
+    opcode where the sim decides to fail closed, with a metadata dict so the
+    diagnostic can pinpoint which 3.7 xdis instruction diverges:
+        reason   UNSUPPORTED_OPCODE | STACK_UNDERFLOW | MAP_ARITY_MISMATCH
+        t        failing instruction index in seq
+        off      its code offset
+        needed   operand count the op demanded (STACK_UNDERFLOW / MAP_ARITY)
+        avail    operand stack depth available at the failing index
+    The observer must NOT rely on the sim continuing: the sim ALWAYS returns None
+    after consulting it (fail-closed is unchanged)."""
     # Operand-stack effect table (net effect on the list is handled inline).  A
     # stack item is either None (uninteresting operand) or an int (index of the
     # CALL that produced this value) so the producers can be read back later.
@@ -297,6 +311,28 @@ def _sim_value_producers(seq, j, count, map_off):
              "LOAD_BUILD_CLASS")
     CALLOP = ("CALL_FUNCTION", "CALL_FUNCTION_KW", "CALL_FUNCTION_EX",
               "CALL_METHOD", "CALL")
+
+    _fired = [False]
+
+    def _fail(reason, needed=None, ins=None, t=None):
+        """Fail closed: record the FIRST failure through the optional observer,
+        then always return None.  When no observer is wired this is a pure
+        `return None` (production semantics unchanged)."""
+        if on_first_failure is not None and not _fired[0]:
+            _fired[0] = True
+            on_first_failure({
+                "reason": reason,
+                "t": t,
+                "ins": ins,
+                "off": _off(ins) if ins is not None else -1,
+                "opname": _op(ins) if ins is not None else "",
+                "arg": getattr(ins, "arg", None) if ins is not None else None,
+                "argval": getattr(ins, "argval", None) if ins is not None else None,
+                "argrepr": getattr(ins, "argrepr", None) if ins is not None else None,
+                "needed": needed,
+                "avail": len(stack),
+            })
+        return None
 
     for t in range(0, j + 1):
         if t > j:
@@ -310,19 +346,19 @@ def _sim_value_producers(seq, j, count, map_off):
             continue
         if op == "DUP_TOP":
             if not stack:
-                return None
+                return _fail("STACK_UNDERFLOW", needed=1, ins=ins, t=t)
             stack.append(stack[-1])
             continue
         if op == "DUP_TOP_TWO":
             if len(stack) < 2:
-                return None
+                return _fail("STACK_UNDERFLOW", needed=2, ins=ins, t=t)
             stack.extend(stack[-2:])
             continue
-        if op in ("ROT_TWO",):
+        if op == "ROT_TWO":
             if len(stack) >= 2:
                 stack[-1], stack[-2] = stack[-2], stack[-1]
             continue
-        if op in ("ROT_THREE",):
+        if op == "ROT_THREE":
             if len(stack) >= 3:
                 stack[-1], stack[-3], stack[-2] = stack[-3], stack[-2], stack[-1]
             continue
@@ -340,6 +376,10 @@ def _sim_value_producers(seq, j, count, map_off):
             for _ in range(2 if op == "STORE_ATTR" else 3):
                 if stack:
                     stack.pop()
+                else:
+                    return _fail("STACK_UNDERFLOW",
+                                 needed=(2 if op == "STORE_ATTR" else 3),
+                                 ins=ins, t=t)
             continue
         if op.startswith("DELETE_"):
             continue                       # symbol-table only, no operand stack
@@ -353,14 +393,14 @@ def _sim_value_producers(seq, j, count, map_off):
                 if stack:
                     stack.pop()
                 else:
-                    return None
+                    return _fail("STACK_UNDERFLOW", needed=2, ins=ins, t=t)
             stack.append(None)
             continue
         if op in ("BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_SLICE",
                   "BUILD_STRING"):
             cnt = getattr(ins, "arg", 1) or 1
             if len(stack) < cnt:
-                return None
+                return _fail("STACK_UNDERFLOW", needed=cnt, ins=ins, t=t)
             del stack[-cnt:]
             stack.append(None)
             continue
@@ -370,7 +410,7 @@ def _sim_value_producers(seq, j, count, map_off):
             # pre-3.6 semantics differ but WW is 3.7+; accept modern form.
             need = 2 * cnt
             if len(stack) < need:
-                return None
+                return _fail("STACK_UNDERFLOW", needed=need, ins=ins, t=t)
             del stack[-need:]
             stack.append(None)
             continue
@@ -387,7 +427,7 @@ def _sim_value_producers(seq, j, count, map_off):
                     extras += 1
             need = 2 + extras           # code const + __qualname__ const + optionals
             if len(stack) < need:
-                return None
+                return _fail("STACK_UNDERFLOW", needed=need, ins=ins, t=t)
             del stack[-need:]
             stack.append(None)         # the function object result
             continue
@@ -419,7 +459,7 @@ def _sim_value_producers(seq, j, count, map_off):
             arity = getattr(ins, "arg", 0) or 0
             need = arity + (2 if has_names else 1)   # values + (names?) + callable
             if len(stack) < need:
-                return None
+                return _fail("STACK_UNDERFLOW", needed=need, ins=ins, t=t)
             del stack[-need:]
             stack.append(t)            # this CALL produced exactly one stack value
             continue
@@ -433,11 +473,12 @@ def _sim_value_producers(seq, j, count, map_off):
             # exception table bookkeeping; WW data-class owners do not wrap the
             # map build in a try/with.  If such control flow precedes the build it
             # is outside the straight-line value region -> not a map-value operand.
-            return None
-        # Any remaining opcode (e.g. a real JUMP_*, SETUP_*, IMPORT_*) either does
-        # not affect a straight-line class-body operand stack in a way we can prove
-        # or signals non-straight-line control flow.  Fail closed rather than guess.
-        return None
+            return _fail("UNSUPPORTED_OPCODE", ins=ins, t=t)
+        # Any remaining opcode (e.g. a real JUMP_*, SETUP_*, IMPORT_, FORMAT_VALUE)
+        # either does not affect a straight-line class-body operand stack in a way
+        # we can prove or signals non-straight-line control flow.  Fail closed
+        # rather than guess.
+        return _fail("UNSUPPORTED_OPCODE", ins=ins, t=t)
 
     # At index j the field-name tuple was JUST pushed (LOAD_CONST).  So the stack
     # above the `count` values is: [*count producers (oldest ../first), keytuple].
@@ -449,22 +490,26 @@ def _sim_value_producers(seq, j, count, map_off):
     # count+1 entries (count values + key tuple) and the count entries directly
     # below the key tuple are all CALL-producers (ints), in source order.
     if len(stack) < count + 1:
-        return None
+        # stack too shallow at the tuple: cannot prove `count` top-level values.
+        return _fail("MAP_ARITY_MISMATCH", needed=count + 1,
+                     ins=seq[j], t=j)
     # key tuple is the very last push (top of stack after j).
     if stack[-1] is not None:
         # the final push before map must be the key tuple (a plain const, None tag)
-        return None
+        return _fail("MAP_ARITY_MISMATCH", ins=seq[j], t=j)
     wait = stack[-1 * (count + 1):]       # bottom..top preserved order
     vals = wait[:-1]                       # exclude the key tuple (top)
     # exactly count producers, each an int CALL index, none None/other
     if len(vals) != count:
-        return None
+        return _fail("MAP_ARITY_MISMATCH",
+                     needed=(count + 1), ins=seq[j], t=j)
     if not all(isinstance(x, int) for x in vals):
-        return None
+        return _fail("MAP_ARITY_MISMATCH",
+                     needed=(count + 1), ins=seq[j], t=j)
     return list(vals)
 
 
-def decode_structure(seq, path_name):
+def decode_structure(seq, path_name, on_first_failure=None):
     """Given a code-object instruction list `seq`, find every TUNABLE_STRUCTURE
     dict-literal (BUILD_CONST_KEY_MAP with a preceding const field-name tuple) and
     return {field_key: {default, type, evidence_off_lo, evidence_off_hi, path}}.
@@ -498,7 +543,8 @@ def decode_structure(seq, path_name):
             continue
         # keys authoritative.  Recover the ordered top-level value PRODUCERS from
         # BUILD_CONST_KEY_MAP's own stack semantics (forward symbolic evaluation).
-        call_idxs = _sim_value_producers(seq, j, len(keys), _off(seq[i]))
+        call_idxs = _sim_value_producers(seq, j, len(keys), _off(seq[i]),
+                                         on_first_failure=on_first_failure)
         if call_idxs is None:
             unresolved.append(("stack-sim value recovery failed (unsupported/branchy "
                               "body or arity mismatch)", _off(seq[i])))
