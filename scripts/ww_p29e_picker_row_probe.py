@@ -94,13 +94,6 @@ _MAX_LOCAL_RPR = 500
 _MAX_SKIP_LINES = 200          # throttle non-target skips
 _UNSET_SENTINEL = object()
 
-_LOG_ROOTS = (
-    os.environ.get("TMP", ""),
-    os.environ.get("TEMP", ""),
-    os.path.expanduser("~"),
-    os.getcwd(),
-)
-
 _STATE = {
     "wrapped": False,
     "patched_cls": None,
@@ -117,22 +110,69 @@ _STATE = {
 }
 
 
+# Deterministic on-game log destination.
+#
+# The real machine ALWAYS logs to this fixed absolute path -- no TEMP/TMP/HOME/CWD
+# "first writable root" fallback (that ambiguity is exactly what made "did the
+# module even run / where did it log?" undecidable).  Offline logic tests may set
+# WW_P29E_LOG_PATH to a writable temp file so the same code stays OS-portable; on
+# the real machine the variable is unset and the fixed absolute path below is used.
+_DEFAULT_LOG_PATH = ("C:\\Users\\thela\\Documents\\Electronic Arts\\The Sims 4"
+                     + "\\p29e_picker_row_probe.log")
+
+
+def _resolve_log_path():
+    override = os.environ.get("WW_P29E_LOG_PATH") or ""
+    if override.strip():
+        return override.strip()
+    return _DEFAULT_LOG_PATH
+
+
 def _log_basename():
-    return "ww_p29e_picker_row_probe.log"
+    return "p29e_picker_row_probe.log"
 
 
 def _log_path():
-    for root in _LOG_ROOTS:
-        if not root:
-            continue
-        try:
-            p = os.path.join(root, _log_basename())
-            with open(p, "a", encoding="utf-8") as _:
+    # Deterministic: env override if set, else the fixed absolute game path.
+    # (No first-writable fallback; always one known target.)
+    return _resolve_log_path()
+
+
+def _raw_log_append(text):
+    """Append TEXT + newline (UTF-8) to the deterministic log file.
+
+    Independent of _STATE/_emit/_log_path, which only take effect once main()'s
+    boot runs -- so the module-enter / env-state / main-exception lines below are
+    recorded even if main() is never reached (or only fires much later via the
+    in-world retry path).  Never raises: a logging failure drops the line quietly
+    but the module still imports and the game never sees an exception.
+    """
+    try:
+        path = _resolve_log_path()
+    except Exception:
+        path = _DEFAULT_LOG_PATH
+    # Only write to an ABSOLUTE target.  The fixed on-Windows default is a real
+    # drive-letter absolute path (os.path.isabs True on Windows) and the
+    # WW_P29E_LOG_PATH override on any host is an absolute path in practice (a
+    # tempfile).  A NON-absolute path means we are offline on a non-Windows host
+    # where the drive-letter default would otherwise be misread as a relative
+    # filename containing literal backslashes and create a bogus "C:\..." file in
+    # the current directory.  Guard that out: skip the write entirely (dropped
+    # quietly) so offline/logic-test runs never spray that artifact; the real
+    # machine is Windows and is unaffected.
+    if not os.path.isabs(path):
+        return
+    try:
+        parent = os.path.dirname(path)
+        if parent and not os.path.exists(parent):
+            try:
+                os.makedirs(parent)
+            except Exception:
                 pass
-            return p
-        except Exception:
-            continue
-    return ""
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(text + "\n")
+    except Exception:
+        pass
 
 
 def _emit(line):
@@ -528,6 +568,10 @@ def _bootstrap_boot_marker():
 
 
 def main():
+    # First line of main(): visible proof main() was entered, before the boot
+    # marker plumbing sets _STATE["_log_path"].  Uses the raw deterministic file
+    # so it is recorded even if a later boot line fails.
+    _raw_log_append("P29E_MAIN_ENTER=YES")
     _bootstrap_boot_marker()
     ok = False
     for _ in range(3):
@@ -548,10 +592,43 @@ def main():
     _emit("VERDICT=DISCOVERY_PENDING (in-world retry armed)")
 
 
+# ---- module-enter provenance ------------------------------------------------
+# Fires on ANY real execution of this module body, BEFORE _RUN is computed and
+# before main() is (or is not) called.  A P29E_MODULE_ENTER line proves the body
+# truly ran; MODULE_NAME records the live __name__; LOG_PATH names the exact
+# deterministic file that subsequent lines land in.
+_raw_log_append("P29E_MODULE_ENTER=YES")
+_raw_log_append("MODULE_NAME=%s" % (__name__,))
+_raw_log_append("LOG_PATH=%s" % (_resolve_log_path(),))
+
+
 _RUN = (not os.environ.get("WW_P29_DISABLE_AUTORUN")) and \
     (not os.environ.get("WW_P29E_DISABLE_AUTORUN"))
+
+# Env-state + decision, recorded before any gated execution so a skipped autorun is
+# distinguishable from "module never ran" and from "main() raised".
+_raw_log_append("WW_P29_DISABLE_AUTORUN=%r" %
+                 (os.environ.get("WW_P29_DISABLE_AUTORUN"),))
+_raw_log_append("WW_P29E_DISABLE_AUTORUN=%r" %
+                 (os.environ.get("WW_P29E_DISABLE_AUTORUN"),))
+_raw_log_append("P29E_RUN=%s" % (_RUN and "True" or "False",))
+if not _RUN:
+    _raw_log_append("P29E_AUTORUN_SKIPPED=YES")
+
+
 if _RUN:
     try:
         main()
-    except Exception:
-        pass
+    except Exception as _exc_main:
+        # NEVER propagate to the game (would risk a crash), but NEVER swallow
+        # silently: append type + repr + full traceback to the same deterministic
+        # log so a main() failure is visible and auditable from the file alone.
+        try:
+            _raw_log_append("P29E_MAIN_EXCEPTION=YES")
+            _raw_log_append("P29E_MAIN_EXCEPT_TYPE=%s" %
+                             (type(_exc_main).__name__,))
+            _raw_log_append("P29E_MAIN_EXCEPT_REPR=%s" % (repr(_exc_main),))
+            for _tb_line in _traceback.format_exc().splitlines():
+                _raw_log_append("P29E_MAIN_EXCEPT_TB:" + _tb_line)
+        except Exception:
+            pass

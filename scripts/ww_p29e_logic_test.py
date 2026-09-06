@@ -24,6 +24,7 @@ Exit 0=PASS.  ASCII.  Python 3.7-compatible.  Uses only stdlib.
 """
 import os
 import re
+import subprocess
 import sys
 import tempfile
 
@@ -132,6 +133,97 @@ def _kv(blob):
             k, v = ln.split("=", 1)
             d[k] = v
     return d
+
+
+# ---------------------------------------------------------------------------
+# Deterministic-log helpers for the new bootstrap/logging checks.
+#
+# The new module-enter / env-state / main-exception lines are written by the
+# probe to a FIXED absolute log path, overridable offline via WW_P29E_LOG_PATH.
+# These checks run the probe as a fresh subprocess under a chosen environment so
+# the module-level autorun gate and the raw logger are exercised exactly as the
+# game would import them (module body executes -> MODULE_ENTER etc.), without
+# depending on this parent process's already-imported M.
+# ---------------------------------------------------------------------------
+
+
+def _read_text(path):
+    if path and os.path.exists(path):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read()
+    return ""
+
+
+def _run_driver(driver, logpath):
+    """Write DRIVER (list of source lines) and run it in a fresh subprocess.
+
+    A fresh interpreter gives a genuinely fresh import of the probe, so the
+    module body's real import-time writes (MODULE_ENTER, env state, RUN gate)
+    are observed exactly as the game would produce them.  The driver sets
+    WW_P29E_LOG_PATH=LOG_PATH before importing.  Returns (stdout, log_text).
+    """
+    dpath = os.path.join(tmpdir, "driver_%d.py" % os.getpid())
+    with open(dpath, "w", encoding="utf-8") as f:
+        f.write("\n".join(driver) + "\n")
+    try:
+        out = subprocess.run(
+            [sys.executable, dpath, logpath],
+            cwd=HERE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=120,
+        )
+        stdout = (out.stdout or b"").decode("utf-8", "replace")
+    except Exception as exc:
+        stdout = "DRIVER_RUN_ERROR: %r" % (exc,)
+    return stdout, _read_text(logpath)
+
+
+# Fresh-import driver preamble: arg1 becomes the WW_P29E_LOG_PATH target.  The
+# env the parent set (disable vars / override path) is inherited by the child.
+_DRIVER_IMPORT = [
+    "import os, sys",
+    "logp = sys.argv[1]",
+    'os.environ["WW_P29E_LOG_PATH"] = logp',
+    "sys.path.insert(0, HERE_PLACEHOLDER)",
+    "import ww_p29e_picker_row_probe",
+]
+
+
+def _driver_with_here():
+    return [ln.replace("HERE_PLACEHOLDER", repr(HERE)) for ln in _DRIVER_IMPORT]
+
+
+def _module_tail_src():
+    """Return the module's autorun-guard tail (module-enter -> except) as text.
+
+    Anchored to the fixed "module-enter provenance" comment so we can re-exec it
+    against a live module namespace to drive exceptions deterministically.
+    """
+    anchor = "# ---- module-enter provenance"
+    src = open(os.path.join(HERE, "ww_p29e_picker_row_probe.py"),
+               encoding="utf-8").read()
+    idx = src.index(anchor)
+    return src[idx:]
+
+
+def _exec_module_tail(mod, driver_log):
+    """Re-run the real module autorun guard against MOD's namespace.
+
+    MOD was imported with the disable env vars set, so its real main() has not
+    auto-run yet.  Pointing WW_P29E_LOG_PATH at DRIVER_LOG and re-exec'ing the
+    module's own guard tail (the exact bottom-of-file block) lets us drive the
+    REAL module-enter / env-state / main-exception code paths deterministically
+    in-process, writing into DRIVER_LOG, without a game.
+
+    Caller sets os.environ["WW_P29E_LOG_PATH"] = DRIVER_LOG first, and either
+    leaves the disable vars (RUN=False -> module-enter + skip lines, no main) or
+    clears them and/or patches mod.main before calling this to exercise the
+    real autorun / exception handler.
+    """
+    code = compile(_module_tail_src(), "<p29e-tail>", "exec")
+    exec(code, mod.__dict__)
+
 
 
 def main():
@@ -273,6 +365,107 @@ def main():
     skips = _emit(_LOG).count("P29E_NON_TARGET_SKIPPED=")
     if skips > 5:
         fails.append("skip-throttle-broken(%d)" % skips)
+
+    # =========================================================================
+    # NEW deterministic-log checks (added 2026-09-06):
+    #   G  module body executes on import -> MODULE_ENTER / MODULE_NAME / LOG_PATH
+    #   G  WW_P29E_LOG_PATH override redirects to a writable target
+    #   G  RUN gate recorded (P29E_RUN / skip line) when autorun disabled
+    #   H  real autorun (RUN=True) -> P29E_RUN=True + P29E_MAIN_ENTER=YES
+    #   I  a main() exception is logged (P29E_MAIN_EXCEPTION_*) -- never silent
+    # =========================================================================
+
+    # save env so later assertions / process state are left clean
+    _saved_env = {k: os.environ.get(k) for k in
+                  ("WW_P29E_LOG_PATH", "WW_P29_DISABLE_AUTORUN",
+                   "WW_P29E_DISABLE_AUTORUN")}
+    _orig_main = M.main
+
+    try:
+        # ---- G: fresh import (autorun disabled) -> module-enter + override path
+        logG = os.path.join(tmpdir, "p29e_enter_override.log")
+        if os.path.exists(logG):
+            os.remove(logG)
+        # child inherits WW_P29_*_DISABLE_AUTORUN='1' and WW_P29E_LOG_PATH target
+        os.environ["WW_P29E_LOG_PATH"] = logG
+        g_out, g_txt = _run_driver(_driver_with_here(), logG)
+        if "P29E_MODULE_ENTER=YES" not in g_txt:
+            fails.append("G-no-module-enter (%r)" % (g_txt[-300:],))
+        for want in ("MODULE_NAME=ww_p29e_picker_row_probe",
+                     "LOG_PATH=%s" % logG,
+                     "WW_P29_DISABLE_AUTORUN='1'",
+                     "WW_P29E_DISABLE_AUTORUN='1'",
+                     "P29E_RUN=False",
+                     "P29E_AUTORUN_SKIPPED=YES"):
+            if want not in g_txt:
+                fails.append("G-missing[%s]" % want)
+        # skipped autorun must NOT have entered main nor hit exception handler
+        if "P29E_MAIN_ENTER=YES" in g_txt:
+            fails.append("G-main-ran-while-skipped")
+        if "P29E_MAIN_EXCEPTION=YES" in g_txt:
+            fails.append("G-exception-despite-skip")
+        if not os.path.exists(logG):
+            fails.append("G-override-path-not-used")
+
+        # ---- G2: default fixed path constant (used when override unset) ------
+        os.environ.pop("WW_P29E_LOG_PATH", None)
+        if M._resolve_log_path() != M._DEFAULT_LOG_PATH:
+            fails.append("G2-default-not-fixed")
+        if (M._DEFAULT_LOG_PATH !=
+                "C:\\Users\\thela\\Documents\\Electronic Arts\\The Sims 4"
+                "\\p29e_picker_row_probe.log"):
+            fails.append("G2-default-path-wrong: %r" % (M._DEFAULT_LOG_PATH,))
+
+        # ---- H: real autorun, RUN=True -> MAIN_ENTER emitted ---------------
+        logH = os.path.join(tmpdir, "p29e_autorun_on.log")
+        if os.path.exists(logH):
+            os.remove(logH)
+        os.environ["WW_P29E_LOG_PATH"] = logH
+        os.environ.pop("WW_P29_DISABLE_AUTORUN", None)
+        os.environ.pop("WW_P29E_DISABLE_AUTORUN", None)
+        _exec_module_tail(M, logH)          # RUN recomputed True -> real main()
+        h_txt = _read_text(logH)
+        for want in ("P29E_RUN=True", "P29E_MAIN_ENTER=YES",
+                     "P29E_MODULE_ENTER=YES"):
+            if want not in h_txt:
+                fails.append("H-missing[%s]" % want)
+        if "P29E_AUTORUN_SKIPPED=YES" in h_txt:
+            fails.append("H-skipped-when-RUN-true")
+
+        # ---- I: main() exception not silent --------------------------------
+        logI = os.path.join(tmpdir, "p29e_main_exc.log")
+        if os.path.exists(logI):
+            os.remove(logI)
+        os.environ["WW_P29E_LOG_PATH"] = logI
+        # disable vars already cleared for H; keep cleared (RUN=True)
+
+        def _boom():
+            raise RuntimeError("forced_p29e_main_error")
+
+        M.main = _boom
+        _exec_module_tail(M, logI)          # guard must catch + log the raise
+        M.main = _orig_main
+        i_txt = _read_text(logI)
+        for want in ("P29E_MAIN_EXCEPTION=YES",
+                     "P29E_MAIN_EXCEPT_TYPE=RuntimeError",
+                     "P29E_MAIN_EXCEPT_REPR=RuntimeError('forced_p29e_main_error'"):
+            if want not in i_txt:
+                fails.append("I-missing[%s]" % want)
+        if "P29E_MAIN_EXCEPT_TB:" not in i_txt:
+            fails.append("I-no-traceback-logged")
+        exc_count = i_txt.count("P29E_MAIN_EXCEPTION=YES")
+        if exc_count < 1:
+            fails.append("I-exception-not-logged")
+    finally:
+        # restore env + module main + file-backed log so test end state is clean
+        for k, v in _saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        M.main = _orig_main
+        M._reset_state_for_test()
+        M._STATE["_log_path"] = _LOG
 
     if fails:
         print("P29E_LOGIC_VERDICT=FAIL")
