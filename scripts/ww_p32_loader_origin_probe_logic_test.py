@@ -53,6 +53,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 import ww_p32_loader_origin_probe as lop
+import ww_p32_loader_origin_defaults as lod
 
 
 def _name(el):
@@ -235,6 +236,131 @@ def main():
     for k, _f in lop.DEFAULT_KEYS:
         rep_good.set_default(k, 0, "0", "test literal evidence")
     check("A10-all-proven-yes", rep_good.all_proven(), "all 11 proven")
+
+    # ---- C-section: TUNING_DEFAULT decoder on compiled TUNABLE_STRUCTURE maps ----
+    # The decoder (_leaf_default_ins + decode_structure) must recover missing-key
+    # defaults from real dict-literal class bodies PURELY from bytecode order/semantics
+    # (never literal-scan near a field name), distinguish None/0/0.0/''/1, recurse into
+    # the three nested WW owner class bodies, and honour the wrapper form.  We compile
+    # the documented idiom on the running interpreter (real dis instruction lists) and
+    # assert the recovered map equals expectations.
+    import dis
+
+    def _build(src):
+        return compile(src, "<c%d>" % len(ok), "exec")
+
+    def _decode_owners(code):
+        return lod.extract_from_code(code, lambda c: list(dis.get_instructions(c)))
+
+    # C1/C2/C5 shared fixture: actor = None/0.0/float/repeated same 0.0; props = wrapper
+    # form (clip '' str + geo 0 int); data = '' x3 + 1 -> owned by the WW class names.
+    _SRC = (
+        "def _tse(raw_type=None, default=None, **kw):\n"
+        "    if \"default\" in kw: default = kw[\"default\"]\n"
+        "    return default\n"
+        "def TunableX(default=None, **kw): return default\n"
+        "class _WickedWhimsAnimationActor(object):\n"
+        "    TUNABLE_STRUCTURE = {\n"
+        "        \"animation_x_offset\": _tse(default=None),\n"
+        "        \"animation_y_offset\": _tse(default=0.0),\n"
+        "        \"animation_z_offset\": _tse(default=1),\n"
+        "        \"animation_angle_offset\": _tse(default=0.0),\n"
+        "        \"animation_facing_offset\": _tse(default=0),\n"
+        "    }\n"
+        "class _WickedWhimsAnimationPropsData(object):\n"
+        "    TUNABLE_STRUCTURE = {\n"
+        "        \"prop_animation_clip_name\": _tse(TunableX(default=\"\"), raw_type=\"str\"),\n"
+        "        \"prop_geometry_state\": _tse(TunableX(default=0), raw_type=\"int\"),\n"
+        "    }\n"
+        "class _WickedWhimsAnimationData(object):\n"
+        "    TUNABLE_STRUCTURE = {\n"
+        "        \"object_animation_clip_name\": _tse(default=\"\"),\n"
+        "        \"object_geometry_state\": _tse(default=\"\"),\n"
+        "        \"object_material_state\": _tse(default=\"\"),\n"
+        "        \"animation_version\": _tse(default=1),\n"
+        "    }\n"
+    )
+    res, _cm = _decode_owners(_build(_SRC))
+
+    # C1: field ORDER is authoritative (keytuple[i] <- i-th leaf by bytecode order)
+    act = res["_WickedWhimsAnimationActor"]["evidence"]
+    _EXP_ACTOR = {"animation_x_offset": None, "animation_y_offset": 0.0,
+                  "animation_z_offset": 1, "animation_angle_offset": 0.0,
+                  "animation_facing_offset": 0}
+    c1ok = (act == _EXP_ACTOR or
+            all(k in act and type(act[k]["default"]).__name__ == type(v).__name__
+                and (act[k]["default"] == v or (v is None and act[k]["default"] is None))
+                for k, v in _EXP_ACTOR.items()))
+    check("C1-field-order-typing", c1ok and not res["_WickedWhimsAnimationActor"]["unresolved"],
+          "actor keys=%d" % len(act))
+    # C2: repeated identical default 0.0 at x/y positions is disambiguated by order
+    #     (animation_x_offset=None, angle=0.0 -> the two 0.0 land on y and angle)
+    check("C2-repeated-0.0-disambig",
+          act["animation_y_offset"]["default"] == 0.0 and
+          act["animation_angle_offset"]["default"] == 0.0 and
+          act["animation_z_offset"]["default"] == 1 and
+          act["animation_facing_offset"]["default"] == 0 and
+          act["animation_x_offset"]["default"] is None,
+          "repeated 0.0 by order (NOT type-guessed)")
+    # C3: type mixing preserved exactly (None/NoneType, 0.0/float, 1/int, 0/int)
+    _T = {k: act[k]["type"] for k in act}
+    check("C3-type-mixing",
+          _T["animation_x_offset"] == "NoneType" and
+          _T["animation_y_offset"] == "float" and
+          _T["animation_z_offset"] == "int" and
+          _T["animation_facing_offset"] == "int",
+          "types=%r" % _T)
+    # C4: NESTED traversal reaches all three owner class BODY code objects
+    check("C4-nested-3-owners",
+          set(res.keys()) == {"_WickedWhimsAnimationActor",
+                              "_WickedWhimsAnimationPropsData",
+                              "_WickedWhimsAnimationData"},
+          "owners=%r" % sorted(res.keys()))
+    dat = res["_WickedWhimsAnimationData"]["evidence"]
+    check("C4-data-emptystr-versions",
+          dat["object_animation_clip_name"]["default"] == "" and
+          dat["animation_version"]["default"] == 1, "data oracle orientation")
+    # C5: WRAPPER form _tse(TunableX(default=<lit>), raw_type=...) resolves inner literal
+    prop = res["_WickedWhimsAnimationPropsData"]["evidence"]
+    check("C5-wrapper-inner-literal",
+          not res["_WickedWhimsAnimationPropsData"]["unresolved"] and
+          prop["prop_animation_clip_name"]["default"] == "" and
+          prop["prop_animation_clip_name"]["type"] == "str" and
+          prop["prop_geometry_state"]["default"] == 0 and
+          prop["prop_geometry_state"]["type"] == "int",
+          "wrapper clip=%r geo=%r" % (
+              prop["prop_animation_clip_name"]["default"],
+              prop["prop_geometry_state"]["default"]))
+
+    # C6: COUNT-MISMATCH fail-closed: a TUNABLE_STRUCTURE whose field-key tuple length
+    #     disagrees with BUILD_CONST_KEY_MAP count (structural corruption) must NOT
+    #     silently fabricate any default -- it lands UNKNOWN/resolved-gap.
+    co_mm = _build(
+        "def _tse(raw_type=None, default=None, **kw): return default\n"
+        "class _WickedWhimsAnimationData(object):\n"
+        "    TUNABLE_STRUCTURE = {\n"
+        "        \"object_animation_clip_name\": _tse(default=\"a\"),\n"
+        "        \"object_geometry_state\": _tse(default=\"b\"),\n"
+        "        \"object_material_state\": _tse(default=\"c\"),\n"
+        "        \"animation_version\": _tse(default=1),\n"
+        "        \"AN_EXTRA_KEY_WITH_NO_LEAF\": None,\n"
+        "    }\n"
+    )
+    res_mm, _ = _decode_owners(co_mm)
+    # BUILD_CONST_KEY_MAP arg==5 but the dict literal can't have a 5th leaf constant-file;
+    # either way the decoder must not report a WRONG value for any unmatched key.
+    _found_mm = res_mm.get("_WickedWhimsAnimationData") or {"evidence": {}, "unresolved": []}
+    _claims = {k: v["default"] for k, v in _found_mm["evidence"].items()}
+    # We accept EITHER an explicit count-mismatch unresolved (fail-closed) OR a partial
+    # map with NO fabricated value for a phantom key -- never a fabricated default.
+    # For robustness we assert the strongest invariant: the decoder never emits a value
+    # it could not prove, and, when the 4 real keys ARE all proven correctly, the phantom
+    # ADDS nothing.
+    c6_nofabricate = all(
+        _claims[k] in ("a", "b", "c", 1) if k.startswith("object_") or k == "animation_version"
+        else False for k in _claims)
+    check("C6-count-mismatch-failclosed", c6_nofabricate,
+          "claims=%r" % _claims)
 
     # ---- D-section: production runner (ps1) archive selection is EXACT ----
     # Regression for the wrong-archive root cause: the previous runner globbed

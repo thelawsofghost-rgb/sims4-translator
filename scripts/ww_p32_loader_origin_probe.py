@@ -405,7 +405,9 @@ def decode_defaults(tuning_pyc_path=None, get_opcode_mod=None, XBytecode=None):
             get_opcode_mod is not None and XBytecode is not None:
         try:
             import ww_p32_loader_origin_defaults as _globals_mod
-            _globals_mod.populate_defaults(rep, str(tuning_pyc_path))
+            _globals_mod.populate_defaults(rep, str(tuning_pyc_path),
+                                           XBytecode=XBytecode,
+                                           get_opcode_mod=get_opcode_mod)
         except Exception:
             pass  # any key left unproven stays UNPROVEN -> gate NO (fail closed)
     return rep
