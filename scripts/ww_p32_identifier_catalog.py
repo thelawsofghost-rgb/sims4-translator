@@ -365,6 +365,9 @@ def _object_slot(row):
 _GENDER_NAME_TO_RUNTIME = {
     "MALE": "MALE", "FEMALE": "FEMALE",
     "TRANS_MALE": "TRANS_MALE", "TRANS_FEMALE": "TRANS_FEMALE",
+    "BOTH": "BOTH",  # PROVEN 2026-09-06 from real WW sex_gender.pyc bytecode:
+    #                    'BOTH' upper().strip() in SexGenderType ->
+    #                    SexGenderType['BOTH'] -> SexGenderType.BOTH
 }
 
 

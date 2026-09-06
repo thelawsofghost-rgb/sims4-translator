@@ -364,6 +364,50 @@ def main():
     check("M11-no-bleed", r300["raw_display_name"] != r0["raw_display_name"]
           and r300["ordinal"] == 300 and len(r0["actor_rows"]) >= 1)
 
+    # ---- M12: gender bridge BOTH (PROVEN 2026-09-06 from real WW bytecode) ----
+    # _runtime_gender maps the exact tokens per verdict; never fabricates unknown.
+    gr = {
+        "MALE": "MALE", "FEMALE": "FEMALE", "BOTH": "BOTH",
+        "SUPERNEW": "UNKNOWN", "": "UNKNOWN", None: "UNKNOWN",
+        "both": "BOTH", "  Both ": "BOTH",  # upper/strip canonicalize
+    }
+    for tok, exp in gr.items():
+        got = C._runtime_gender(tok)
+        check("M12-gender-%s" % (tok if tok is not None else "EMPTY"),
+              got == exp, "tok=%r got=%r exp=%r" % (tok, got, exp))
+    # catalog __GENDER_NAME_TO_RUNTIME holds exactly the closed set now incl BOTH
+    check("M12-table-has-BOTH", C._GENDER_NAME_TO_RUNTIME.get("BOTH") == "BOTH")
+
+    # [BOTH,BOTH,BOTH] -> three INDEPENDENT SexGenderType.BOTH components (not 1)
+    rec3 = REC.reconstruct_identifier({
+        "display_name": "G", "author": "A", "sex_category": "ORAL",
+        "locations": ["FLOOR"], "version": "2",
+        "actors": [{"gender_type": "BOTH", "animation_clip_name": "cl%d" % i,
+                     "position_offset": {"x": 0.0, "y": 0.0, "z": 0.0}}
+                    for i in range(3)],
+    })
+    check("M12-both-three-components",
+          rec3["parts"].count("SexGenderType.BOTH") == 3,
+          "count=%d parts=%s" % (rec3["parts"].count("SexGenderType.BOTH"),
+                                  [p for p in rec3["parts"]
+                                   if str(p).startswith("SexGenderType")]))
+    # mixed MALE/BOTH order must preserve per-actor gender identity sequence
+    recm = REC.reconstruct_identifier({
+        "display_name": "G", "author": "A", "sex_category": "ORAL",
+        "locations": ["FLOOR"], "version": "2",
+        "actors": [{"gender_type": "MALE", "animation_clip_name": "c0",
+                     "position_offset": {"x": 0.0, "y": 0.0, "z": 0.0}},
+                    {"gender_type": "BOTH", "animation_clip_name": "c1",
+                     "position_offset": {"x": 0.0, "y": 0.0, "z": 0.0}},
+                    {"gender_type": "FEMALE", "animation_clip_name": "c2",
+                     "position_offset": {"x": 0.0, "y": 0.0, "z": 0.0}}],
+    })
+    gseq = [p for p in recm["parts"] if str(p).startswith("SexGenderType")]
+    check("M12-mixed-sequence",
+          gseq == ["SexGenderType.MALE", "SexGenderType.BOTH",
+                   "SexGenderType.FEMALE"],
+          "%s" % gseq)
+
     print("")
     print("PASS_COUNT=%d  FAIL_COUNT=%d"
           % (sum(1 for _n, ok in _passes if ok),

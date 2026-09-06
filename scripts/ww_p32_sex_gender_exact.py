@@ -241,31 +241,35 @@ def analyze(member_name, data, out_path):
     #   (E3 auxiliary) is_both_sex_gender references SexGenderType.BOTH directly.
     members = class_member_names(class_co) if class_co is not None else ()
     e1_both_member = "BOTH" in members
-    by_name_membership = (_resolves_to_enum_members(f_by, opc)
-                          if (f_by is not None and opc is not None) else False)
-    both_in_bothfn = (_references_symbol(f_both, "BOTH", opc)
-                      if (f_both is not None and opc is not None) else False)
-    # structural proof: the enum class body binds a real BOTH member NAME (E1)
-    # AND get_sex_gender_type_by_name returns live enum members by an index/map
-    # over SexGenderType (E2), so by-name resolution of any real member NAME
-    # (incl. BOTH) round-trips to that exact SexGenderType member.  No name-game:
-    # both facts read off real code-object names/constants + DISASM.
+    # E2 now accepts the REAL WW direct route (normalize -> membership ->
+    #   SexGenderType[normalized_name] / BINARY_SUBSCR) in addition to the __members__
+    #   mapping-struct form.  Proven only when the SAME normalized local is both
+    #   membership-tested against SexGenderType and re-indexed to fetch the member.
+    route, proof_path = _by_name_route(f_by, opc)
+    by_name_membership = (route is not None)
+    e3_aux_msg = (
+        "is_both_sex_gender references SexGenderType.BOTH"
+        if _references_symbol(f_both, "BOTH", opc)
+        else "is_both_sex_gender absent or references BOTH_GENDERS/other (AUX only)")
+    # structural proof: the enum class body binds a real BOTH member NAME (E1) AND
+    #   get_sex_gender_type_by_name provably returns a live SexGenderType member for
+    #   a normalized name (E2).  E3 (is_both_sex_gender) is AUXILIARY, never gates.
     both_proven = e1_both_member and by_name_membership
     enf_hint = _enum_family_hint(class_co) if class_co is not None else []
     lines.append("")
     lines.append("== STRUCTURAL VERDICT (real bytecode/constants/member map) ==")
     lines.append("SexGenderType class_code_seen=%s  class_has_BOTH_member=%s"
                  % (class_co is not None, e1_both_member))
-    lines.append("enum_family_hint=%s  by_name_resolves_to_members(mapping_struct)=%s"
-                 % (enf_hint or "?", by_name_membership))
-    lines.append("is_both_sex_gender_seen=%s  references_SexGenderType.BOTH=%s"
-                 % (f_both is not None, both_in_bothfn))
+    lines.append("enum_family_hint=%s" % (enf_hint or "?"))
+    lines.append("by_name_proof_route=%s" % (route if route else "UNPROVEN/NONE"))
+    lines.append("proof_path=%s" % (proof_path or "(none)"))
+    lines.append("is_both_sex_gender_aux=%s" % e3_aux_msg)
     lines.append("")
     lines.append("BOTH_VERIFIED_AS_SexGenderType.BOTH=%s"
                  % ("PROVEN" if both_proven else "UNPROVEN"))
-    lines.append("BOTH_detail=class_has_BOTH_member=%s ; "
-                 "by_name_roundtrips_to_members=%s ; is_both_sex_gender_links_BOTH=%s"
-                 % (e1_both_member, by_name_membership, both_in_bothfn))
+    lines.append("BOTH_detail=class_has_BOTH_member=%s ; by_name_route=%s ; "
+                 "e3_aux_present=%s"
+                 % (e1_both_member, route, e3_aux_msg.count("SexGenderType.BOTH") > 0))
     lines.append("REPRESENTATION=reconstructor renders each actor gender_type as "
                  "SexGenderType.<NAME> (_enum) -- same uniform mechanism for MALE/"
                  "FEMALE/BOTH; no special BOTH hash string ever written.")
@@ -301,34 +305,134 @@ def _references_symbol(fn_co, token, opc):
     return False
 
 
-def _resolves_to_enum_members(fn_co, opc):
-    """True when get_sex_gender_type_by_name demonstrably resolves its input to a
-    genuine SexGenderType member object -- i.e. it indexes the enum's own
-    members (SexGenderType.__members__ / ._member_map_ / ._value2member_map_) or
-    reads members back out of SexGenderType.  This is the mapping-STRUCTURE
-    evidence: a by-name lookup to the live enum cannot return an invented value,
-    so any NAME that IS a real member (BOTH) resolves to that member."""
+def _by_name_route(fn_co, opc):
+    """Prove (structurally, no name-game) HOW get_sex_gender_type_by_name resolves a
+    raw name to a SexGenderType member, return (route_name, proof_path), or
+    (None, None) when unproven.
+
+    ROUTE DIRECT (the REAL WW shape, operator bytecode):
+        normalize   name = name.upper().strip()          (LOAD_FAST name / upper /
+                                                           strip / STORE_FAST name)
+        membership  LOAD_GLOBAL SexGenderType
+                    LOAD_FAST name
+                    COMPARE_OP in
+                    POP_JUMP_IF_FALSE <fallback>
+        success     LOAD_GLOBAL SexGenderType
+                    LOAD_FAST name
+                    BINARY_SUBSCR
+                    RETURN_VALUE
+        fallback    LOAD_GLOBAL SexGenderType ; LOAD_ATTR NONE ; RETURN_VALUE
+      == a normalized name is membership-tested against SexGenderType and the SAME
+         member is re-fetched by SexGenderType[name] => returns a genuine member,
+         so any NAME that IS a member (BOTH) resolves to that exact SexGenderType member.
+
+    ROUTE MAP: SexGenderType.__members__/_member_map_/_value2member_map_ index.
+
+    Uses a tiny stack model to attribute the object being subscripted / tested so an
+    isolated stray BINARY_SUBSCR is NEVER credited."""
     if fn_co is None or opc is None:
-        return False
+        return None, None
     from xdis import Bytecode
-    member_attrs = ("__members__", "_member_map_", "_value2member_map_",
-                    "__getitem__", "values", "SexGenderType")
-    found = set()
     try:
-        for ins in Bytecode(fn_co, opc):
-            ar = getattr(ins, "argrepr", "")
-            for m in member_attrs:
-                if ar == m or (m == "SexGenderType" and ar == "SexGenderType"):
-                    found.add(m)
+        ins = list(Bytecode(fn_co, opc))
     except Exception:
-        pass
-    # crediting needs at least an enum-member index API (not a bare map of 
-    # unrelated ints).  `SexGenderType` global + a members index => round trip.
-    return bool(found & {"__members__", "_member_map_", "_value2member_map_",
-                         "__getitem__", "values"})
+        return None, None
+    if not ins:
+        return None, None
+
+    # ---- tiny stack model over the linear stream (only LOAD*/BINARY_SUBSCR/\n    #      COMPARE_OP/RETURN that matter) ----
+    def analyze():
+        stack = []          # list of ('g', SexGenderType) | ('l', localname) | ('c', ...)
+        subscript_on = None   # for BINARY_SUBSCR: ('SexGenderType', localname)
+        membership_on = None  # ('SexGenderType', localname) for COMPARE_OP in
+        normalized_local = None
+        seen_strip_call = False
+        prev_prev = None
+        for it in ins:
+            op = it.opname
+            ar = getattr(it, "argrepr", "")
+            if op == "LOAD_FAST":
+                stack.append(("l", ar))
+            elif op == "LOAD_GLOBAL":
+                stack.append(("g", ar))
+            elif op == "LOAD_CONST":
+                stack.append(("c", ar))
+            elif op == "LOAD_METHOD":
+                # method descriptor does not become a subscriptable operand
+                pass
+            elif op == "CALL_METHOD" or op == "CALL_FUNCTION":
+                stack.append(("c", ar))
+            elif op == "STORE_FAST":
+                normalized_local = ar if seen_strip_call else normalized_local
+                seen_strip_call = False
+                stack = []
+            elif op in ("POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE", "POP_TOP"):
+                if stack:
+                    stack.pop()
+            elif op in ("COMPARE_OP", "CONTAINS_OP"):
+                # two operands: right (top) and left (below).  'name in SexGenderType'
+                # pushed left(name) then right(SexGenderType) => top=SexGenderType.
+                # COMPARE_OP argrepr 'in'; CONTAINS_OP argval 0 = in / 1 = not in.
+                right = stack[-1] if stack else None
+                left = stack[-2] if len(stack) >= 2 else None
+                is_in = (ar == "in") or (op == "CONTAINS_OP"
+                                          and getattr(it, "argval", 1) == 0)
+                if is_in and right and right[0] == "g" and right[1] == "SexGenderType" \
+                        and left and left[0] == "l":
+                    membership_on = ("SexGenderType", left[1])
+                # pop 2 push bool
+                if len(stack) >= 2:
+                    stack = stack[:-2]
+                stack.append(("bl",))  # placeholder bool result (name ref dropped ok)
+            elif op == "BINARY_SUBSCR":
+                container = stack[-2] if len(stack) >= 2 else None
+                index = stack[-1] if stack else None
+                if container and container[0] == "g" and container[1] == "SexGenderType" \
+                        and index and index[0] == "l":
+                    subscript_on = ("SexGenderType", index[1])
+                if len(stack) >= 2:
+                    stack = stack[:-2]
+                stack.append(("m",))
+            # detect upper->strip method chain end (name.upper().strip())
+            aa = getattr(it, "argrepr", "")
+            if op == "LOAD_METHOD" and aa == "strip":
+                seen_strip_call = True
+                stack = []
+        return subscript_on, membership_on, normalized_local
+
+    sub_on, mem_on, norm_local = analyze()
+    # well-formed DIRECT route:
+    direct = (norm_local is not None and mem_on is not None
+              and mem_on[0] == "SexGenderType"
+              and sub_on is not None and sub_on[0] == "SexGenderType"
+              and mem_on[1] == sub_on[1] == norm_local
+              and _trusted_fallback(ins))
+    if direct:
+        return "DIRECT-NORMALIZE-MEMBERSHIP-SUBSCR", \
+            "NORMALIZE(name.upper().strip()) -> COMPARE_OP(in) SexGenderType -> " \
+            "SexGenderType[name] BINARY_SUBSCR -> real member; fallback SexGenderType.NONE"
+    # fall back to the __members__/map structural route (older shape)
+    map_hint = {getattr(i, "argrepr", "") for i in ins
+                if i.opname in ("LOAD_ATTR", "LOAD_METHOD")}
+    if map_hint & {"__members__", "_member_map_", "_value2member_map_",
+                   "__getitem__", "values"}:
+        m = sorted(map_hint & {"__members__", "_member_map_", "_value2member_map_",
+                               "__getitem__", "values"})[0]
+        return "MAP(%s)" % m, "SexGenderType.%s indexed by name -> real member" % m
+    return None, None
 
 
-# ---------------------------------------------------------------------------
+def _trusted_fallback(ins):
+    """Anywhere in the function: LOAD_GLOBAL SexGenderType ; LOAD_ATTR NONE ;
+    RETURN_VALUE  (the real default/fallback branch)."""
+    for i in range(len(ins) - 2):
+        if ins[i].opname == "LOAD_GLOBAL" and getattr(ins[i], "argrepr", "") == "SexGenderType" \
+                and ins[i + 1].opname == "LOAD_ATTR" and getattr(ins[i + 1], "argrepr", "") == "NONE" \
+                and ins[i + 2].opname == "RETURN_VALUE":
+            return True
+    return False
+
+
 # main
 # ---------------------------------------------------------------------------
 OUT_FILE = "output/p32/p32_sex_gender_mapping_exact.txt"

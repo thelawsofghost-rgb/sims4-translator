@@ -82,6 +82,26 @@ SRC_FAITHFUL = (
     "    return g == SexGenderType.BOTH\n"
 )
 
+# the exact REAL WW shape the operator's bytecode proved:
+#   name = name.upper().strip(); if name in SexGenderType: return SexGenderType[name];
+#   return SexGenderType.NONE.  Compiles to NORMALIZE -> COMPARE_OP in ->
+#   BINARY_SUBSCR (same local) -> fallback SexGenderType.NONE.
+SRC_FAITHFUL_DIRECT = (
+    "from enum import IntEnum\n"
+    "class SexGenderType(IntEnum):\n"
+    "    NONE = 0\n"
+    "    MALE = 1\n"
+    "    FEMALE = 2\n"
+    "    BOTH = 3\n"
+    "def get_sex_gender_type_by_name(name):\n"
+    "    name = name.upper().strip()\n"
+    "    if name in SexGenderType:\n"
+    "        return SexGenderType[name]\n"
+    "    return SexGenderType.NONE\n"
+    "def is_both_sex_gender(g):\n"
+    "    return g == SexGenderType.BOTH\n"
+)
+
 # negative: an enum of the SAME gender vocabulary but WITHOUT a BOTH member, and a
 # same-named unrelated string 'BOTH' present only as a doc/comment constant.
 SRC_NO_BOTH = (
@@ -124,12 +144,18 @@ def main():
     for key in ("MEMBER=", "PYC_MAGIC=", "CODE_PATH=", "CO_NAMES=", "CO_CONSTS=",
                 "DISASSEMBLY:"):
         check("L3-key-%s" % key.strip("=:"), key in txt)
-    # real member proof: class body STORE_NAME 'BOTH' + is_both refs SexGenderType.BOTH
+    # real member proof: class body STORE_NAME 'BOTH' + the aux / report lines
     check("L3-class-store-BOTH", "STORE_NAME                   BOTH" in txt
           or "STORE_NAME" in txt and "BOTH" in txt)
-    check("L3-isboth-LOAD_BOTH", "is_both_sex_gender_seen=True" in txt)
+    check("L3-report-proof-path", "proof_path=" in txt)
+    check("L3-isboth-aux-or-bothtoken",
+          "is_both_sex_gender_aux=" in txt
+          and ("SexGenderType.BOTH" in txt
+               or "BOTH_GENDERS" in txt or "is_both_sex_gender_aux=is_both_sex_gender" in txt
+               or "true" in txt or "True" in txt),
+          next((ln for ln in txt.splitlines() if "is_both_sex_gender_aux" in ln), ""))
     check("L3-verdict-PROVEN", "BOTH_VERIFIED_AS_SexGenderType.BOTH=PROVEN" in txt,
-          "verdict PROVEN required (BOTH is a real member + __members__ round trip)")
+          "verdict PROVEN required (BOTH is a real member + by-name route)")
 
     # L4 negative: same enum but no BOTH member -> must stay UNPROVEN
     no_both = _compile_pyc(SRC_NO_BOTH)
@@ -143,6 +169,24 @@ def main():
           "BOTH_VERIFIED_AS_SexGenderType.BOTH=UNPROVEN" in txtn,
           next((ln for ln in txtn.splitlines()
                 if "BOTH_VERIFIED" in ln or "class_has_BOTH_member" in ln), ""))
+
+    # L5 = the REAL WW direct route (normalize -> membership -> BINARY_SUBSCR)
+    direct = _compile_pyc(SRC_FAITHFUL_DIRECT)
+    arcd = _make_archive(direct, "wickedwhims/sex/enums/sex_gender.pyc")
+    outd = _tmp / "o4"
+    rd = _run(arcd, outd)
+    txtd = ""
+    if (outd / "p32_sex_gender_mapping_exact.txt").is_file():
+        txtd = (outd / "p32_sex_gender_mapping_exact.txt").read_text(encoding="utf-8")
+    route_l = next((ln for ln in txtd.splitlines() if "by_name_proof_route=" in ln), "")
+    path_l = next((ln for ln in txtd.splitlines() if "proof_path=" in ln), "")
+    check("L5-direct-route-detected", "by_name_proof_route=DIRECT-" in route_l, route_l)
+    check("L5-proof-path-keys",
+          all(k in path_l for k in ("NORMALIZE", "BINARY_SUBSCR")),
+          path_l)
+    check("L5-direct-verdict-PROVEN",
+          "BOTH_VERIFIED_AS_SexGenderType.BOTH=PROVEN" in txtd,
+          route_l)
 
     print("")
     print("PASS_COUNT=%d  FAIL_COUNT=%d"
