@@ -66,6 +66,23 @@ _TECH_TOKEN = re.compile(
     re.IGNORECASE,
 )
 
+# optional import of the SINGLE shared suffix vocabulary so the QA stem-strip
+# agrees with the P34.2 builder; absent -> fall back to the historical 高潮-only
+# behaviour (never guessing, never fabricating suffix words).
+try:
+    import ww_p34_suffix_table as _suffix_mod
+except Exception:                       # pragma: no cover - optional dep
+    _suffix_mod = None
+
+# historical fallback (only 高潮) used when the shared table is not importable;
+# keeps this QA module self-sufficient and drift-free either way.
+class _FallbackTable(object):
+    SUFFIX_ZH = {"climax": "高潮"}
+
+
+def _suffix_table():
+    return _suffix_mod if _suffix_mod is not None else _FallbackTable
+
 
 def _raw_climax(raw):
     """True if raw's final significant word is Climax (case-insensitive),
@@ -75,17 +92,37 @@ def _raw_climax(raw):
 
 
 def _zh_series_stem(zh):
-    """Strip a trailing ' N [- Climax]' / ' N' decoration from a series-member
-    zh to recover the shared stem.  Mirrors the adapter's decoration so equal
-    members compare on the stem.  Never called on non-series rows by QA (series
-    membership comes from the context join)."""
+    """Strip a trailing ' N[- <zh suffix>]' / ' N' decoration from a series-
+    member zh to recover the shared stem.  Mirrors the adapter's canonical
+    decoration (''<stem> <N>[ - <suffix zh>]'') so equal members compare on the
+    stem.  Never called on non-series rows by QA (series membership comes from
+    the context join).
+
+    Strips the FULL operator-locked suffix set (not only 高潮) so an AfterSex /
+    Creampie / Intro / End series (P34.2) compares members on the true stem --
+    the vocabulary is the SINGLE shared table used by the P34.2 builder too
+    (scripts/ww_p34_suffix_table.py), so builder & checker cannot drift.
+    """
     s = (zh or "").strip()
-    # strip " - 高潮" or trailing numeral etc.
+    _SUFFIX_ZH = _suffix_table().SUFFIX_ZH
+    vals = sorted({v for v in (_SUFFIX_ZH or {}).values() if v},
+                  key=len, reverse=True)
+    alt = "|".join(re.escape(v) for v in vals)
+    if vals:
+        # "num - <zh suffix>" canonical series-member form: " 3 - 高潮" / " 2 - 后戏"
+        m2 = re.search(
+            r"\s*[-–—:]?\s*(\d+|[ivxlcdm]{1,5})\s*[-–—]\s*(?:" + alt +
+            r")\s*$", s, re.I)
+        if m2:
+            return s[: m2.start()].strip()
+        # bare " - <zh suffix>" with NO numeral (member whose raw has suffix but
+        # no episode number, e.g. "SomeWhere Intro"): strip the suffix clause
+        # so it compares with suffixed-and-numbered siblings on the same stem.
+        m3 = re.search(r"\s*[-–—]\s*(?:" + alt + r")\s*$", s, re.I)
+        if m3 and s[: m3.start()].strip():
+            return s[: m3.start()].strip()
+    # strip a bare trailing numeral (" 3") if no suffixed form matched
     m = re.search(r"\s*[-–—:]?\s*(\d+|[ivxlcdm]{1,5})\s*$", s, re.I)
-    # Also handle "num - Climax"-suffixed forms already in Chinese: " 3 - 高潮"
-    m2 = re.search(r"\s*[-–—:]?\s*(\d+|[ivxlcdm]{1,5})\s*[-–—]\s*高潮\s*$", s, re.I)
-    if m2:
-        return s[: m2.start()].strip()
     if m:
         return s[: m.start()].strip()
     return s
