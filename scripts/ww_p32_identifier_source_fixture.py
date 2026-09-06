@@ -369,6 +369,10 @@ def parse_args(argv=None):
     ap.add_argument("--golden-check", action="store_true",
                     help="after extract, run the offline reconstructor and print "
                          "GOLDEN=PASS/FAIL vs the pinned %s" % GOLDEN_SHA1_318)
+    ap.add_argument("--diag", action="store_true",
+                    help="on SOURCE_GATE_FAIL print full exception type + "
+                         "traceback with line numbers (diagnostic only; still "
+                         "fail-closed exit 3).  Also enabled by env P32_DIAG=1.")
     return ap.parse_args(argv)
 
 
@@ -382,6 +386,17 @@ def main(argv=None):
         d = extract_ordinal(pkg, a.ordinal)
     except Exception as e:
         print("FATAL=SOURCE_GATE_FAIL %s" % e, file=sys.stderr)
+        if a.diag or os.environ.get("P32_DIAG", "") == "1":
+            _tb = ""
+            try:
+                import traceback as _tbmod
+                _tb = _tbmod.format_exc()
+            except Exception:
+                pass
+            print("EXC_TYPE=%s" % type(e).__name__, file=sys.stderr)
+            print("EXC_DIAG_START", file=sys.stderr)
+            print(_tb, file=sys.stderr)
+            print("EXC_DIAG_END", file=sys.stderr)
         return 3
 
     out_dir = Path(a.out_dir)

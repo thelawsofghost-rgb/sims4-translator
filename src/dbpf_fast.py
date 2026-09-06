@@ -35,6 +35,15 @@ Index 区:
    size@0x2C=0x524, offset@0x40=0x208AB, entry=32 字节, 索引区有 4 字节 padding。)
 """
 
+# PEP 563 (available 3.7+): store annotations as strings so PEP 585
+# subscripted builtin generics (tuple[...] / set[...] / Optional[...]) declared
+# later in this module are lazily resolved and NEVER evaluated at import time.
+# CPython <3.9 would otherwise raise
+#   TypeError: 'type' object is not subscriptable
+# on `def safe_parse(...) -> tuple[Optional[DBPFIndex], Optional[str]]:`.  This is
+# the ONLY py3.9+ construct here; keeping it resolves cleanly on 3.7/3.8 AND 3.9+.
+from __future__ import annotations
+
 import struct
 from dataclasses import dataclass, field
 from typing import List, Optional
