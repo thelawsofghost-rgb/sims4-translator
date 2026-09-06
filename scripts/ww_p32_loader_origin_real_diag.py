@@ -273,18 +273,53 @@ def analyze_class(cls, dotted, cobj, res, version=None):
     _decoded, _unresolved = lod.decode_structure(seq, cls,
                                                   on_first_failure=_on_first_failure)
     leaf_count = len(keys)      # top-level leaves == map keys when fully recovered
-    leaf_ok = (not _unresolved)
+
+    # Phase A (PRODUCER mapping) is the ONLY class-level gate.  It is independent
+    # of whether any default is a compile-time constant: given producer count ==
+    # key count the map is DECODED; per-key default extraction then independently
+    # marks each wanted key RESOLVED or UNKNOWN.  A NON-target key whose default is
+    # a complex runtime object stays UNKNOWN and NEVER fails the class (the OLD
+    # all-or-nothing "every leaf default must be constant" abort is removed).
+    _prod_ok = False
+    _prod_n = 0
+    _pj = m["idx"] - 1
+    while _pj >= 0 and _op(seq[_pj]) in ("NOP",):
+        _pj -= 1
+    try:
+        _pscan = lod._map_producer_trees(seq, _pj, len(keys), m["off"])
+        if _pscan is not None:
+            _prod_n = len(_pscan["producers"])
+            _prod_ok = (_prod_n == len(keys) and
+                        all(p is not None for p in _pscan["producers"]))
+    except Exception:  # noqa: BLE001 -- diagnostic only
+        _prod_ok = False
+    # classify decode_structure unresolved entries: a CLASS failure is only a
+    # producer-mapping/arity/keytuple marker; a per-key entry is benign UNKNOWN.
+    _class_fail_markers = ("keytuple/count mismatch", "producer-map-unavailable",
+                           "producer-count-mismatch")
+    _class_failed = any(
+        isinstance(e, (tuple, list)) and len(e) and e[0] in _class_fail_markers
+        for e in _unresolved)
+    leaf_ok = _prod_ok and not _class_failed
     res.leaf_ok_by_class[cls] = leaf_ok
     res.sim_failure_by_class[cls] = (_cap or None)
-    if _unresolved:
-        res.line("LEAF_COUNT=FAILED (%s)" % _unresolved[0][0])
-        res.line("LEAF_COUNT_MATCH=NO stage=LEAF_BOUNDARY")
-    else:
+    if leaf_ok:
         res.line("LEAF_COUNT=%d" % leaf_count)
-        res.line("LEAF_COUNT_MATCH=%s" % ("YES" if leaf_ok else "NO stage=LEAF_BOUNDARY"))
+        res.line("LEAF_COUNT_MATCH=YES")
+    else:
+        res.line("LEAF_COUNT=FAILED (Phase A producer mapping)")
+        res.line("LEAF_COUNT_MATCH=NO stage=LEAF_BOUNDARY")
+    if _prod_ok:
+        res.line("PRODUCER_COUNT=%d/%d" % (_prod_n, len(keys)))
+    else:
+        res.line("PRODUCER_COUNT=%d/%d MISMATCH" % (_prod_n, len(keys)))
+
 
     # ---- FIRST-FAILURE debug metadata (only when the stack sim fail-closed) ----
-    if _unresolved and _cap:
+    # Trigger is a genuine Phase-A (producer mapping) failure, NOT per-key UNKNOWN:
+    # a wanted key whose default is complex is DEFAULT_EXTRACTION (reported per-key
+    # below), never a SIM failure.
+    if _class_failed and _cap:
         res.line("SIM_STATUS=FAIL")
         res.line("SIM_FAIL_REASON=%s" % _cap["reason"])
         res.line("SIM_FAIL_OFFSET=%d" % _cap["off"])

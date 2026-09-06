@@ -534,12 +534,517 @@ def _sim_value_producers(seq, j, count, map_off, on_first_failure=None):
     return list(vals)
 
 
+# ---------------------------------------------------------------------------
+# STRUCTURED DEFAULT EXTRACTION (DEFAULT_EXTRACTION phase)
+#
+# The producer mapping (Phase A) via _sim_value_producers is EXACT and is the ONLY
+# class-level gate: it succeeds when producer count == field-tuple count, and is
+# completely independent of whether any default literal is a compile-time constant.
+# Windows real-pyc PRODUCER_COUNT 22/22, Props 11/11, Data 26/26 with stack sim PASS
+# proves Phase A is closed.
+#
+# default extraction (Phase B) is PER-KEY: a non-target key whose default is a
+# complex runtime Tunable object simply stays UNKNOWN and must NEVER veto the class
+# or sibling target keys (the old all-or-nothing loop is removed).  A target key is
+# decoded by STRUCTURED CALL parsing -- callable + positional args + kwargs from
+# the CW-FUNCTION_KW operand semantics -- never by scanning nearby LOAD_CONST.
+#
+# CPython arg layout used here (identical for 3.7 WW and 3.10, both emit
+# CALL_FUNCTION_KW / CALL_FUNCTION): the operand group of a call in push order is
+#        [callable, v0, v1, ..., v_{arity-1}, (kw-name-tuple if kw call)]
+# so the K trailing values (K == len(kw-name tuple)) are keyword VALUES in source
+# order and the leading (arity-K) are positional.  A plain CALL_FUNCTION with no
+# preceding name tuple is fully positional.
+# ---------------------------------------------------------------------------
+
+# WW wrapper cell types are decided by name, not by scanning constants.  These are
+# recognised "structure-element" senders whose default-of-record is: the explicit
+# `default=...` keyword, else the SECOND positional argument (1st = the value TYPE:
+# float/int/str/...).  Kept as a set so it is auditable and additive, never data.
+_WRAPPER_SENDERS = frozenset((
+    "_tse", "_TunableStructureElement", "TunableStructureElement",
+    "_TunableElement", "TunableElement", "_TestBasedTunable",
+))
+# Value-object senders whose OWN `default=` keyword (or sole constant) is the leaf
+# that a wrapper's positional payload wraps (e.g. TunableX(default='') inside a
+# _tse(payload, raw_type=...)).
+_VALUE_SENDERS = frozenset((
+    "TunableX", "Tunable", "TunableLocalizedString", "TunableString",
+    "TunableFactory", "TunableTuple", "TunableRange", "TunableEnumEntry",
+    "TunableReference", "TunableList",
+))
+
+# sentinels
+_UNKNOWN = object()  # fail-closed: no recoverable constant default
+
+
+class _Tree(object):
+    __slots__ = ("kind", "value", "offset", "opname", "children")
+
+    def __init__(self, kind, value, offset=0, opname="", children=None):
+        self.kind = kind          # const | name | build | call
+        self.value = value        # const:literal / name:str / opname for build
+        self.offset = offset
+        self.opname = opname
+        self.children = children or []
+
+    # structured call payload: (callable_tree, positional:[_Tree], kwargs{name:_Tree})
+    def as_call(self):
+        if self.kind == "call":
+            return self.value
+        return None
+
+    def __repr__(self):  # compact, ASCII, for diagnostics/tests
+        if self.kind == "const":
+            return "const(%r)" % (self.value,)
+        if self.kind == "name":
+            return "name(%s)" % (self.value,)
+        if self.kind == "build":
+            return "build(%s,%d)" % (self.value, len(self.children))
+        _callable, _pos, _kw = self.value
+        return "call(%s,%dpos,%dkw)" % (_callable.value, len(_pos), len(_kw))
+
+
+def _is_scalar_tree(tr):
+    if tr.kind == "const":
+        return tr.value is None or isinstance(tr.value, (int, float, str, bool, complex))
+    return False
+
+
+def _sender_name(tr):
+    """Best-effort str name of a callable/name tree ('' if unknown)."""
+    if tr.kind == "name":
+        return str(tr.value)
+    if tr.kind == "const":
+        return repr(tr.value)
+    return ""
+
+
+def _wrap_split(arity, names, operands):
+    """Split a call's operand VALUE trees (in source order, callable EXCLUDED) into
+    (positional, kwargs).  names = the kw-name tuple (None -> positional)."""
+    operands = list(operands)
+    if not names:
+        # arity values are all positional; operands already excludes callable
+        return operands, {}
+    K = len(names)
+    if K > len(operands):
+        raise ValueError("kw count %d > operand count %d" % (K, len(operands)))
+    pos = operands[:len(operands) - K]
+    kw_vals = operands[len(operands) - K:]
+    return pos, {names[i]: kw_vals[i] for i in range(K)}
+
+
+def _map_producer_trees(seq, j, count, map_off, on_first_failure=None):
+    """Single forward walk over the class body mirroring `_sim_value_producers`
+    op-for-op (same stack discipline incl. the fixed 3.7 method protocol) but with
+    RICH tree nodes instead of ints, so every CALL records its structured operand
+    group: callable + positional + kwargs, per CALL_FUNCTION_KW semantics.
+
+    Returns {"producers": [call_seq_index,...source order],
+             "calls":     {seq_index: {"tree", "sender", "positional", "kwargs"}}},
+    or None fail-closed (unsupported / underflow / arity mismatch).  ``on_first_failure``
+    is the same OPT-IN observer used by decode_structure/_sim_value_producers.
+
+    This is DEFAULT_EXTRACTION-side scaffolding only: it never changes the decision
+    engine's stack-effect semantics (that engine, _sim_value_producers, stays exact
+    and untouched); it merely reads the same bytecode into tree form."""
+    _fired = [False]
+
+    def fail(reason, needed=None, ins=None, t=None, off=None):
+        """Fail closed: record the FIRST failure through the optional observer
+        (same envelope keys as the decision engine) then always return None."""
+        if on_first_failure is not None and not _fired[0]:
+            _fired[0] = True
+            on_first_failure({
+                "reason": reason,
+                "t": t,
+                "ins": ins,
+                "off": _off(ins) if ins is not None else (off if off is not None else -1),
+                "opname": _op(ins) if ins is not None else "",
+                "arg": getattr(ins, "arg", None) if ins is not None else None,
+                "argval": getattr(ins, "argval", None) if ins is not None else None,
+                "argrepr": getattr(ins, "argrepr", None) if ins is not None else None,
+                "needed": needed,
+                "avail": len(stack),
+            })
+        return None
+
+    stack = []
+    calls = {}
+    PUSH1 = ("LOAD_CONST", "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
+             "LOAD_DEREF", "LOAD_CLASSDEREF", "LOAD_ATTR",
+             "LOAD_BUILD_CLASS")
+    CALLOP = ("CALL_FUNCTION", "CALL_FUNCTION_KW", "CALL_FUNCTION_EX",
+              "CALL_METHOD", "CALL")
+
+    # ---- helper used by CALL handling: find a preceding kw-name tuple -------
+    def _kw_names(t):
+        k = t - 1
+        while k >= 0 and _op(seq[k]) in ("NOP", "EXTENDED_ARG", "KEEP_ALIVE"):
+            k -= 1
+        if k >= 0 and _op(seq[k]) == "LOAD_CONST":
+            cv = _const(seq[k])
+            if isinstance(cv, tuple) and cv and all(isinstance(s, str) for s in cv):
+                return cv, k
+        return None, None
+
+    for t in range(0, j + 1):
+        ins = seq[t]
+        op = _op(ins)
+        _of = _off(ins)
+        if op in ("KEEP_ALIVE", "NOP", "EXTENDED_ARG"):
+            continue
+        if op in PUSH1:
+            if op == "LOAD_CONST":
+                stack.append(_Tree("const", _const(ins), _of, op))
+            else:
+                stack.append(_Tree("name", str(getattr(ins, "argval", None)),
+                                   _of, op))
+        elif op == "LOAD_METHOD":
+            # 3.7 protocol: consume receiver, push two method slots.  For value
+            # purposes the top-level result depends on the CALL, not these slots,
+            # so keep method bound-name at the self slot and a name placeholder.
+            if not stack:
+                return fail("STACK_UNDERFLOW", needed=1, ins=ins, t=t, off=_of)
+            stack.pop()
+            mn = str(getattr(ins, "argval", None))
+            stack.append(_Tree("name", mn, _of, op))
+            stack.append(_Tree("name", mn, _of, op))
+        elif op == "DUP_TOP":
+            if not stack:
+                return fail("STACK_UNDERFLOW", needed=1, ins=ins, t=t, off=_of)
+            stack.append(stack[-1])
+        elif op in ("BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_SLICE",
+                    "BUILD_STRING"):
+            cnt = getattr(ins, "arg", 1) or 1
+            if len(stack) < cnt:
+                return fail("STACK_UNDERFLOW", needed=cnt, ins=ins, t=t, off=_of)
+            kids = stack[-cnt:]
+            del stack[-cnt:]
+            stack.append(_Tree("build", op, _of, op, kids))
+        elif op == "BUILD_MAP":
+            cnt = getattr(ins, "arg", 0) or 0
+            need = 2 * cnt
+            if len(stack) < need:
+                return fail("STACK_UNDERFLOW", needed=need, ins=ins, t=t, off=_of)
+            kids = stack[-need:]
+            del stack[-need:]
+            stack.append(_Tree("build", op, _of, op, kids))
+        elif op in ("MAKE_FUNCTION", "MAKE_FUNCTION_NORGS"):
+            flags = getattr(ins, "arg", 0) or 0
+            extras = int(bool(flags & 0x01)) + int(bool(flags & 0x04)) + \
+                int(bool(flags & 0x08)) + int(bool(flags & 0x10))
+            need = 2 + extras
+            if len(stack) < need:
+                return fail("STACK_UNDERFLOW", needed=need, ins=ins, t=t, off=_of)
+            kids = stack[-need:]
+            del stack[-need:]
+            stack.append(_Tree("build", op, _of, op, kids))
+        elif op.startswith("STORE_NAME") or op in ("STORE_GLOBAL", "STORE_FAST",
+                                                   "STORE_DEREF", "STORE_CLASSDEREF"):
+            if stack:
+                stack.pop()
+        elif op == "STORE_ATTR":
+            for _ in range(2):
+                if stack:
+                    stack.pop()
+                else:
+                    return fail("STACK_UNDERFLOW", needed=2, ins=ins, t=t, off=_of)
+        elif op == "STORE_SUBSCR":
+            for _ in range(3):
+                if stack:
+                    stack.pop()
+                else:
+                    return fail("STACK_UNDERFLOW", needed=3, ins=ins, t=t, off=_of)
+        elif op.startswith("DELETE_"):
+            pass
+        elif op.startswith("UNARY_"):
+            if not stack:
+                return fail("STACK_UNDERFLOW", needed=1, ins=ins, t=t, off=_of)
+            # neutral, keep the (possibly transformed) top tag as a name node
+        elif op.startswith("BINARY_") or op == "BINARY_SUBSCR" or op == "COMPARE_OP" \
+                or op == "INPLACE_OP" or op == "BINARY_OP":
+            for _ in range(2):
+                if stack:
+                    stack.pop()
+                else:
+                    return fail("STACK_UNDERFLOW", needed=2, ins=ins, t=t, off=_of)
+            stack.append(_Tree("name", op, _of, op))
+        elif op == "CALL_METHOD":
+            arity = getattr(ins, "arg", 0) or 0
+            need = arity + 2                     # values + method slot + self slot
+            if len(stack) < need:
+                return fail("STACK_UNDERFLOW", needed=need, ins=ins, t=t, off=_of)
+            grp = stack[-need:]
+            del stack[-need:]
+            # grp order: [.. operands, method(bound,argval), self(None-slot)] top=self
+            method = grp[-2]
+            operands = list(grp[:-2])
+            pos, kw = _wrap_split(arity, None, operands)
+            callable_t = method
+            tree = _Tree("call", (callable_t, pos, kw), _of, op)
+            stack.append(tree)
+            calls[t] = {"tree": tree, "sender": method, "positional": pos,
+                        "kwargs": kw, "names": None, "op": op, "off": _of}
+        elif op in CALLOP:
+            names, _kp = _kw_names(t) if op not in ("CALL_FUNCTION_EX",) else (None, None)
+            arity = getattr(ins, "arg", 0) or 0
+            need = arity + (2 if names is not None else 1)
+            if len(stack) < need:
+                return fail("STACK_UNDERFLOW", needed=need, ins=ins, t=t, off=_of)
+            grp = stack[-need:]
+            del stack[-need:]
+            callable_t = grp[0]
+            operands = list(grp[1:])
+            if names is not None and operands:
+                operands = operands[:-1]  # drop the kw-name const itself
+            try:
+                pos, kw = _wrap_split(arity, names, operands)
+            except ValueError:
+                return fail("MAP_ARITY_MISMATCH", needed=count, ins=ins, t=t,
+                            off=_of, avail=len(stack))
+            tree = _Tree("call", (callable_t, pos, kw), _of, op)
+            stack.append(tree)
+            calls[t] = {"tree": tree, "sender": callable_t, "positional": pos,
+                        "kwargs": kw, "names": names, "op": op, "off": _of}
+        elif op == "RETURN_VALUE":
+            if stack:
+                stack.pop()
+        elif op in ("BEGIN_FINALLY", "END_FINALLY", "POP_EXCEPT", "POP_BLOCK",
+                    "WITH_CLEANUP_START", "WITH_CLEANUP_FINISH", "CLEANUP_THROW",
+                    "PUSH_EXC_INFO"):
+            return fail("UNSUPPORTED_OPCODE", ins=ins, t=t, off=_of)
+        else:
+            if op.startswith(("JUMP", "SETUP", "IMPORT", "FORMAT")):
+                return fail("UNSUPPORTED_OPCODE", ins=ins, t=t, off=_of)
+            # tolerates a push-1/neutral unmodelled straight-line consumer by
+            # mirroring the decision engine's safe-default continue
+            continue
+
+    # verify the operand stack held exactly `count` values under the map.
+    # stack top == the field-name tuple (pushed at j).  Below it sit the `count`
+    # top-level values in source order.
+    if len(stack) - 1 != count:
+        return fail("MAP_ARITY_MISMATCH", needed=count, ins=seq[j], t=j,
+                    off=_off(seq[j]))
+    values = stack[:-1] if stack else []      # drop the field tuple
+    producers = []
+    for v in values:
+        # a top-level value tree is a CALL (or a bare constant/name).  recover the
+        # producing CALL seq-index by walking to the tree's root source offset is
+        # not enough; instead the tree node built by a CALL carries its offset but
+        # not index.  Keep a lightweight parallel by scanning our recorded calls
+        # whose produced tree IS this object identity.
+        pi = None
+        for _ci, _cr in calls.items():
+            if _cr["tree"] is v:
+                pi = _ci
+                break
+        if pi is None:
+            # non-call leaf (bare const/name top-level) -> no CALL to map; mark -1
+            producers.append(-1)
+        else:
+            producers.append(pi)
+    return {"producers": producers, "calls": calls, "values": values}
+
+
+# ---------------------------------------------------------------------------
+# PER-KEY DEFAULT POLICY (Phase B) -- structured, no LOAD_CONST guessing
+# ---------------------------------------------------------------------------
+def _scalar_default_value(tr):
+    """If the tree is a compile-time scalar constant/None, return its value;
+    else _UNKNOWN.  (Names and nested calls are never silently promoted.)"""
+    if _is_scalar_tree(tr):
+        return tr.value
+    return _UNKNOWN
+
+
+def _tunable_default_of(call_rec, sender="", is_target=True, _depth=0):
+    """Resolve the default literal of ONE structured call.  ``sender`` is the
+    callable name already decided by the caller to be a recognised WW wrapper /
+    value-object sender.  Returns a scalar literal, or _UNKNOWN (fail closed).
+    NEVER guesses from a nearby LOAD_CONST -- everything is read from the
+    structured CALL operand group (callable/positional/kwargs).
+
+    Re-framed DEFAULT_EXTRACTION rules:
+      W (wrapper / structure-element sender):
+         W1  explicit keyword ``default`` DOMINATES;
+         W2  else positional[1] is the default literal (pos[0] = the TYPE);
+         W3  a default slot that is a nested call is only dug when is_target and
+             the nested sender is itself recognised;
+      V (Tunable* value object):
+         V1  ONLY the explicit keyword ``default`` is a proven default -- arbitrary
+             positional args of e.g. TunableList/TunableRange/TunableTuple are
+             CONFIG (min/max/enums/items), never promoted as a default;
+         V2  when a TARGET key wraps a value object whose ``default`` is itself a
+             nested wrapper, recurse (few levels).
+    Non-target keys that require any nested dig return _UNKNOWN and never veto the
+    map (Phase A is the only class gate)."""
+    if _depth > 3:
+        return _UNKNOWN
+    pos = call_rec.get("positional") or []
+    kw = call_rec.get("kwargs") or {}
+    is_wrapper = sender in _WRAPPER_SENDERS
+
+    # W1/V1: explicit default= keyword dominates for either category.
+    if "default" in kw:
+        d0 = kw["default"]
+        v = _scalar_default_value(d0)
+        if v is not _UNKNOWN:
+            return v
+        # bound to a nested object: dig only for a TARGET key, into a recognised
+        # nested wrapper/value sender.
+        dcrec = _call_of_tree(d0) if d0.kind == "call" else None
+        if dcrec is not None and is_target:
+            ns = _sender_name(dcrec["sender"])
+            if ns in _WRAPPER_SENDERS or ns in _VALUE_SENDERS or \
+                    "tunable" in ns.lower():
+                inner = _tunable_default_of(dcrec, ns, is_target, _depth + 1)
+                if inner is not _UNKNOWN:
+                    return inner
+        return _UNKNOWN
+
+    # Value-object (non-wrapper) with no explicit default= -> NOT provable as a
+    # scalar.  (TunableX is special: it is the leaf default-bearer, but it still
+    # requires the default= kw to carry the literal -- TunableX(value) positional
+    # is its handle, not a default.)
+    if not is_wrapper:
+        return _UNKNOWN
+
+    # W2: wrapper structure-element - positional[1] is the default literal.
+    if len(pos) >= 2:
+        d = pos[1]
+        v = _scalar_default_value(d)
+        if v is not _UNKNOWN:
+            return v
+        # default slot is itself a nested recognised call -> target dig gate.
+        dcrec = _call_of_tree(d) if d.kind == "call" else None
+        if dcrec is not None and is_target:
+            ns = _sender_name(dcrec["sender"])
+            if ns in _WRAPPER_SENDERS or ns in _VALUE_SENDERS or \
+                    "tunable" in ns.lower():
+                inner = _tunable_default_of(dcrec, ns, is_target, _depth + 1)
+                if inner is not _UNKNOWN:
+                    return inner
+        return _UNKNOWN
+
+    # W3: single positional form _tse(TunableX(default=...), raw_type=...) --
+    # wrapper-form Props; dig the single payload (TARGET-only).  A single SCALAR
+    # positional with no raw_type is itself the default.
+    if len(pos) == 1:
+        p0 = pos[0]
+        v = _scalar_default_value(p0)
+        if v is not _UNKNOWN:
+            return v
+        pcrec = _call_of_tree(p0) if p0.kind == "call" else None
+        if pcrec is not None and is_target:
+            ns = _sender_name(pcrec["sender"])
+            if ns in _WRAPPER_SENDERS or ns in _VALUE_SENDERS or \
+                    "tunable" in ns.lower():
+                inner = _tunable_default_of(pcrec, ns, is_target, _depth + 1)
+                if inner is not _UNKNOWN:
+                    return inner
+        return _UNKNOWN
+    return _UNKNOWN
+
+
+
+def _call_of_tree(tr):
+    """Reach a call-record from a nested tree: _Tree.call stores (callable,pos,kw);
+    derive the payload the tree encodes on demand, carrying the producer offset."""
+    ac = tr.as_call()
+    if ac is None:
+        return None
+    callable_t, pos, kw = ac
+    return {"sender": callable_t, "positional": list(pos), "kwargs": dict(kw),
+            "off": getattr(tr, "offset", 0)}
+
+
+def _structured_default_for_value(tree, is_target):
+    """Top-level default for ONE map value tree.  Returns (literal, evidence_off)
+    or None (key UNKNOWN, fail closed).  ``is_target`` is honoured by the recursive
+    policy so a non-target key whose payload is a complex runtime Tunable object
+    stays UNKNOWN and never affects sibling keys."""
+    if tree.kind == "const" and _is_scalar_tree(tree):
+        return (tree.value, tree.offset)
+    if tree.kind == "name":
+        # a bare name/global default (e.g. a type object used verbatim) is not a
+        # proven compile-time literal -> fail closed for this key only.
+        return None
+    if tree.kind != "call":
+        return None
+    rec = _call_of_tree(tree)
+    if rec is None:
+        return None
+    sender = _sender_name(rec["sender"])
+    known = (sender in _WRAPPER_SENDERS) or (sender in _VALUE_SENDERS) or \
+        ("tunable" in sender.lower())
+    if not known:
+        return None
+    lit = _tunable_default_of(rec, sender=sender, is_target=is_target)
+    if lit is not _UNKNOWN:
+        return (lit, rec.get("off", tree.offset))
+    return None
+
+
+def _structured_owner_decode(seq, keys, path_name, j, i, on_first_failure=None):
+    """Phase A (exact producer mapping) + Phase B (per-key structured default) for
+    ONE TUNABLE_STRUCTURE map.  Returns (found_dict, per_key_unresolved)."""
+    found = {}
+    per_key_un = []
+    scan = _map_producer_trees(seq, j, len(keys), _off(seq[i]),
+                               on_first_failure=on_first_failure)
+    if scan is None:
+        # Phase A failed: producer mapping cannot be exact -> the class is not
+        # provable.  Reported once; target keys stay UNKNOWN (fail closed).
+        return found, [("producer-map-unavailable", _off(seq[i]))]
+    producers = scan["producers"]
+    if len(producers) != len(keys) or any(p is None for p in producers):
+        return found, [("producer-count-mismatch", _off(seq[i]))]
+    target_set = set()
+    for _o, _ks in _CORRELATED_KEYS.items():
+        target_set.update(_ks)
+    for idx_k, key in enumerate(keys):
+        tree = scan["values"][idx_k]
+        is_target = key in target_set
+        lit = None
+        loff = 0
+        try:
+            lit_off = _structured_default_for_value(tree, is_target)
+            # presence of a (value, off) TUPLE is the success signal -- a legal
+            # default may itself be None, so never gate on ``lit is not None``.
+            if lit_off is not None:
+                lit, loff = lit_off
+        except Exception:   # noqa: BLE001 -- fail per-key, never the class
+            lit_off = None
+        if lit_off is not None:
+            found[key] = {
+                "default": lit,
+                "type": type(lit).__name__,
+                "evidence_offset_range": (loff, _off(seq[i])),
+                "path": path_name,
+            }
+        else:
+            per_key_un.append((key, _off(seq[i])))
+    return found, per_key_un
+
+
 def decode_structure(seq, path_name, on_first_failure=None):
-    """Given a code-object instruction list `seq`, find every TUNABLE_STRUCTURE
-    dict-literal (BUILD_CONST_KEY_MAP with a preceding const field-name tuple) and
-    return {field_key: {default, type, evidence_off_lo, evidence_off_hi, path}}.
-    Fail-closed: an element whose default is not a constant causes the whole map
-    to be skipped (returned as UNRESOLVED marker -> caller marks class UNPROVEN)."""
+    """Two-phase decoding of a code object body.  Returns
+        (result: {field_key: {default,type,evidence_offset_range,path}},
+         unresolved: [(kind_or_key, offset)])
+
+    Phase A (exact producer mapping) is the ONLY class-level gate and is independent
+    of default constancy: its BUILD_CONST_KEY_MAP value-count is exact on Windows
+    (Actor 22/22, Props 11/11, Data 26/26).  Phase B decodes defaults PER-KEY with
+    STRUCTURED CALL parsing (callable/positional/kwargs) -- a non-target key whose
+    default is a complex runtime Tunable object stays UNKNOWN and NEVER vetoes the
+    class or sibling targets; a target key that cannot be proven stays UNKNOWN too
+    (fail closed).  No key is ever guessed from a nearby LOAD_CONST.
+
+    on_first_failure is an OPT-IN observer forwarded verbatim to the producer map;
+    production (None) behaviour is unchanged."""
     result = {}
     unresolved = []
     n = len(seq)
@@ -549,7 +1054,6 @@ def decode_structure(seq, path_name, on_first_failure=None):
             i += 1
             continue
         count = getattr(seq[i], "arg", 1)
-        # the field-name tuple is the constant pushed immediately before
         j = i - 1
         while j >= 0 and _op(seq[j]) in ("NOP",):
             j -= 1
@@ -566,34 +1070,10 @@ def decode_structure(seq, path_name, on_first_failure=None):
             unresolved.append(("keytuple/count mismatch", _off(seq[i])))
             i += 1
             continue
-        # keys authoritative.  Recover the ordered top-level value PRODUCERS from
-        # BUILD_CONST_KEY_MAP's own stack semantics (forward symbolic evaluation).
-        call_idxs = _sim_value_producers(seq, j, len(keys), _off(seq[i]),
-                                         on_first_failure=on_first_failure)
-        if call_idxs is None:
-            unresolved.append(("stack-sim value recovery failed (unsupported/branchy "
-                              "body or arity mismatch)", _off(seq[i])))
-            i += 1
-            continue
-        ok = True
-        for idx_key in range(len(keys)):
-            key = keys[idx_key]
-            # floor = the previous top-level leaf's producing CALL so the default
-            # window for this leaf never reaches into the preceding value's packets.
-            floor = call_idxs[idx_key - 1] if idx_key > 0 else -1
-            dl = _leaf_default_ins(seq, call_idxs[idx_key], floor)
-            if dl is None:
-                ok = False
-                break
-            lit, loff = dl
-            result[key] = {
-                "default": lit,
-                "type": type(lit).__name__,
-                "evidence_offset_range": (loff, _off(seq[i])),
-                "path": path_name,
-            }
-        if not ok:
-            unresolved.append(("leaf default not a constant", _off(seq[i])))
+        fnd, per_k = _structured_owner_decode(seq, keys, path_name, j, i,
+                                              on_first_failure=on_first_failure)
+        result.update(fnd)
+        unresolved.extend(per_k)
         i += 1
     return result, unresolved
 

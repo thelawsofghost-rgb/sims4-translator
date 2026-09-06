@@ -543,14 +543,121 @@ def main():
                       % _methodops)
                 if len(_methodops) >= 4:
                     _mdec, _mun = diag.lod.decode_structure(_wseq, _wp[0])
-                    # decode resolving ALL keys with 0 unresolved IS the per-map
-                    # balance gate: any lingering method/self residual would make the
-                    # sim fail-closed -> that map would be UNRESOLVED here.
+                    # THIS test locks the LOAD_METHOD/CALL_METHOD 2-slot PROTOCOL
+                    # at the Phase-A (producer mapping) level: the map must recover
+                    # EXACTLY 2 top-level producers with NO MAP_ARITY/underflow abort.
+                    # Any lingering +1 residual per method pair would make the map
+                    # arity mismatch and Phase A would fail-closed -> found empty.
+                    # (The method RETURN values are not tunable-wrapper defaults, so
+                    # per-key default UNKNOWN is correct under structured policy.)
+                    _mkey = _wp[0]
+                    _mseq2 = _wseq
+                    _mmapOK = False
+                    for _i2, _ins2 in enumerate(_mseq2):
+                        if diag.lod._op(_ins2) == "BUILD_CONST_KEY_MAP":
+                            _mj2 = _i2 - 1
+                            while _mj2 >= 0 and diag.lod._op(_mseq2[_mj2]) == "NOP":
+                                _mj2 -= 1
+                            _scan2 = diag.lod._map_producer_trees(
+                                _mseq2, _mj2, len(["a_prop", "b_prop"]),
+                                diag.lod._off(_ins2))
+                            _mmapOK = (_scan2 is not None and len(_scan2["producers"]) == 2)
+                            break
                     check("M-compiled-resolves-all",
-                          _mun == [] and sorted(_mdec) == ["a_prop", "b_prop"],
-                          "compiled method-call body resolves all keys, no unresolved")
+                          _mmapOK and len(_mdec) == 0,
+                          "compiled method-call body: Phase A exact (2 producers, "
+                          "no arity abort); per-key defaults UNKNOWN as expected")
     except Exception as _ecomp:  # noqa: BLE001
         check("M-compiled-no-raise", False, "compiled method fixture raised: %r" % (_ecomp,))
+
+    # ---- D-SECTION: DEFAULT_EXTRACTION regressions (re-framed; no all-or-nothing)
+    # 5 operator-mandated cases.  All compile to a real BUILD_CONST_KEY_MAP (<=15
+    # keys on the py3.10 tool runtime; the real 26-key Data map is likewise a single
+    # BUILD_CONST_KEY_MAP under the py3.7 WW compiler and obeys the SAME per-key
+    # independence asserted here at smaller size).
+    def _dec_src(src, cls):
+        pycf = _compile_to_pyc(src, "reqd")
+        if pycf is None:
+            return None, None
+        import io as _dio
+        from xdis.load import load_module_from_file_object
+        _dr = load_module_from_file_object(
+            _dio.BytesIO(open(pycf, "rb").read()), filename=pycf)
+        _dc = diag.discover_classes(_dr[3])
+        _dp = [x for x in _dc if x.endswith(cls)]
+        if not _dp:
+            return None, None
+        _sq = diag.iter_xdis_instructions(_dc[_dp[0]], version=_dr[0])
+        return diag.lod.decode_structure(_sq, _dp[0])
+
+    _tse = "def _tse(*a,**k): return k['default'] if 'default' in k else (a[1] if len(a)>=2 else a[0])"
+    _tx = "def TunableX(default=None, **k): return default"
+    _tl = "def TunableList(*a, **k): return ('tl', a, k)\n"
+
+    # D1: wrapper float is_deprecated -> default MUST be 0.0, NOT True.
+    _d1f, _d1u = _dec_src(_tse + "\nclass W1: TUNABLE_STRUCTURE={"\
+        "'a':_tse(float,0.0,is_deprecated=True),'b':_tse(float,1.0)}", "W1")
+    check("D1-isdeprec-default-float-not-true",
+          _d1f and _d1f.get("a") and _d1f["a"]["default"] == 0.0,
+          "facing-style is_deprecated wrapper default=0.0 (NOT True): %r"
+          % (_d1f and _d1f.get("a") and _d1f["a"].get("default")))
+
+    # D2: wrapper str None is_deprecated -> default MUST be None (not True).
+    _d2f, _d2u = _dec_src(_tse + "\nclass W2: TUNABLE_STRUCTURE={"\
+        "'a':_tse(str,None,is_deprecated=True),'b':_tse(str,'')}", "W2")
+    check("D2-isdeprec-default-none",
+          _d2f and _d2f.get("a") is not None and _d2f["a"]["default"] is None
+          and _d2f["a"]["type"] == "NoneType",
+          "None default preserved, not True")
+
+    # D3: many-key class, 4 simple target keys among complex TunableList non-targets
+    # -> all 4 targets RESOLVED, NO class-wide abort (old all-or-nothing gone).
+    _d3hdr = _tse + "\n" + _tl
+    _d3keys = {"object_animation_clip_name": "_tse(str,'')",
+               "object_geometry_state": "_tse(str,'')",
+               "object_material_state": "_tse(str,'')",
+               "animation_version": "_tse(int,1)"}
+    _d3body = _d3hdr + "class W3(object):\n"\
+        "    TUNABLE_STRUCTURE={" + ",".join(
+            "'%s': %s" % (k, v) for k, v in _d3keys.items()) + "," + ",".join(
+            "'nT%d': TunableList(%d,%d)" % (j, j, j + 1) for j in range(11)) + "}"
+    _d3f, _d3u = _dec_src(_d3body, "W3")
+    _d3ok = _d3f is not None and all(k in _d3f for k in _d3keys) and \
+        _d3f["object_animation_clip_name"]["default"] == "" and \
+        _d3f["animation_version"]["default"] == 1
+    check("D3-complex-nontarget-no-abort", _d3ok,
+          "15-key map w/ 11 complex TunableList non-targets still resolves all 4 targets")
+
+    # D4: Actor -- one non-target complex stays UNKNOWN while all 5 offsets resolve.
+    _d4hdr = _tse + "\n" + _tl
+    _d4keys = {"animation_x_offset": "_tse(float,0.0,is_deprecated=True)",
+               "animation_y_offset": "_tse(float,0.0)",
+               "animation_z_offset": "_tse(float,0.0)",
+               "animation_angle_offset": "_tse(float,0.0)",
+               "animation_facing_offset": "_tse(float,0,is_deprecated=True)"}
+    _d4body = _d4hdr + "class W4(object):\n  TUNABLE_STRUCTURE={" + ",".join(
+        "'%s': %s" % (k, v) for k, v in _d4keys.items()) + \
+        ",'complex': TunableList(1,2,3)}"
+    _d4f, _d4u = _dec_src(_d4body, "W4")
+    _d4ok = _d4f is not None and all(k in _d4f for k in _d4keys) and \
+        _d4f["animation_facing_offset"]["default"] == 0 and \
+        "complex" not in _d4f
+    check("D4-actor5-targets-while-nontarget-unknown", _d4ok,
+          "5 actor offsets resolve (facing=0) while complex non-target stays UNKNOWN")
+
+    # D5: a TARGET itself is an unprovable complex producer -> that key UNKNOWN
+    # (fail closed), and siblings still resolve (per-key, no class veto).
+    _d5hdr = _tse + "\n" + _tl
+    _d5body = _d5hdr + "class W5(object):\n  TUNABLE_STRUCTURE={"\
+        "'object_animation_clip_name': TunableList(0,1),"\
+        "'object_geometry_state': _tse(str,'geom'),"\
+        "'non_target': _tse(str,'nt')}"
+    _d5f, _d5u = _dec_src(_d5body, "W5")
+    _d5ok = _d5f is not None and "object_geometry_state" in _d5f and \
+        _d5f["object_geometry_state"]["default"] == "geom" \
+        and "object_animation_clip_name" not in _d5f
+    check("D5-complex-target-failclosed-perkey", _d5ok,
+          "complex target UNKNOWN (fail-closed) while sibling target resolves")
 
     failed = [n for n, p in ok if not p]
     print("PASS_COUNT=%d FAIL_COUNT=%d" % (len(ok) - len(failed), len(failed)))

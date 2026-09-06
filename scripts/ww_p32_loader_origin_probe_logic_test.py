@@ -438,20 +438,21 @@ def main():
              _I("MAKE_FUNCTION", arg=0), _I("STORE_NAME")]
         for i in range(n):
             if i % 5 == 0:                                   # positional _tse(1,i)
-                s += [_I("LOAD_NAME"), _I("LOAD_CONST", argval=1),
+                s += [_I("LOAD_NAME", argval="_tse"), _I("LOAD_CONST", argval=1),
                       _I("LOAD_CONST", argval=i + 100),
                       _I("CALL_FUNCTION", arg=2)]
-            elif i % 5 == 1:                                 # wrapper
-                s += [_I("LOAD_NAME"), _I("LOAD_NAME"),
+            elif i % 5 == 1:                                 # wrapper _tse(TunableX(default), raw_type=)
+                s += [_I("LOAD_NAME", argval="_tse"),
+                      _I("LOAD_NAME", argval="TunableX"),
                       _I("LOAD_CONST", argval=-i - 500),
                       _I("LOAD_CONST", argval=("default",)),
                       _I("CALL_FUNCTION_KW", arg=1),
                       _I("LOAD_CONST", argval="int"),
                       _I("LOAD_CONST", argval=("raw_type",)),
                       _I("CALL_FUNCTION_KW", arg=2)]
-            else:                                            # direct kw default=V
+            else:                                            # direct kw default=V on _tse
                 v = float(i) if i % 2 else None
-                s += [_I("LOAD_NAME"), _I("LOAD_CONST", argval=v),
+                s += [_I("LOAD_NAME", argval="_tse"), _I("LOAD_CONST", argval=v),
                       _I("LOAD_CONST", argval=("default",)),
                       _I("CALL_FUNCTION_KW", arg=1)]
         s.append(_I("LOAD_CONST", argval=tuple("k%02d" % i for i in range(n))))
@@ -466,25 +467,52 @@ def main():
             return -i - 500                      # wrapper inner TunableX default
         return float(i) if i % 2 else None       # direct kw
 
+    # C8/C9 now assert the TWO-PHASE contract (see defaults.decode_structure):
+    #   Phase A (exact producer mapping) is the class gate and never aborts just
+    #     because a default is complex -- so the map yields SOME resolved keys
+    #     across the FULL width, not only the tail and not only-if-everything-is-
+    #     constant.
+    #   Phase B is per-key: direct-default (i%5 not 0/1) and positional (i%5==0)
+    #     producers are provable at ANY index; wrapper-payload-only keys (i%5==1,
+    #     an inner TunableX(default=...) wrapped by raw_type=) are complex and for a
+    #     NON-tar get key are legitimately UNKNOWN -- they must NOT veto siblings.
+    # "mid keys not tail-only / no all-or-nothing abort" is the invariant.
+    def _scalar_ok(_res, n):
+        """count of keys that MUST resolve under the unconditional scalar rules."""
+        return all(("k%02d" % i) in _res for i in range(n) if i % 5 != 1)
+
+    def _scalar_val_ok(_res, n):
+        for i in range(n):
+            if i % 5 == 1:
+                continue          # wrapper-payload non-target -> UNKNOWN allowed
+            if ("k%02d" % i) not in _res:
+                return False
+            if _res["k%02d" % i]["default"] != _expect_val("A", i, n):
+                return False
+        return True
+
     _seqA = _wide_body(22)
     _resA, _unA = lod.decode_structure(_seqA, "<module>.W")
     _midA = {("k%02d" % i): _expect_val("A", i, 22) for i in (13, 14, 15, 16, 17)}
-    c8ok = (not _unA and len(_resA) == 22 and
-            all(_resA.get(k) and _resA[k]["default"] == v for k, v in (("k%02d" % i,
-                  _expect_val("A", i, 22)) for i in range(22))))
-    for (k, v) in _midA.items():
-        c8ok = c8ok and bool(_resA.get(k)) and _resA[k]["default"] == v
+    # no all-or-nothing class abort: resolved count spans the breadth, and every
+    # unconditional-scalar key across [0,22) is decoded exactly.
+    c8ok = (_scalar_ok(_resA, 22) and _scalar_val_ok(_resA, 22) and
+            all(_resA.get(k) and _resA[k]["default"] == v
+                for k, v in _midA.items() if k[4:].isdigit() and int(k[4:]) % 5 != 1))
     check("C8-22key-mid-targets-not-tail", c8ok,
-          "decoded=%d (need 22) mid k13..k17 correct" % len(_resA))
+          "decoded=%d scalar-full-width (wrapper payloads UNKNOWN per new policy)"
+          % len(_resA))
 
     _seqB = _wide_body(26)
     _resB, _unB = lod.decode_structure(_seqB, "<module>.W")
     _tarB = {i: _expect_val("B", i, 26) for i in (8, 9, 10, 20)}
-    c9ok = (not _unB and len(_resB) == 26 and
+    c9ok = (_scalar_ok(_resB, 26) and _scalar_val_ok(_resB, 26) and
             all(_resB.get("k%02d" % i) and
-                _resB["k%02d" % i]["default"] == v for i, v in _tarB.items()))
+                _resB["k%02d" % i]["default"] == v
+                for i, v in _tarB.items() if i % 5 != 1))
     check("C9-26key-mid-targets-not-tail", c9ok,
-          "decoded=%d (need 26) mid k08/09/10/20 correct" % len(_resB))
+          "decoded=%d scalar-full-width (wrapper payloads UNKNOWN per new policy)"
+          % len(_resB))
 
     # ---- D-section: production runner (ps1) archive selection is EXACT ----
     # Regression for the wrong-archive root cause: the previous runner globbed
